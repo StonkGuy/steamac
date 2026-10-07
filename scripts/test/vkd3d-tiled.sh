@@ -21,7 +21,8 @@
 #
 # Env: S (default work/scratch/vkd3d-tiled), SSH_PORT (default 2241), VULKAN_DRIVER
 # (kosmickrisp|moltenvk, default kosmickrisp), TEST_TIMEOUT (s per test, default 300),
-# GUEST_ENV (extra env for the tests, e.g. "VKD3D_DEBUG=trace").
+# GUEST_ENV (extra env for the tests, e.g. "VKD3D_DEBUG=trace"); start passes its environment
+# (e.g. MESA_KK_EXPERIMENTAL=image_view_min_lod) to the VM and its Vulkan driver.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
@@ -99,11 +100,13 @@ start() {
         --vulkan-driver "${VULKAN_DRIVER:-kosmickrisp}" --no-crash-reports \
         --log "$log.console" > "$log" 2>&1 < /dev/null &
     echo $! > "$vm/vm.pid"
+    echo "MESA_KK_EXPERIMENTAL=${MESA_KK_EXPERIMENTAL:-} MESA_KK_DEBUG=${MESA_KK_DEBUG:-}" > "$vm/vm.env"
     ln -sf "$(basename "$log")" "$vm/vm.log"
     local t=0
-    until ssh_g true 2>/dev/null; do
+    # boot finished (not just sshd up): systemd reports running/degraded
+    until [[ $(ssh_g 'systemctl is-system-running' 2>/dev/null) =~ ^(running|degraded) ]]; do
         kill -0 "$(cat "$vm/vm.pid")" 2>/dev/null || { tail -20 "$log"; exit 1; }
-        sleep 3; t=$((t + 3)); ((t < 300)) || { echo "no SSH after 300 s ($log)" >&2; exit 1; }
+        sleep 3; t=$((t + 3)); ((t < 300)) || { echo "guest not up after 300 s ($log)" >&2; exit 1; }
     done
     echo "[vkd3d-tiled] VM up (pid $(cat "$vm/vm.pid"), SSH $PORT, log $log)"
 }
@@ -126,7 +129,7 @@ run() {
     for i in 1 2 3; do ssh_g 'mkdir -p ~/vkd3d-tiled' && break; sleep 3; done
     (cd "$S/out/bin" && COPYFILE_DISABLE=1 tar --no-xattrs -cf - .) | ssh_g 'tar -xf - -C ~/vkd3d-tiled'
     {
-        echo "== host: macOS $(sw_vers -productVersion), driver ${VULKAN_DRIVER:-kosmickrisp}," \
+        echo "== host: macOS $(sw_vers -productVersion), driver ${VULKAN_DRIVER:-kosmickrisp}, $(cat "$S/vm/vm.env" 2>/dev/null)," \
             "$(stat -f '%Sm %N' "$REPO"/work/out/host/lib/libvulkan_kosmickrisp*.dylib 2>/dev/null | head -1)"
         echo "== vkd3d-proton $VKD3D_PROTON_COMMIT"
         echo "== vulkaninfo"
