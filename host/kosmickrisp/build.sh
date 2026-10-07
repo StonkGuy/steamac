@@ -58,6 +58,11 @@
 #              resource: an unmap ending a vkQueueBindSparse left the page mapped (vkd3d-proton's
 #              test_update_tile_mappings_remap_stress). A bind submit that unmapped buffer pages ends by
 #              mapping the queue's resident one page buffer.
+#   0031       steamac: texel buffer views of sparse buffers. Metal makes no texture from a placement sparse
+#              buffer (nil; vkd3d-proton's typed views of reserved buffers, ClearUnorderedAccessViewUint, lost
+#              the Venus context): views are placement sparse texture buffers from the page below the view,
+#              mapped like the buffer's pages (recorded per buffer, mapped heaps retained) at creation and on
+#              every later bind.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver

@@ -674,6 +674,123 @@ static void buffer_remap_test(void)
 	vkDestroyBuffer(dev, sparse, NULL);
 }
 
+/* Texel buffer views of a sparse buffer (vkd3d-proton's typed views of reserved buffers; its ClearUnorderedAccessViewUint
+ * makes one): views created before and after binds, at texel offsets inside a page, following later binds and unmaps
+ * (one ending the vkQueueBindSparse), reads through storage/uniform texel buffers agree with the buffer's pages. */
+static void bind_buffer_pages(VkBuffer buffer, const VkSparseMemoryBind *binds, uint32_t count)
+{
+	VkSparseBufferMemoryBindInfo info = { buffer, count, binds };
+	VkBindSparseInfo bi = { VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .bufferBindCount = 1, .pBufferBinds = &info };
+	CK(vkQueueBindSparse(sparse_queue, 1, &bi, VK_NULL_HANDLE));
+	CK(vkQueueWaitIdle(sparse_queue));
+}
+static VkBufferView texel_view(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range)
+{
+	VkBufferViewCreateInfo ci = { VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = buffer, .format = VK_FORMAT_R32_UINT,
+		.offset = offset, .range = range };
+	VkBufferView v;
+	CK(vkCreateBufferView(dev, &ci, NULL, &v));
+	return v;
+}
+struct TexelPush { uint32_t count, mode; };
+/* Runs sparse_texel.comp over `count` texels of `view` (mode as in the shader) and returns the output words. */
+static uint32_t *texel_run(struct Pipeline *p, struct Buffer *out, VkBufferView view, uint32_t count, uint32_t mode)
+{
+	VkDescriptorBufferInfo ob = { out->buffer, 0, VK_WHOLE_SIZE };
+	VkWriteDescriptorSet writes[] = {
+		{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = p->set, .dstBinding = 0, .descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, .pTexelBufferView = &view },
+		{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = p->set, .dstBinding = 1, .descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &ob },
+		{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = p->set, .dstBinding = 2, .descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, .pTexelBufferView = &view },
+	};
+	vkUpdateDescriptorSets(dev, ARRAY_SIZE(writes), writes, 0, NULL);
+	memset(out->map, 0xcd, out->size);
+	host_sync(out, 0);
+	VkCommandBuffer cmd = begin();
+	barrier(cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+	struct TexelPush push = { count, mode };
+	dispatch(cmd, p, &push, sizeof(push), (count + 63) / 64, 1);
+	barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+	submit(cmd, VK_NULL_HANDLE, 0, 0);
+	host_sync(out, 1);
+	return out->map;
+}
+static void buffer_view_test(void)
+{
+	const uint32_t pages = 8, texels_per_page = (uint32_t)(PAGE / 4);
+	VkBuffer sparse = buffer_create(pages * PAGE, VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT |
+		VK_BUFFER_CREATE_SPARSE_ALIASED_BIT);
+	VkMemoryRequirements mr;
+	vkGetBufferMemoryRequirements(dev, sparse, &mr);
+	VkDeviceMemory mem = allocate(4 * PAGE, memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+	struct Buffer out = host_buffer(pages * PAGE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	VkDescriptorType types[] = {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER};
+	struct Pipeline p = pipeline_create("sparse_texel.comp.spv", types, 3, sizeof(struct TexelPush));
+	/* Buffer page -> memory page (-1 unbound); view A at texel 100 of page 1 over 5 pages, made before any bind. */
+	int map[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+	const VkDeviceSize a_offset = PAGE + 400, b_offset = 2 * PAGE + 8;
+	const uint32_t a_count = 5 * texels_per_page, b_count = 4 * texels_per_page;
+	VkBufferView a = texel_view(sparse, a_offset, a_count * 4ull);
+	VkSparseMemoryBind first[] = {
+		{ .resourceOffset = PAGE, .size = 2 * PAGE, .memory = mem, .memoryOffset = 0 },
+		{ .resourceOffset = 4 * PAGE, .size = PAGE, .memory = mem, .memoryOffset = 2 * PAGE },
+	};
+	bind_buffer_pages(sparse, first, ARRAY_SIZE(first));
+	map[1] = 0, map[2] = 1, map[4] = 2;
+	/* Stores through view A land in bound pages only. */
+	texel_run(&p, &out, a, a_count, 1000);
+	uint32_t bad = 0;
+	uint32_t *w = texel_run(&p, &out, a, a_count, 0);
+	for (uint32_t i = 0; i < a_count; i++) {
+		uint32_t page = (uint32_t)((a_offset + i * 4ull) / PAGE), want = map[page] >= 0 ? 1000 + i : 0;
+		if (w[i] != want && bad++ < 4) printf("     view A imageLoad texel %u (page %u) expected %u got %u\n", i, page, want, w[i]);
+	}
+	check(!bad, "sparse texel buffer view made before binds: imageStore/imageLoad of %u texels, bound pages hold the stores, unbound read 0: %u mismatches", a_count, bad);
+	/* View B made after the binds reads the same pages through a uniform texel buffer. */
+	VkBufferView b = texel_view(sparse, b_offset, b_count * 4ull);
+	bad = 0;
+	w = texel_run(&p, &out, b, b_count, 1);
+	for (uint32_t i = 0; i < b_count; i++) {
+		uint64_t byte = b_offset + i * 4ull;
+		uint32_t page = (uint32_t)(byte / PAGE), want = map[page] >= 0 ? 1000 + (uint32_t)((byte - a_offset) / 4) : 0;
+		if (w[i] != want && bad++ < 4) printf("     view B texelFetch texel %u (page %u) expected %u got %u\n", i, page, want, w[i]);
+	}
+	check(!bad, "sparse texel buffer view made after binds: texelFetch of %u texels: %u mismatches", b_count, bad);
+	/* Move memory page 1 from buffer page 2 to page 5, then unmap page 4 (last bind of the call). */
+	VkSparseMemoryBind second[] = {
+		{ .resourceOffset = 2 * PAGE, .size = PAGE, .memory = VK_NULL_HANDLE },
+		{ .resourceOffset = 5 * PAGE, .size = PAGE, .memory = mem, .memoryOffset = PAGE },
+		{ .resourceOffset = 4 * PAGE, .size = PAGE, .memory = VK_NULL_HANDLE },
+	};
+	bind_buffer_pages(sparse, second, ARRAY_SIZE(second));
+	map[2] = -1, map[5] = 1, map[4] = -1;
+	const struct { VkBufferView view; VkDeviceSize offset; uint32_t count, mode; const char *name; } reads[] = {
+		{ a, a_offset, a_count, 0, "view A imageLoad" }, { b, b_offset, b_count, 1, "view B texelFetch" },
+	};
+	for (uint32_t r = 0; r < ARRAY_SIZE(reads); r++) {
+		bad = 0;
+		w = texel_run(&p, &out, reads[r].view, reads[r].count, reads[r].mode);
+		for (uint32_t i = 0; i < reads[r].count; i++) {
+			uint64_t byte = reads[r].offset + i * 4ull;
+			uint32_t page = (uint32_t)(byte / PAGE), want = 0;
+			/* page 5 now shows memory page 1, written through buffer page 2 */
+			if (page == 1) want = 1000 + (uint32_t)((byte - a_offset) / 4);
+			else if (page == 5) want = 1000 + (uint32_t)((byte - 3 * PAGE - a_offset) / 4);
+			if (w[i] != want && bad++ < 4) printf("     %s texel %u (page %u) expected %u got %u\n", reads[r].name, i, page, want, w[i]);
+		}
+		check(!bad, "sparse texel buffer views follow rebinds and unmaps: %s, %u mismatches", reads[r].name, bad);
+	}
+	vkDestroyBufferView(dev, a, NULL);
+	vkDestroyBufferView(dev, b, NULL);
+	pipeline_destroy(&p);
+	buffer_destroy(&out);
+	vkDestroyBuffer(dev, sparse, NULL);
+	vkFreeMemory(dev, mem, NULL);
+}
+
 static float minmax_value(uint32_t x, uint32_t y, uint32_t level)
 {
 	/* Deliberately neither monotonic nor symmetric; UNORM data is exactly byte/255. */
@@ -929,6 +1046,7 @@ int main(int argc, char **argv)
 		else {
 			if (!setjmp(recovery)) buffer_test();
 			if (!setjmp(recovery)) buffer_remap_test();
+			if (!setjmp(recovery)) buffer_view_test();
 		}
 	}
 	if (do_minmax) {

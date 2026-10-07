@@ -82,8 +82,8 @@
 #    per-layer mip tails, strict unbound image/buffer reads and shader residency, minimum-LOD clamps,
 #    binary/timeline sparse bind ordering, page relocation and image/plain-buffer aliases; vkd3d-proton's remap stress
 #    (100 rounds of tile range updates batched like its UpdateTileMappings: NULL ranges ending a vkQueueBindSparse must
-#    unmap); R32/R8 sampler MIN/MAX reduction over bilinear footprints and adjacent mip levels, with weighted-average
-#    controls.
+#    unmap); texel buffer views of sparse buffers made before and after binds, following rebinds and unmaps; R32/R8
+#    sampler MIN/MAX reduction over bilinear footprints and adjacent mip levels, with weighted-average controls.
 #    imageLoad residency through single-level storage views of levels > 0 is printed as KNOWN, not failed: Metal
 #    reports residency of a view with baseMipLevel b for the image's level lod instead of b + lod (values are right).
 # All run with Metal API validation in assert mode (MTL_DEBUG_LAYER), so a Metal validation error
