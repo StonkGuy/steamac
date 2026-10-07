@@ -28,7 +28,7 @@ static uint32_t family, sparse_family;
 static VkCommandPool pool;
 static VkPhysicalDeviceMemoryProperties memory_props;
 static const char *dir;
-static int failures, recovering;
+static int failures, recovering, view_min_lod;
 static jmp_buf recovery;
 
 static void abort_test(void)
@@ -634,21 +634,45 @@ static void frag_draw(VkImageView texture, VkSampler sampler, float bias, struct
 		vkFreeMemory(dev, targets[i].memory, NULL);
 	}
 }
-static void grad_check(struct Buffer *out, const VkClearColorValue colors[2], const char *name, uint32_t linear, uint32_t level)
+static void grad_check(struct Buffer *out, const VkClearColorValue colors[3], const char *name, uint32_t linear, uint32_t level)
 {
 	const struct GradResult *r = out->map;
 	uint32_t bad = 0;
 	for (uint32_t y = 0; y < 256; y++) for (uint32_t x = 0; x < 256; x++) {
-		int bound = level == 1 || x / 128 == y / 128;
+		/* level 2: a texel fetch below the view's minimum LOD reads zero (its residency is not checked) */
+		int bound = level == 1 || (level == 0 && x / 128 == y / 128);
 		const struct GradResult *g = &r[y * 256 + x];
-		int ok = g->resident[0] == (uint32_t)bound;
+		int ok = level == 2 || g->resident[0] == (uint32_t)bound;
 		for (uint32_t i = 0; i < 4; i++) ok &= fabsf(g->color[i] - (bound ? colors[level].float32[i] : 0.0f)) < 0.01f;
 		if (!ok && bad++ < 3)
 			printf("     (%u,%u) %s: expected L%u %g resident=%d, got (%g,%g,%g,%g) resident=%u\n", x, y, name, level,
 				bound ? colors[level].float32[0] : 0.0f, bound, g->color[0], g->color[1], g->color[2], g->color[3], g->resident[0]);
 	}
-	check(!bad, "RGBA8 2-level %s mip %s: level %u, 65536 texels, %u wrong values or residency",
-		name, linear ? "LINEAR" : "NEAREST", level, bad);
+	check(!bad, "RGBA8 2-level %s mip %s: %s, 65536 texels, %u wrong values or residency",
+		name, linear ? "LINEAR" : "NEAREST", level == 2 ? "zero" : level ? "level 1" : "level 0", bad);
+}
+static void grad_descriptors(struct Pipeline *p, VkSampler sampler, VkImageView view, struct Buffer *out)
+{
+	VkDescriptorImageInfo ii = { sampler, view, VK_IMAGE_LAYOUT_GENERAL };
+	VkDescriptorBufferInfo ob = { out->buffer, 0, VK_WHOLE_SIZE };
+	VkWriteDescriptorSet writes[] = {
+		{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = p->set, .dstBinding = 0, .descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii },
+		{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = p->set, .dstBinding = 1, .descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &ob },
+	};
+	vkUpdateDescriptorSets(dev, ARRAY_SIZE(writes), writes, 0, NULL);
+}
+static void grad_run(struct Pipeline *p, struct Buffer *out, const struct GradPush *push)
+{
+	memset(out->map, 0xcd, out->size);
+	host_sync(out, 0);
+	VkCommandBuffer cmd = begin();
+	barrier(cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+	dispatch(cmd, p, push, sizeof(*push), 256 / 8, 256 / 8);
+	barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+	submit(cmd, VK_NULL_HANDLE, 0, 0);
+	host_sync(out, 1);
 }
 static void grad_test(void)
 {
@@ -665,7 +689,7 @@ static void grad_test(void)
 	VkBindSparseInfo bi = { VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .imageBindCount = 1, .pImageBinds = &binds };
 	CK(vkQueueBindSparse(sparse_queue, 1, &bi, VK_NULL_HANDLE));
 	CK(vkQueueWaitIdle(sparse_queue));
-	const VkClearColorValue colors[2] = { {{0.2f, 0.4f, 0.6f, 0.8f}}, {{0.5f, 0.5f, 0.5f, 0.5f}} };
+	const VkClearColorValue colors[3] = { {{0.2f, 0.4f, 0.6f, 0.8f}}, {{0.5f, 0.5f, 0.5f, 0.5f}}, {{0}} };
 	VkCommandBuffer cmd = begin();
 	image_barrier(cmd, image, 2, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
 		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
@@ -702,24 +726,9 @@ static void grad_test(void)
 			.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .minLod = -16, .maxLod = 16 };
 		VkSampler sampler;
 		CK(vkCreateSampler(dev, &sci, NULL, &sampler));
-		VkDescriptorImageInfo ii = { sampler, view, VK_IMAGE_LAYOUT_GENERAL };
-		VkDescriptorBufferInfo ob = { out.buffer, 0, VK_WHOLE_SIZE };
-		VkWriteDescriptorSet writes[] = {
-			{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = p.set, .dstBinding = 0, .descriptorCount = 1,
-				.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii },
-			{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = p.set, .dstBinding = 1, .descriptorCount = 1,
-				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &ob },
-		};
-		vkUpdateDescriptorSets(dev, ARRAY_SIZE(writes), writes, 0, NULL);
+		grad_descriptors(&p, sampler, view, &out);
 		for (uint32_t c = 0; c < ARRAY_SIZE(cases); c++) {
-			memset(out.map, 0xcd, out.size);
-			host_sync(&out, 0);
-			cmd = begin();
-			barrier(cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-			dispatch(cmd, &p, &cases[c].push, sizeof(cases[c].push), 256 / 8, 256 / 8);
-			barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
-			submit(cmd, VK_NULL_HANDLE, 0, 0);
-			host_sync(&out, 1);
+			grad_run(&p, &out, &cases[c].push);
 			grad_check(&out, colors, cases[c].name, linear, cases[c].level);
 		}
 		/* Fragment shader samples with implicit LODs: one texel per pixel plus a bias */
@@ -729,6 +738,32 @@ static void grad_test(void)
 		for (uint32_t c = 0; c < ARRAY_SIZE(biases); c++) {
 			frag_draw(view, sampler, biases[c].bias, &out);
 			grad_check(&out, colors, biases[c].name, linear, biases[c].level);
+		}
+		/* vkd3d-proton's ResourceMinLODClamp: a view with VkImageViewMinLodCreateInfoEXT::minLod 1 over the partly
+		 * bound level 0 samples the fully bound level 1, and fetches of level 0 are out of the view. */
+		if (!view_min_lod) {
+			check(0, "VK_EXT_image_view_min_lod unavailable: sparse views with a minimum LOD not tested");
+		} else {
+			VkImageViewMinLodCreateInfoEXT min_lod = { VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT, .minLod = 1.0f };
+			VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = &min_lod, .image = image,
+				.viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+				.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 2, 0, 1 } };
+			VkImageView clamped;
+			CK(vkCreateImageView(dev, &vci, NULL, &clamped));
+			const struct { const char *name; struct GradPush push; uint32_t level; } min_lod_cases[] = {
+				{ "view minLod 1, LOD 0", { {0, 0}, {0, 0}, 0, 0, 2 }, 1 },
+				{ "view minLod 1, gradient 0", { {0, 0}, {0, 0}, 0, 0, 0 }, 1 },
+				{ "view minLod 1, texelFetch level 1", { {0, 0}, {0, 0}, 1, 0, 3 }, 1 },
+				{ "view minLod 1, texelFetch level 0 (out of the view)", { {0, 0}, {0, 0}, 0, 0, 3 }, 2 },
+			};
+			grad_descriptors(&p, sampler, clamped, &out);
+			for (uint32_t c = 0; c < ARRAY_SIZE(min_lod_cases); c++) {
+				grad_run(&p, &out, &min_lod_cases[c].push);
+				grad_check(&out, colors, min_lod_cases[c].name, linear, min_lod_cases[c].level);
+			}
+			frag_draw(clamped, sampler, 0, &out);
+			grad_check(&out, colors, "view minLod 1, fragment Sample", linear, 1);
+			vkDestroyImageView(dev, clamped, NULL);
 		}
 		vkDestroySampler(dev, sampler, NULL);
 	}
@@ -1187,7 +1222,8 @@ int main(int argc, char **argv)
 	uint32_t count = 1;
 	VkResult r = vkEnumeratePhysicalDevices(instance, &count, &pd);
 	require(r >= 0 && count, "no physical device");
-	VkPhysicalDeviceVulkan12Features f12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+	VkPhysicalDeviceImageViewMinLodFeaturesEXT fmin = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT };
+	VkPhysicalDeviceVulkan12Features f12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &fmin };
 	VkPhysicalDeviceFeatures2 f = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f12 };
 	vkGetPhysicalDeviceFeatures2(pd, &f);
 	VkPhysicalDeviceVulkan12Properties p12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES };
@@ -1262,8 +1298,23 @@ int main(int argc, char **argv)
 	};
 	VkPhysicalDeviceVulkan12Features enabled12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
 		.timelineSemaphore = f12.timelineSemaphore, .samplerFilterMinmax = f12.samplerFilterMinmax };
+	/* vkd3d-proton's ResourceMinLODClamp (without it, it rebases views and reports a wrong level) */
+	uint32_t ext_count = 0;
+	vkEnumerateDeviceExtensionProperties(pd, NULL, &ext_count, NULL);
+	VkExtensionProperties *exts = calloc(ext_count, sizeof(*exts));
+	require(exts != NULL, "allocate extension properties");
+	vkEnumerateDeviceExtensionProperties(pd, NULL, &ext_count, exts);
+	for (uint32_t i = 0; i < ext_count; i++)
+		view_min_lod |= !strcmp(exts[i].extensionName, VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME) && fmin.minLod;
+	free(exts);
+	printf("     VK_EXT_image_view_min_lod minLod=%d\n", view_min_lod);
+	VkPhysicalDeviceImageViewMinLodFeaturesEXT enabled_min = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT,
+		.minLod = VK_TRUE };
+	if (view_min_lod) enabled12.pNext = &enabled_min;
+	const char *min_lod_ext = VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME;
 	VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &enabled12, .pEnabledFeatures = &enabled,
-		.queueCreateInfoCount = sparse_present && family != sparse_family ? 2 : 1, .pQueueCreateInfos = queues };
+		.queueCreateInfoCount = sparse_present && family != sparse_family ? 2 : 1, .pQueueCreateInfos = queues,
+		.enabledExtensionCount = view_min_lod ? 1 : 0, .ppEnabledExtensionNames = &min_lod_ext };
 	CK(vkCreateDevice(pd, &dci, NULL, &dev));
 	vkGetDeviceQueue(dev, family, 0, &queue);
 	if (sparse_present) vkGetDeviceQueue(dev, sparse_family, 0, &sparse_queue);

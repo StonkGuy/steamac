@@ -22,7 +22,7 @@
 # Env: S (default work/scratch/vkd3d-tiled), SSH_PORT (default 2241), VULKAN_DRIVER
 # (kosmickrisp|moltenvk, default kosmickrisp), TEST_TIMEOUT (s per test, default 300),
 # GUEST_ENV (extra env for the tests, e.g. "VKD3D_DEBUG=trace"); start passes its environment
-# (e.g. MESA_KK_EXPERIMENTAL=image_view_min_lod) to the VM and its Vulkan driver.
+# (e.g. MESA_KK_DEBUG=msl) to the VM and its Vulkan driver.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)

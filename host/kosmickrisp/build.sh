@@ -67,6 +67,10 @@
 #              but reported the missing level past it not resident (vkd3d-proton's texture_feedback
 #              SampleGrad); sparse samples limit the LOD to the view's last level (level/min_lod_clamp/the
 #              implicit LOD through the bias) and take the last level's residency for gradients past it.
+#   0033       steamac: VK_EXT_image_view_min_lod advertised by default (was MESA_KK_EXPERIMENTAL=image_view_min_lod;
+#              hk's lowering: a 16-bit descriptor load and a max per sample when minLod is enabled, fetches below
+#              the minimum LOD read zero). vkd3d-proton's ResourceMinLODClamp needs it (test_view_min_lod 706/706;
+#              without it vkd3d-proton rebases views, 10 failures).
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver

@@ -7,7 +7,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D tex;
 struct Result { vec4 color; uvec4 resident; };
 layout(std430, set = 0, binding = 1) buffer Output { Result results[]; };
-// mode 0: gradients, 1: gradients + MinLod, 2: explicit LOD
+// mode 0: gradients, 1: gradients + MinLod, 2: explicit LOD, 3: texelFetch of level lod
 layout(push_constant) uniform Params { vec2 dx; vec2 dy; float lod; float minLod; uint mode; } p;
 void main()
 {
@@ -19,7 +19,9 @@ void main()
         code = sparseTextureGradARB(tex, uv, p.dx, p.dy, c);
     else if (p.mode == 1)
         code = sparseTextureGradClampARB(tex, uv, p.dx, p.dy, p.minLod, c);
-    else
+    else if (p.mode == 2)
         code = sparseTextureLodARB(tex, uv, p.lod, c);
+    else
+        code = sparseTexelFetchARB(tex, ivec2(xy) >> int(p.lod), int(p.lod), c);
     results[xy.y * 256 + xy.x] = Result(c, uvec4(sparseTexelsResidentARB(code) ? 1u : 0u));
 }
