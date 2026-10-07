@@ -265,6 +265,7 @@ mvk_version=$(sed -n 's/.*"api_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1
 	echo "  0034 = steamac: VK_NULL_HANDLE descriptor sets in vkCmdBindDescriptorSets bind nothing and take no"
 	echo "         dynamic offsets (graphics pipeline libraries; Counter-Strike 2's null fourth set crashed the VM"
 	echo "         process at submission, STEAMAC-25)"
+	echo "  0035 = steamac: the color attachments' numeric types by location go to SPIRV-Cross (0033)"
 	echo "SPIRV-Cross patches (host/moltenvk/patches/spirv-cross):"
 	for p in "$here"/patches/spirv-cross/*.patch; do echo "  $(basename "$p")"; done
 	echo "  0001/0002 = KhronosGroup/SPIRV-Cross 35f52882+da223760 and 0706157e (PR #2666), library only"
@@ -333,6 +334,9 @@ mvk_version=$(sed -n 's/.*"api_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1
 	echo "         helpers (STEAMAC-1Q), including nested callers; check terminators outside the instruction loop"
 	echo "  0032 = steamac: rename user-defined log10 helpers, which clash with metal::log10(float)"
 	echo "         (STEAMAC-1R, compute ACES spline); preserve the helper implementation and callsites"
+	echo "  0033 = steamac: fragment outputs of another numeric type than their color attachment are declared with"
+	echo "         the attachment's type and bit cast (Metal: 'output of type uint4 is not compatible with a"
+	echo "         MTLPixelFormatR32Sint color attachment', STEAMAC-2C)"
 	echo
 	echo "Geometry shader emulation limits: no GS instancing (Invocations > 1); B8G8R8A8 and packed"
 	echo "  (2_10_10_10, 11_11_10) vertex formats are not swizzled/unpacked by the object stage; vertex outputs are"

@@ -71,15 +71,19 @@
 # 17. msl_helpers.c: fragment helpers with an OpKill-only block, directly and through a nested caller
 #    (STEAMAC-1Q): discard left-half pixels, render right-half colors, suppress writes after discard;
 #    a compute helper named log10(float) (STEAMAC-1R), its implementation's values read back.
-# 18. device_lost.c (KosmicKrisp only): a device loss must be printed on stderr (STEAMAC-G: a release build lost
+# 18. frag_output.c: fragment outputs of another numeric type than their color attachment (STEAMAC-2C: an unsigned
+#    output to R32_SINT failed in Metal): signedness changes, a padded scalar, location 1 next to a matching output,
+#    an output array indexed dynamically, float to R32_UINT and ivec4 to RGBA8_UNORM (bits checked on MoltenVK only),
+#    two outputs packed into one location's components; every pipeline must be created and write the output's bits.
+# 19. device_lost.c (KosmicKrisp only): a device loss must be printed on stderr (STEAMAC-G: a release build lost
 #    the device silently and Venus only logged "vkQueueSubmit resulted in CS error"); the runtime's queue-loss
 #    path (a timeline signal of value 0) stands in for a failed Metal command buffer, which can't be provoked.
-# 19. host_memory.c: 16 KiB host-visible allocations as virglrenderer makes them (POSIX shm imported as host memory,
+# 20. host_memory.c: 16 KiB host-visible allocations as virglrenderer makes them (POSIX shm imported as host memory,
 #    the shm fd plus two dups per mapped allocation; STEAMAC-G: Left 4 Dead 2's context died after a blob export and
 #    shm_open failed): at a Finder launch's soft RLIMIT_NOFILE of 256 they run out of fds within 256 / 3 allocations,
 #    the driver never failing; at the limit steamac-vm raises itself to, 8192 live ones, 20000 free + allocate rounds and
 #    8192 live plain allocations of that type succeed, and every fd is closed after the frees.
-# 20. sparse.c (KosmicKrisp only): vkd3d-proton's Tiled Resources Tier 2 feature gate, standard 2D tiles and
+# 21. sparse.c (KosmicKrisp only): vkd3d-proton's Tiled Resources Tier 2 feature gate, standard 2D tiles and
 #    per-layer mip tails, strict unbound image/buffer reads and shader residency, minimum-LOD clamps,
 #    binary/timeline sparse bind ordering, page relocation and image/plain-buffer aliases; vkd3d-proton's remap stress
 #    (100 rounds of tile range updates batched like its UpdateTileMappings: NULL ranges ending a vkQueueBindSparse must
@@ -271,6 +275,9 @@ build descriptor_heap
 
 build msl_helpers
 "$work/msl_helpers" "$gspv"
+
+build frag_output
+"$work/frag_output" "$gspv"
 
 if [ "$driver" = kosmickrisp ]; then
 	build device_lost
