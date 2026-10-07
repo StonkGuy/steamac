@@ -78,9 +78,13 @@
 #    shm_open failed): at a Finder launch's soft RLIMIT_NOFILE of 256 they run out of fds within 256 / 3 allocations,
 #    the driver never failing; at the limit steamac-vm raises itself to, 8192 live ones, 20000 free + allocate rounds and
 #    8192 live plain allocations of that type succeed, and every fd is closed after the frees.
+# 20. sparse.c (KosmicKrisp only): vkd3d-proton's Tiled Resources Tier 2 feature gate, standard 2D tiles and
+#    per-layer mip tails, strict unbound image/buffer reads and shader residency, minimum-LOD clamps,
+#    binary/timeline sparse bind ordering, page relocation and image/plain-buffer aliases; R32/R8
+#    sampler MIN/MAX reduction over bilinear footprints and adjacent mip levels, with weighted-average controls.
 # All run with Metal API validation in assert mode (MTL_DEBUG_LAYER), so a Metal validation error
 # fails the run instead of aborting a VM later.
-# All must pass on MoltenVK. On KosmicKrisp all but 5 and 10 must pass (1 sizes the descriptor pool with
+# All applicable tests must pass on MoltenVK. On KosmicKrisp all but 5 and 10 must pass (1 sizes the descriptor pool with
 # combinedImageSamplerDescriptorCount like gamescope; 2 skips the VK_NULL_HANDLE binds, which virglrenderer no
 # longer passes to the driver; 9 without the MSL log, which is MoltenVK's; 13 expects (0, 0, 0, 0) past the end of
 # an RGBA8 view, MoltenVK returns alpha 1); not run there: 5 (Mesa !44928 is a draft: strip-GS transform feedback
@@ -259,3 +263,8 @@ fi
 
 build host_memory
 "$work/host_memory"
+
+if [ "$driver" = kosmickrisp ]; then
+	build sparse
+	"$work/sparse" "$gspv"
+fi

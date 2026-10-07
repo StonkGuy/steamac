@@ -1,0 +1,6 @@
+#version 460
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(std430, set = 0, binding = 1) writeonly buffer Output { float values[]; } dst;
+layout(push_constant) uniform Params { float u; float v; float lod; uint index; } p;
+void main() { dst.values[p.index] = textureLod(tex, vec2(p.u, p.v), p.lod).r; }

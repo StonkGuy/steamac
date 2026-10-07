@@ -1,0 +1,34 @@
+#version 460
+#extension GL_ARB_sparse_texture2 : require
+#extension GL_ARB_sparse_texture_clamp : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2DArray tex;
+layout(rgba8, set = 0, binding = 1) uniform readonly image2DArray img;
+struct Result { vec4 fetchValue; vec4 sampleValue; vec4 loadValue; uvec4 resident; };
+layout(std430, set = 0, binding = 2) buffer Output { Result results[]; };
+layout(push_constant) uniform Params { uint width; uint height; uint level; uint layer; uint mode; float minLod; } p;
+void main()
+{
+    uvec2 xy = gl_GlobalInvocationID.xy;
+    if (xy.x >= p.width || xy.y >= p.height) return;
+    uint index = xy.y * p.width + xy.x;
+    ivec3 pos = ivec3(xy, p.layer);
+    vec3 uv = vec3((vec2(xy) + 0.5) / vec2(p.width, p.height), p.layer);
+    Result r;
+    if (p.mode == 0) {
+        int a = sparseTexelFetchARB(tex, pos, int(p.level), r.fetchValue);
+        int b = sparseTextureLodARB(tex, uv, float(p.level), r.sampleValue);
+        int c = sparseImageLoadARB(img, pos, r.loadValue);
+        r.resident = uvec4(sparseTexelsResidentARB(a), sparseTexelsResidentARB(b), sparseTexelsResidentARB(c), 0);
+    } else {
+        // Compute has no implicit derivatives. MinLod is legal with Grad, not
+        // ExplicitLod: these unit-texel gradients request LOD 0 before clamping.
+        vec2 dx = vec2(1.0 / float(p.width), 0.0);
+        vec2 dy = vec2(0.0, 1.0 / float(p.height));
+        int a = sparseTextureGradClampARB(tex, uv, dx, dy, p.minLod, r.fetchValue);
+        r.sampleValue = textureGradClampARB(tex, uv, dx, dy, p.minLod);
+        r.loadValue = textureLod(tex, uv, 0.0);
+        r.resident = uvec4(sparseTexelsResidentARB(a), 0, 0, 0);
+    }
+    results[index] = r;
+}
