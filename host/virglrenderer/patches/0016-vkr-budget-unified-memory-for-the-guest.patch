@@ -1,7 +1,7 @@
 diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
 --- a/src/venus/vkr_physical_device.c
 +++ b/src/venus/vkr_physical_device.c
-@@ -172,6 +172,39 @@
+@@ -172,6 +172,43 @@
     physical_dev->min_imported_host_pointer_alignment =
        host_props.minImportedHostPointerAlignment;
  }
@@ -32,8 +32,12 @@ diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
 +   for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
 +      VkMemoryHeap *heap = &props->memoryHeaps[i];
 +      if (heap->flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT && heap->size > limit) {
-+         vkr_log("GPU budget: heap %u clamped from %" PRIu64 " to %" PRIu64 " bytes",
-+                 i, heap->size, limit);
++         /* Every guest Vulkan instance re-reads the properties: log the clamp once. */
++         static bool logged;
++         if (!logged)
++            vkr_log("GPU budget: heap %u clamped from %" PRIu64 " to %" PRIu64 " bytes",
++                    i, heap->size, limit);
++         logged = true;
 +         heap->size = limit;
 +      }
 +   }
