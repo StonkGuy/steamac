@@ -97,6 +97,14 @@
 #              heaps). Update-after-bind sets that get one after recording make the submission re-record the
 #              command buffer; one-time-submit buffers use the emulating program for them. MESA_KK_DEBUG=minmax
 #              logs reduction samplers, emulating/plain programs compiled and re-recordings.
+#   0037       steamac: query pools past Metal's limits. All occlusion queries of a device shared one visibility
+#              result buffer of 32768 (Metal's maximum visibility query offset, 256 KB), and every timestamp
+#              pool took counter heaps of its own while Metal allows 32 per process, which every guest device
+#              shares under virglrenderer: further pools failed to create, and Venus' next vkCmdBeginQuery /
+#              vkCmdResetQueryPool on one was a CS error (STEAMAC-G: Dota 2, Counter-Strike 2). Occlusion
+#              results live in chunks of 32768 created as needed (16 per device; a render pass writes the
+#              chunk of its active query, a query of another chunk restarts the Metal render pass); timestamp
+#              pools take 32-entry chunks of 32 process-wide counter heaps of 4096.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -271,6 +279,7 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0034 = steamac: residency of sparse loads through texel buffer views (residency texture per buffer)"
 	echo "  0035 = steamac: sparse residency through views with baseMipLevel > 0 (residency views from level 0), and of gathers"
 	echo "  0036 = steamac: sampler min/max emulation only for draws with a reduction sampler bound (second program)"
+	echo "  0037 = steamac: occlusion queries past one visibility buffer (chunks), timestamp pools on shared counter heaps"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."

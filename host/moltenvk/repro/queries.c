@@ -236,6 +236,131 @@ int main(int argc, char **argv)
 	       (unsigned long long)ts[1][1], (unsigned long long)ts[0][0], (unsigned long long)ts[1][0],
 	       (unsigned long long)ts[2][1]);
 	fails += !ts_ok;
+
+	/* Metal allows 32 counter heaps per process (MTLCounterSampleBuffer / MTL4CounterHeap), and under virglrenderer
+	 * every guest application's device lives in one process: one heap per timestamp pool left the 33rd pool of the
+	 * whole VM uncreatable (Venus lost it, the guest's next use of it was a CS error). 24 pools of one query on this
+	 * device and 24 on a second one, the last of each written and read back. */
+	{
+		VkDevice dev2;
+		CK(vkCreateDevice(pd, &dci, NULL, &dev2));
+		VkQueue queue2;
+		vkGetDeviceQueue(dev2, 0, 0, &queue2);
+		VkDevice devs[2] = { dev, dev2 };
+		VkQueue queues[2] = { queue, queue2 };
+		enum { NP = 24 };
+		VkQueryPool tps[2][NP];
+		int created = 0, ok = 1;
+		VkResult cr = VK_SUCCESS;
+		VkQueryPoolCreateInfo one = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+			.queryCount = 1 };
+		for (int d = 0; d < 2; d++)
+			for (int i = 0; i < NP; i++) {
+				tps[d][i] = VK_NULL_HANDLE;
+				if (cr == VK_SUCCESS && (cr = vkCreateQueryPool(devs[d], &one, NULL, &tps[d][i])) == VK_SUCCESS)
+					created++;
+				else
+					tps[d][i] = VK_NULL_HANDLE;
+			}
+		uint64_t last[2][2] = { { 0 } };
+		for (int d = 0; d < 2 && cr == VK_SUCCESS; d++) {
+			VkCommandPoolCreateInfo cp = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+			VkCommandPool cpool;
+			CK(vkCreateCommandPool(devs[d], &cp, NULL, &cpool));
+			VkCommandBufferAllocateInfo cai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = cpool,
+				.commandBufferCount = 1 };
+			VkCommandBuffer c;
+			CK(vkAllocateCommandBuffers(devs[d], &cai, &c));
+			CK(vkBeginCommandBuffer(c, &bi));
+			vkCmdResetQueryPool(c, tps[d][NP - 1], 0, 1);
+			vkCmdWriteTimestamp2(c, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, tps[d][NP - 1], 0);
+			CK(vkEndCommandBuffer(c));
+			VkSubmitInfo s = { VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &c };
+			CK(vkQueueSubmit(queues[d], 1, &s, VK_NULL_HANDLE));
+			CK(vkQueueWaitIdle(queues[d]));
+			CK(vkGetQueryPoolResults(devs[d], tps[d][NP - 1], 0, 1, sizeof(last[d]), last[d], 16,
+			                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT | VK_QUERY_RESULT_WAIT_BIT));
+			ok &= last[d][1] == 1 && last[d][0] != 0;
+			vkDestroyCommandPool(devs[d], cpool, NULL);
+		}
+		ok &= cr == VK_SUCCESS;
+		printf("%-4s %d timestamp pools of one query on two devices, all created (%d, VkResult %d), the last of each written "
+		       "(available %llu %llu, values %llu %llu)\n", ok ? "OK" : "FAIL", 2 * NP, created, cr,
+		       (unsigned long long)last[0][1], (unsigned long long)last[1][1], (unsigned long long)last[0][0],
+		       (unsigned long long)last[1][0]);
+		fails += !ok;
+		for (int d = 0; d < 2; d++)
+			for (int i = 0; i < NP; i++)
+				vkDestroyQueryPool(devs[d], tps[d][i], NULL);
+		vkDestroyDevice(dev2, NULL);
+	}
+
+	/* KosmicKrisp kept every occlusion query of a device in one Metal visibility result buffer of 32768 (Metal's
+	 * maximum visibility query offset is 256 KB): pools past 32768 live queries failed to create, and Venus' next
+	 * vkCmdBeginQuery on one was a CS error (Dota 2, Counter-Strike 2). Pools of 32760 (filling the first 32768 with
+	 * the pool of 8 above), 8 and 40000 (more than one buffer); one render pass draws the triangle in query 5 of the
+	 * first pool, query 3 of the 8-query pool, the last query of the 32760 pool and of the 40000 pool, then
+	 * query 6 of the first pool again: every query counts the same samples, read back with vkGetQueryPoolResults and
+	 * vkCmdCopyQueryPoolResults. */
+	{
+		const uint32_t counts[3] = { 32760, 8, 40000 };
+		VkQueryPool big[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+		VkResult br = VK_SUCCESS;
+		int nbig = 0;
+		for (; nbig < 3; nbig++) {
+			VkQueryPoolCreateInfo bq = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_OCCLUSION,
+				.queryCount = counts[nbig] };
+			if ((br = vkCreateQueryPool(dev, &bq, NULL, &big[nbig])) != VK_SUCCESS) {
+				big[nbig] = VK_NULL_HANDLE;
+				break;
+			}
+		}
+		uint64_t got[5] = { 0 }, copied[10];
+		memset(copied, 0, sizeof(copied));
+		if (br == VK_SUCCESS) {
+			struct { VkQueryPool pool; uint32_t query; } q[5] = {
+				{ qp, 5 }, { big[1], 3 }, { big[0], counts[0] - 1 }, { big[2], counts[2] - 1 }, { qp, 6 } };
+			VkCommandBuffer oc;
+			ai.commandBufferCount = 1;
+			CK(vkAllocateCommandBuffers(dev, &ai, &oc));
+			CK(vkBeginCommandBuffer(oc, &bi));
+			for (int i = 0; i < 5; i++)
+				vkCmdResetQueryPool(oc, q[i].pool, q[i].query, 1);
+			vkCmdPipelineBarrier(oc, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+			                     NULL, 0, NULL, 1, &ib);
+			vkCmdBeginRendering(oc, &rinfo);
+			vkCmdBindPipeline(oc, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+			for (int i = 0; i < 5; i++) {
+				vkCmdBeginQuery(oc, q[i].pool, q[i].query, VK_QUERY_CONTROL_PRECISE_BIT);
+				vkCmdDraw(oc, 3, 1, 0, 0);
+				vkCmdEndQuery(oc, q[i].pool, q[i].query);
+			}
+			vkCmdEndRendering(oc);
+			for (int i = 0; i < 5; i++)
+				vkCmdCopyQueryPoolResults(oc, q[i].pool, q[i].query, 1, buf, 16 * i, 16, fb | VK_QUERY_RESULT_WAIT_BIT);
+			vkCmdPipelineBarrier(oc, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+			CK(vkEndCommandBuffer(oc));
+			si.pCommandBuffers = &oc;
+			CK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+			CK(vkQueueWaitIdle(queue));
+			memcpy(copied, map, sizeof(copied));
+			for (int i = 0; i < 5; i++)
+				CK(vkGetQueryPoolResults(dev, q[i].pool, q[i].query, 1, 8, &got[i], 8,
+				                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT));
+		}
+		int ok = br == VK_SUCCESS && got[0] > 0;
+		for (int i = 0; i < 5; i++)
+			ok &= got[i] == got[0] && copied[2 * i] == got[0] && copied[2 * i + 1] == 1;
+		printf("%-4s occlusion pools of %u, %u and %u queries (%d created, VkResult %d), one render pass over queries of "
+		       "all of them: samples %llu %llu %llu %llu %llu, copies %llu %llu %llu %llu %llu\n", ok ? "OK" : "FAIL",
+		       counts[0], counts[1], counts[2], nbig, br, (unsigned long long)got[0], (unsigned long long)got[1],
+		       (unsigned long long)got[2], (unsigned long long)got[3], (unsigned long long)got[4],
+		       (unsigned long long)copied[0], (unsigned long long)copied[2], (unsigned long long)copied[4],
+		       (unsigned long long)copied[6], (unsigned long long)copied[8]);
+		fails += !ok;
+		for (int i = 0; i < 3; i++)
+			vkDestroyQueryPool(dev, big[i], NULL);
+	}
 	if (fails) { printf("queries: %d failure(s)\n", fails); return 1; }
 	return 0;
 }

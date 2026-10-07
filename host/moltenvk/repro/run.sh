@@ -47,7 +47,11 @@
 # 11. device_address.c: atomics on vector components behind buffer device addresses (vkd3d-proton's
 #    scalar-layout uvec3 counter, std430 uvec4 with a dynamic component, ivec2), values read back.
 # 12. queries.c: occlusion query results copied from a later command buffer, one copy per query with
-#    availability and wait (Venus' query feedback): availability of queries other than 0.
+#    availability and wait (Venus' query feedback): availability of queries other than 0; a timestamp pool of 8192;
+#    48 one-query timestamp pools on two devices (more than Metal's 32 counter heaps per process, which every guest
+#    device shares under virglrenderer) and occlusion pools of 32760, 8 and 40000 queries (more than one 256 KB
+#    visibility result buffer) with one render pass counting samples in queries of all of them (STEAMAC-G: Dota 2 /
+#    Counter-Strike 2 "vkCmdBeginQuery resulted in CS error" after a query pool failed to create on KosmicKrisp).
 # 13. texel_buffer.c: texel buffer views at offsets that are not 16-byte aligned (single texel alignment, required by
 #    vkd3d-proton): uniform/storage texel buffers, arrays, variable-count arrays, copies and push descriptors, values
 #    read back; storage buffer array sizes written one element per update.
