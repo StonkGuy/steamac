@@ -489,6 +489,11 @@ may be interfering: try disabling it or using another network. Update checks giv
 for GitHub. Technical details stay in the launcher log. HTTPS uses macOS's standard certificate
 validation and TLS settings; the pinned Valve CA below verifies the downloaded bundle, not HTTPS.
 
+`rc` stays available, but Valve sometimes signs its latest build with the development key
+`steamos-dev-images` instead of the production CA. That build is not accepted: the launcher explains
+that it cannot verify this development signature and asks you to choose `stable` or try again later.
+This expected rejection is logged only; all other signature failures still report to Sentry.
+
 1. `https://steamdeck-atomupd.steamos.cloud/meta/holo/steamos/aarch64/vr/<branch>.json` → the latest
    candidate (`update_path`, `chunks_store_path`).
 2. The `.raucb` (~2 MB) is downloaded; Security.framework verifies its CMS signature only against

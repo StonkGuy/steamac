@@ -11,6 +11,19 @@ struct RaucBundle {
     /// SHA-256 of the DER of scripts/keys/steamdeck-images.pem (= STEAMOS_CA_FP_SHA256 in config.env).
     static let caFingerprint = "D562FEFE251B76EAB0E9E999354AD186B8EB2E2FB3450FADBEC7F6AA59B602D9"
 
+    struct DevelopmentSignature: Error, CustomStringConvertible {
+        var description: String {
+            "This SteamOS build is signed with Valve's development key (steamos-dev-images) and can't be verified; choose stable or try again later."
+        }
+    }
+
+    /// Only a valid CMS signature whose leaf is the development signer gets this expected
+    /// rejection. Never classify by the localised Security error text or by the chosen branch.
+    static func trustFailure(signer: String, detail: String) -> Error {
+        if signer == "steamos-dev-images" { return DevelopmentSignature() }
+        return OptionError("bundle signature: certificate chain not trusted by the Valve CA: \(detail)")
+    }
+
     struct Manifest {
         let compatible: String
         let version: String
@@ -73,7 +86,14 @@ struct RaucBundle {
         try check(SecTrustSetNetworkFetchAllowed(trust, false), "SecTrustSetNetworkFetchAllowed")
         var err: CFError?
         guard SecTrustEvaluateWithError(trust, &err) else {
-            throw OptionError("bundle signature: certificate chain not trusted by the Valve CA: \(err.map { "\($0)" } ?? "?")")
+            var leaf: SecCertificate?
+            try check(CMSDecoderCopySignerCert(decoder, 0, &leaf), "CMSDecoderCopySignerCert")
+            var cn: CFString?
+            if let leaf { SecCertificateCopyCommonName(leaf, &cn) }
+            let detail = err.map { "\($0)" } ?? "?"
+            let failure = RaucBundle.trustFailure(signer: (cn as String?) ?? "", detail: detail)
+            if failure is DevelopmentSignature { log("bundle signature: development signer rejected: \(detail)") }
+            throw failure
         }
         guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let root = chain.last,
               SecCertificateCopyData(root) as Data == SecCertificateCopyData(ca) as Data else {

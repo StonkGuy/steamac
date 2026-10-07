@@ -531,7 +531,8 @@ enum CrashReporting {
     /// OptionError has no meaningful numeric code: retain its normalised diagnostic so bugs
     /// such as failed publication and bundle verification do not collapse into one issue.
     static func diskCreationReport(_ error: Error) -> (key: String, message: String, extra: [String: String])? {
-        guard !(error is DiskCreationFilesystem.Rejection), !(error is DiskCreator.Cancelled) else { return nil }
+        guard !(error is DiskCreationFilesystem.Rejection), !(error is DiskCreator.Cancelled),
+              !(error is RaucBundle.DevelopmentSignature) else { return nil }
         let e = error as NSError
         let diagnostic = error is OptionError ? normalize("\(error)") : "\(e.domain) \(e.code)"
         return (diagnostic, "Disk creation failed: \(diagnostic)", ["error_detail": "\(error)"])

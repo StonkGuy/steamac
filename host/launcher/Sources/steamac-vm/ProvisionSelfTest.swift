@@ -29,7 +29,7 @@ enum ProvisionSelfTest {
         check(DiskCreator.percent(in: "Attempt 1: Assembling   32.27% 1m2s") == 32.27, "desync progress parse")
         check(DiskCreator.percent(in: "Attempt 1: Validating ") == nil, "desync non-progress line")
 
-        check(DiskCreator.branches == ["stable", "rc"], "only production-signed SteamOS branches offered")
+        check(DiskCreator.branches == ["stable", "rc"], "stable and rc branches offered")
         for branch in DiskCreator.branches {
             attempt("branch \(branch)") {
                 check(try Options.parse(["steamac-vm", "--create-disk", "/tmp/steamac-branch.img", "--branch", branch]).createBranch == branch,
@@ -72,6 +72,29 @@ enum ProvisionSelfTest {
         let signature = CrashReporting.diskCreationReport(OptionError("bundle signature: certificate chain not trusted"))
         check(publication != nil && signature != nil && publication?.key != signature?.key,
               "unexpected filesystem and signature failures remain distinct reports")
+        let development = RaucBundle.trustFailure(signer: "steamos-dev-images", detail: "untrusted")
+        check(development is RaucBundle.DevelopmentSignature && CrashReporting.diskCreationReport(development) == nil,
+              "development trust rejection is log-only")
+        for signer in ["frame-images", "", "steamos-dev-images-other"] {
+            check(CrashReporting.diskCreationReport(RaucBundle.trustFailure(signer: signer, detail: "steamos-dev-images")) != nil,
+                  "other trust failures stay reportable: \(signer)")
+        }
+
+        // Optional real development-signed Valve bundle; never accepted or reported.
+        if let path = ProcessInfo.processInfo.environment["STEAMAC_PROVISION_TEST_DEV_BUNDLE"] {
+            attempt("development bundle") {
+                guard let caPath = DiskCreator.caPath else { throw OptionError("Valve CA not found") }
+                var bundle = try RaucBundle(contentsOf: path)
+                do {
+                    try bundle.verify(ca: RaucBundle.loadCA(caPath))
+                    check(false, "development-signed bundle must not verify")
+                } catch {
+                    check(CrashReporting.diskCreationReport(error) == nil, "Valve development signer is log-only")
+                    check("\(error)".contains("Valve's development key") && "\(error)".contains("choose stable or try again later"),
+                          "development signer message explains how to proceed")
+                }
+            }
+        }
 
         // Optional live TLS rejection using the exact metadata fetch path; no SDK setup or
         // capture occurs in this self-test. Point at a local server with an untrusted cert.
