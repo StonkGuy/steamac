@@ -118,6 +118,13 @@
 #              timeouts follow Steam's hellovr_vulkan probe teardown by 0.3-1.1 s. MESA_KK_DEBUG=commits logs
 #              late/long command buffers and device lifetimes. Queue teardown waits for every feedback
 #              handler (they could run after vkDestroyDevice).
+#   0040       steamac: the base texture of every image plane (and of the 2D array alias of 3D images), block-texel view
+#              subresource texture and texel buffer view texture is in the device's residency set, from bind/creation
+#              until before its release (sparse images as before). Metal 4 takes an attachment as resident only when
+#              its base texture object is in a residency set, not its heap, the buffer it was made from (host pointer
+#              imports) or the bound view; KosmicKrisp only added heaps and buffers, and Metal API validation reported
+#              every render pass (9033 times in one Steam boot). STEAMAC-G: M3+ timeouts follow Steam's first MSAA
+#              targets/window images and window resizes. Repro: host/moltenvk/repro residency.c.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -294,6 +301,8 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0036 = steamac: sampler min/max emulation only for draws with a reduction sampler bound (second program)"
 	echo "  0037 = steamac: occlusion queries past one visibility buffer (chunks), timestamp pools on shared counter heaps"
 	echo "  0038 = steamac: command queue errors name the GPU time and still unsignalled semaphore waits"
+	echo "  0039 = steamac: command queue errors name the device, timing and os_log GPU error; queue teardown waits for handlers"
+	echo "  0040 = steamac: base textures of image planes, subresource and texel buffer view textures in the residency set"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."

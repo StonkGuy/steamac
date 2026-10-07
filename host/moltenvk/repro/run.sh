@@ -106,6 +106,14 @@
 #    dispatches without a reduction sampler bound must run the pipeline's program without the emulation (its log
 #    names every other program compiled: none until a reduction sampler is bound, then the emulating one once; a
 #    pipeline created after its layout got one compiles the emulating program first and the plain one on first use).
+# 22. residency.c (KosmicKrisp only; STEAMAC-G): Metal 4 takes an attachment as resident only when its base texture object
+#    is in a residency set of the command buffer or queue (not the heap it was placed in, the buffer it was made from or
+#    the view bound). Every kind of attachment KosmicKrisp makes is rendered (clear/store, meta clears, resolves, a blit):
+#    textures in heaps of the device-local and host-visible types, in the private heap of a host pointer import (tiled)
+#    and of the imported buffer (LINEAR, also through the 2D array view input attachments get), 4x MSAA color/depth/stencil
+#    (also host-imported), depth/stencil, format views, layer views, 2D views of 3D images, sparse binding images, images
+#    at offsets of one allocation. Run with MTL_DEBUG_LAYER_WARNING_MODE=nslog (Metal does not report it otherwise; with
+#    warnings logged the error assert mode aborts on it), any "not added to any residency set" line fails it.
 # All run with Metal API validation in assert mode (MTL_DEBUG_LAYER), so a Metal validation error
 # fails the run instead of aborting a VM later.
 # All applicable tests must pass on MoltenVK. On KosmicKrisp all but 5 and 10 must pass (1 sizes the descriptor pool with
@@ -295,4 +303,16 @@ if [ "$driver" = kosmickrisp ]; then
 	build sparse
 	"$work/sparse" "$gspv"
 	"$work/sparse" "$gspv" minmax-log
+
+	# Metal reports a non-resident attachment as a validation warning (not printed by default): log warnings,
+	# so the error assert mode fails on it, and fail on any such line it only logged.
+	build residency
+	residency_log=$work/residency.log
+	MTL_DEBUG_LAYER_WARNING_MODE=nslog "$work/residency" > "$residency_log" 2>&1 || { cat "$residency_log"; exit 1; }
+	if grep -q 'not added to any residency set' "$residency_log"; then
+		cat "$residency_log"
+		echo "FAIL residency: $(grep -c 'not added to any residency set' "$residency_log") attachments not in a residency set"
+		exit 1
+	fi
+	grep -e '^OK' -e '^SKIP' "$residency_log"
 fi
