@@ -565,6 +565,16 @@ Settings, сохраняется. virglrenderer открывает
 в `@rpath/libMoltenVK.dylib` или `@rpath/libvulkan_kosmickrisp.dylib`. Оверлей загрузки показывает
 драйвер («Venus → KosmicKrisp»); в отчётах о сбоях есть `vulkan_driver` и ревизия патчей драйвера.
 
+До инициализации Metal лаунчер проверяет доступность для записи кеша модулей компилятора
+(`DARWIN_USER_CACHE_DIR/<bundle id>/com.apple.metalfe`, включая папки хешей и существующие `.pcm`).
+Если запись блокируют права, ACL или флаг immutable, лаунчер записывает проблемный путь в журнал
+и перенаправляет Metal в `~/Library/Caches/es.fxgam.steamac/metal-compiler`.
+Старый кеш не удаляется, его права не меняются. Используется необязательный SPI Metal для пути кеша;
+если он недоступен или новый кеш тоже недоступен для записи, это фиксируется в журнале, а ошибки
+компиляции шейдеров по-прежнему отправляются в отчётах. `work/out/steamac-vm --selftest-metal-cache`
+воспроизводит `monolithic_metal.pcm: Operation not permitted` в отдельном временном immutable-кеше
+и проверяет настоящую компиляцию Metal с новым кешем (без ВМ и событий Sentry).
+
 | Вариант | Что это | Плюсы и минусы |
 |---|---|---|
 | **KosmicKrisp** — Mesa на Metal 4 · macOS 26+ (`kosmickrisp`, по умолчанию, где есть) | `host/kosmickrisp/`: Mesa main + открытые MR (геометрические шейдеры !44786, transform feedback !44928, tiled-изображения в host-pointer памяти !44929, device-local тип памяти !44221, линейные цели рендера !44782/!44222) + патчи steamac (явный row pitch LINEAR, LINEAR как input attachment, `fillModeNonSolid`, без которого DXVK не запускается, 8 сэмплов как 4, выравнивание texel-буферов по одному текселю и пулы таймстампов на нескольких счётчиковых кучах Metal, нужные vkd3d-proton; sparse binding/residency на placement sparse-ресурсах Metal 4 и min/max-редукция сэмплера, эмулируемая в шейдерах до Apple10, — с ними vkd3d-proton даёт Tiled Resources Tier 2 и, значит, D3D12 feature level 12_0) | быстрее: Stellar Blade Demo ~29 FPS против ~18 на MoltenVK на M1 Max (видео на разделённом экране: `docs/media/stellar-blade-moltenvk-vs-kosmickrisp.mp4`); интерфейс Steam, DXVK-игры и Stellar Blade Demo (D3D12, vkd3d-proton) работают, первый запуск Stellar Blade — ~28 мин компиляции шейдеров на M1 Max. Только macOS 26+; собирается, только если сборка идёт на macOS 26+, иначе используется MoltenVK. Известные пробелы (repro на хосте): transform feedback со strip-геометрическими шейдерами и его счётчик при переполнении (черновой MR); в пределах одного render pass запись глубины в незамапленные тайлы остаётся в тайловой памяти, и следующие draw этого прохода сравнивают с ней (Tiled Resources Tier 2 такой кэш допускает; `test_sparse_depth_stencil_rendering` из vkd3d-proton ждёт, что запись отбросится); нет sparse 3D-текстур (3D-тайлы Metal не совпадают со стандартными 3D-блоками Vulkan), поэтому нет Tiled Resources Tier 3 |

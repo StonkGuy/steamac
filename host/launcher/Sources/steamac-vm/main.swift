@@ -23,6 +23,10 @@ do {
     exit(2)
 }
 
+if options.selftestMetalCache { MetalCompilerCache.selfTest() }
+// Before CrashReporting's GPU tags, the window or either Vulkan driver can initialise Metal.
+MetalCompilerCache.prepare()
+
 // MoltenVK (loaded by virglrenderer in this process) logs every instance/device creation at info
 // level, which buries the guest console. Errors only, unless the user asks for more.
 setenv("MVK_CONFIG_LOG_LEVEL", "1", 0)
