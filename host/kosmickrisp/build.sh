@@ -39,6 +39,20 @@
 #   0026       steamac: device and queue losses are printed on stderr ("MESA: error: VK_ERROR_DEVICE_LOST: ...",
 #              with the Metal error of a failed command buffer). Release builds lost the device silently:
 #              Venus only logged "vkQueueSubmit resulted in CS error" (STEAMAC-G, M4 Max).
+#   0027       steamac: sparse residency queries in shaders (OpImageSparse* -> MSL sparse_sample/sparse_read/
+#              sparse_gather, MinLod -> min_lod_clamp): shaderResourceResidency.
+#   0028       steamac: sparse binding and residency (D3D12 tiled resources through vkd3d-proton): Metal 4
+#              placement sparse textures/buffers, 64 KiB pages of placement heaps mapped by vkQueueBindSparse
+#              through MTL4CommandQueue updateTextureMappings/updateBufferMappings; standard 2D block shapes,
+#              strict non-resident reads, per-layer mip tails from the first level smaller than a tile;
+#              sparse resources bind only the device-local memory type (never a host-pointer import).
+#              Not available: sparse 3D (Metal's 3D tiles are one slice deep, not Vulkan's standard 3D
+#              blocks), sparse MSAA. Known Metal issue: residency feedback through a view with
+#              baseMipLevel > 0 reports the image's level (lod) instead of (base + lod) (data is right).
+#   0029       steamac: sampler min/max reduction (VK_EXT_sampler_filter_minmax, filterMinmaxSingleComponentFormats)
+#              before Apple10, where Metal's reductionMode is unsupported: point samplers plus a shader
+#              footprint reduction (exact for 1D/2D/3D/arrays; anisotropy ignored, cube corners approximated).
+#              With 0027/0028 vkd3d-proton reports Tiled Resources Tier 2, hence feature level 12_0.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -203,9 +217,13 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0024 = steamac: single texel alignment for texel buffer views (vkd3d-proton)"
 	echo "  0025 = steamac: timestamp pools over several Metal counter heaps (4096 each; vkd3d-proton 8192)"
 	echo "  0026 = steamac: device/queue losses (and their Metal error) printed on stderr"
+	echo "  0027 = steamac: sparse residency queries in shaders (MSL sparse_sample/sparse_read)"
+	echo "  0028 = steamac: sparse binding/residency via Metal 4 placement sparse resources (tiled resources)"
+	echo "  0029 = steamac: sampler min/max reduction emulated in shaders before Apple10"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
-	echo "the overflow counter (draft !44928)."
+	echo "the overflow counter (draft !44928); sparse residency feedback through views with"
+	echo "baseMipLevel > 0 (Metal reports level lod of the image instead of base + lod)."
 } > "$out/KOSMICKRISP.txt.tmp.$$"
 mv -f "$out/KOSMICKRISP.txt.tmp.$$" "$out/KOSMICKRISP.txt"
 
