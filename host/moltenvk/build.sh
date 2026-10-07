@@ -262,6 +262,9 @@ mvk_version=$(sed -n 's/.*"api_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1
 	echo "         (SPIRV-Cross 0027): declared with their full count (1000000, vkd3d-proton's heaps) Metal kept a"
 	echo "         32 MB table per array and program (~100 MB per pipeline; Stellar Blade's VM reached 250 GB);"
 	echo "         pipeline states also compile ~7x faster"
+	echo "  0034 = steamac: VK_NULL_HANDLE descriptor sets in vkCmdBindDescriptorSets bind nothing and take no"
+	echo "         dynamic offsets (graphics pipeline libraries; Counter-Strike 2's null fourth set crashed the VM"
+	echo "         process at submission, STEAMAC-25)"
 	echo "SPIRV-Cross patches (host/moltenvk/patches/spirv-cross):"
 	for p in "$here"/patches/spirv-cross/*.patch; do echo "  $(basename "$p")"; done
 	echo "  0001/0002 = KhronosGroup/SPIRV-Cross 35f52882+da223760 and 0706157e (PR #2666), library only"

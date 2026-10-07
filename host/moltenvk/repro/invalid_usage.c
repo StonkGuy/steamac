@@ -11,6 +11,11 @@
  *    "rasterSampleCount (8) is not supported by device" (STEAMAC-F). The pipeline is created with the
  *    largest supported count, and draws with it (render pass without attachments, and with a 4-sample
  *    color attachment) must pass Metal validation and invoke the fragment shader exactly as with 4 samples.
+ * 3. VK_NULL_HANDLE in vkCmdBindDescriptorSets::pDescriptorSets (also legal with graphics pipeline libraries):
+ *    Counter-Strike 2 binds five sets with the fourth null, and MoltenVK dereferenced it when the command
+ *    buffer was submitted (SIGSEGV at address 0x3c in bindDescriptorSets on the virglrenderer ring thread,
+ *    STEAMAC-25). A null set binds nothing and takes no dynamic offsets: compute and graphics pipelines using
+ *    sets 0 and 4 of five sets with a dynamic storage buffer each must write their own buffer ranges.
  *
  *   invalid_usage <spv dir>
  *   invalid_usage <spv dir> msl-log   a compute shader whose MSL does not compile (double): the pipeline must
@@ -163,6 +168,100 @@ static void null_set_layouts(void)
 	submit(cmd);
 	printf("%-4s dispatch with set 1 bound: o[0] = %u (expected 42)\n", map[0] == 42 ? "OK" : "FAIL", map[0]);
 	fails += map[0] != 42;
+}
+
+static void null_set_binds(void)
+{
+	VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1,
+		VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+	VkDescriptorSetLayoutCreateInfo dslci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b };
+	VkDescriptorSetLayout dsl;
+	CK(vkCreateDescriptorSetLayout(dev, &dslci, NULL, &dsl));
+	VkDescriptorSetLayout dsls[5] = { dsl, dsl, dsl, dsl, dsl };
+	VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 5, .pSetLayouts = dsls };
+	VkPipelineLayout layout;
+	CK(vkCreatePipelineLayout(dev, &plci, NULL, &layout));
+
+	/* Sets 0, 1, 2 and 4 all point at buf; their dynamic offsets select 1 KiB ranges 0-3 of it. */
+	uint32_t *map;
+	VkBuffer buf = host_buffer(4096, &map);
+	VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 4 };
+	VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 4, .poolSizeCount = 1, .pPoolSizes = &ps };
+	VkDescriptorPool dpool;
+	CK(vkCreateDescriptorPool(dev, &dpci, NULL, &dpool));
+	VkDescriptorSetAllocateInfo dsai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = dpool,
+		.descriptorSetCount = 4, .pSetLayouts = dsls };
+	VkDescriptorSet s[4];
+	CK(vkAllocateDescriptorSets(dev, &dsai, s));
+	VkDescriptorBufferInfo dbi = { buf, 0, 256 };
+	for (int i = 0; i < 4; i++) {
+		VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = s[i], .descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, .pBufferInfo = &dbi };
+		vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);
+	}
+	VkDescriptorSet sets[5] = { s[0], s[1], s[2], VK_NULL_HANDLE, s[3] };
+	const uint32_t offsets[4] = { 0, 1024, 2048, 3072 };
+
+	/* Compute: set 0 writes 10 to range 0, set 4 writes 40 to range 3. */
+	VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+		.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+		           .module = module("null_set_bind.comp.spv"), .pName = "main" }, .layout = layout };
+	VkPipeline cp;
+	CK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &cp));
+	memset(map, 0, 4096);
+	VkCommandBuffer cmd = begin();
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cp);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 5, sets, 4, offsets);
+	vkCmdDispatch(cmd, 1, 1, 1);
+	submit(cmd);
+	int ok = map[0] == 10 && map[256] == 0 && map[512] == 0 && map[768] == 40;
+	printf("%-4s dispatch with sets { s0, s1, s2, VK_NULL_HANDLE, s4 }: ranges %u %u %u %u (expected 10 0 0 40)\n",
+	       ok ? "OK" : "FAIL", map[0], map[256], map[512], map[768]);
+	fails += !ok;
+
+	/* Graphics, render pass without attachments: one count per pixel through set 0, two through set 4. */
+	VkSubpassDescription sub = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS };
+	VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .subpassCount = 1, .pSubpasses = &sub };
+	VkRenderPass rp;
+	CK(vkCreateRenderPass(dev, &rpci, NULL, &rp));
+	VkFramebufferCreateInfo fbci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp, .width = W, .height = H, .layers = 1 };
+	VkFramebuffer fb;
+	CK(vkCreateFramebuffer(dev, &fbci, NULL, &fb));
+	VkPipelineShaderStageCreateInfo stages[2] = {
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = module("msaa.vert.spv"), .pName = "main" },
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = module("null_set_bind.frag.spv"), .pName = "main" },
+	};
+	VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+	VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+		.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+	VkViewport vp = { 0, 0, W, H, 0, 1 };
+	VkRect2D sc = { { 0, 0 }, { W, H } };
+	VkPipelineViewportStateCreateInfo vps = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+		.viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &sc };
+	VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+		.polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1 };
+	VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+		.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+	VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+	VkGraphicsPipelineCreateInfo gpci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = stages,
+		.pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vps, .pRasterizationState = &rs,
+		.pMultisampleState = &ms, .pColorBlendState = &cb, .layout = layout, .renderPass = rp };
+	VkPipeline gp;
+	CK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpci, NULL, &gp));
+	memset(map, 0, 4096);
+	cmd = begin();
+	VkRenderPassBeginInfo rpbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb,
+		.renderArea = { { 0, 0 }, { W, H } } };
+	vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gp);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 5, sets, 4, offsets);
+	vkCmdDraw(cmd, 3, 1, 0, 0);
+	vkCmdEndRenderPass(cmd);
+	submit(cmd);
+	ok = map[0] == W * H && map[256] == 0 && map[512] == 0 && map[768] == 2 * W * H;
+	printf("%-4s draw with sets { s0, s1, s2, VK_NULL_HANDLE, s4 }: ranges %u %u %u %u (expected %d 0 0 %d)\n",
+	       ok ? "OK" : "FAIL", map[0], map[256], map[512], map[768], W * H, 2 * W * H);
+	fails += !ok;
 }
 
 static void raster_samples(void)
@@ -326,6 +425,7 @@ int main(int argc, char **argv)
 	} else {
 		null_set_layouts();
 		raster_samples();
+		null_set_binds();
 	}
 
 	if (fails) { printf("invalid_usage: %d failure(s)\n", fails); return 1; }

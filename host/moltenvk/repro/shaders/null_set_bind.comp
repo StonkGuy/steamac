@@ -1,0 +1,11 @@
+#version 450
+// Uses sets 0 and 4 of a five-set layout; set 3 is bound as VK_NULL_HANDLE (Counter-Strike 2's binds,
+// STEAMAC-25). Every set has one dynamic storage buffer.
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) buffer S0 { uint a[]; };
+layout(set = 4, binding = 0, std430) buffer S4 { uint e[]; };
+void main()
+{
+	a[0] = 10u;
+	e[0] = 40u;
+}

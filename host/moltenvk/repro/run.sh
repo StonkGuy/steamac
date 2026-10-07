@@ -36,9 +36,10 @@
 #    loads, read-modify-write, runtime array after a header) with limited buffer ranges: in-bounds data,
 #    out-of-bounds zeros, out-of-bounds stores discarded; a store through an OpCopyObject of an access chain
 #    into a function-local array (dxil-spirv), values read back.
-# 9. invalid_usage.c: VK_NULL_HANDLE set layouts in a pipeline layout (independent sets, from Venus) and
-#    rasterizationSamples 8 (not supported by Apple GPUs); then a pipeline whose MSL does not compile, whose
-#    MSL must be logged as "[mvk-msl] " lines on stderr.
+# 9. invalid_usage.c: VK_NULL_HANDLE set layouts in a pipeline layout (independent sets, from Venus),
+#    rasterizationSamples 8 (not supported by Apple GPUs) and VK_NULL_HANDLE descriptor sets bound among others
+#    (Counter-Strike 2, STEAMAC-25: buffers of the sets around the null one written by a dispatch and a draw); then
+#    a pipeline whose MSL does not compile, whose MSL must be logged as "[mvk-msl] " lines on stderr.
 # 10. vertex_input.c: vertex input layouts Metal's always-on vertex descriptor validation aborts on (zero
 #    strides, static/dynamic/per instance/zero divisor, attributes past the stride, attributes of undescribed
 #    bindings, with and without geometry shader emulation), one process per case; points check the
