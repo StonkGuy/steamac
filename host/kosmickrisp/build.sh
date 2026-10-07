@@ -110,6 +110,14 @@
 #              queue keeps the last 8). STEAMAC-G: M3/M4/M5 lose devices with MTL4CommandQueueErrorTimeout after
 #              Steam's UI starts; on an M1 Max a Metal 4 queue wait that is never signalled ends after 4.0 s
 #              without an error, so the message has to tell such a wait from GPU work that ran too long.
+#   0039       steamac: a command queue error also logs the failed command buffer's guest application, its
+#              commit-to-start delay or that it never started (raw GPU times), the queue's last completion,
+#              the Metal error's userInfo, the devices alive and the last ones created/destroyed in the
+#              process, and once the Metal/IOGPU/AGX error messages of the process' os_log (the IOGPU
+#              reason: Metal 4 reports page faults, hangs and recovery victims as one Timeout code). STEAMAC-G
+#              timeouts follow Steam's hellovr_vulkan probe teardown by 0.3-1.1 s. MESA_KK_DEBUG=commits logs
+#              late/long command buffers and device lifetimes. Queue teardown waits for every feedback
+#              handler (they could run after vkDestroyDevice).
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
