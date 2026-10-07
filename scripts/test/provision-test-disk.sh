@@ -16,8 +16,8 @@
 #                                                  is ready, then dump a frame (boot-N.png). With
 #                                                  "provision": + provision.img as vdc and
 #                                                  steamac.provision=1; "provision-only": the same,
-#                                                  but stop right after provisioning (invalid
-#                                                  steamac.slot), leaving the disk as provisioned.
+#                                                  but power off right after provisioning
+#                                                  (steamac.slot=stop), leaving the disk as provisioned.
 #                                                  Log: work/scratch/provision/boot-N.log
 #   scripts/test/provision-test-disk.sh config PASSWORD
 #                                                  work/scratch/provision/config.img = Config payload
@@ -251,9 +251,8 @@ boot() { # boot [provision|provision-only]
     cp "$WORK/out/Image" "$WORK/out/initramfs.cpio.gz" "$WORK/out/steamac-layer.img" "$S/"
     case $mode in
         provision) extra=" steamac.provision=1" ;;
-        # provisioning runs before the slot choice, so an invalid steamac.slot
-        # stops the boot right after it (fatal -> console shell, nothing mounted):
-        # the disk is left exactly as provisioned, for `compare`.
+        # Explicit initramfs poweroff after provisioning/config, before slot
+        # assembly; the disk is left exactly as provisioned for `compare`.
         provision-only) extra=" steamac.provision=1 steamac.slot=stop" ;;
         "") ;;
         *) echo "boot: unknown mode $mode" >&2; exit 2 ;;
@@ -283,15 +282,20 @@ boot() { # boot [provision|provision-only]
         pid=$!; vm=$pid
     fi
     while kill -0 $pid 2>/dev/null && ((t < ${BOOT_SECONDS:-240})); do
-        if [[ $mode == provision-only ]]; then
-            grep -q 'steamac-provision: \(done\|failed\)' "$log" 2>/dev/null && { sleep 2; break; }
-        else
+        if [[ $mode != provision-only ]]; then
             grep -q 'progress: ready' "$log" 2>/dev/null && break
         fi
         sleep 2; t=$((t + 2))
     done
     if [[ $mode == provision-only ]]; then
-        kill -KILL $vm $pid 2>/dev/null || :   # waiting in the fatal shell; everything is synced and unmounted
+        if kill -0 $pid 2>/dev/null; then
+            echo "[boot-$n] ERROR: provisioning VM did not power off after ${t}s ($log)" >&2
+            kill -KILL $vm $pid 2>/dev/null || :
+            wait $pid 2>/dev/null || :
+            exec 7>&-
+            rm -f "$S/console.in"
+            return 1
+        fi
     else
         [[ -n ${CONSOLE_SCRIPT:-} ]] && { console_script "$log" "$CONSOLE_SCRIPT" || :; }
         sleep "${AFTER_READY_SECONDS:-30}"   # let the UI settle before the frame dump
@@ -300,11 +304,17 @@ boot() { # boot [provision|provision-only]
         for _ in $(seq 60); do kill -0 $vm 2>/dev/null || break; sleep 1; done
         kill -KILL $vm $pid 2>/dev/null || :
     fi
-    wait $pid 2>/dev/null || :
+    local rc=0
+    wait $pid 2>/dev/null || rc=$?
     exec 7>&-
     rm -f "$S/console.in"
     echo "[boot-$n] after ${t}s; log $log, console $log.console, frame $S/boot-$n.png"
     grep -E 'steamac-(provision|config)|steamac-init: (provisioning|config|slot|switching|steamac.ssh|FATAL|WARNING)|progress: (provision|ready)|RESULT' "$log" | cut -c1-200 || :
+    if [[ $mode == provision-only ]]; then
+        ((rc == 0)) && grep -q 'steamac-provision: done' "$log" \
+            && ! grep -q 'steamac-provision: failed' "$log" \
+            || { echo "[boot-$n] ERROR: provisioning failed (VM exit $rc, $log)" >&2; return 1; }
+    fi
 }
 
 case ${1:-} in

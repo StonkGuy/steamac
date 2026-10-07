@@ -6,7 +6,8 @@
 #   scripts/test/vkd3d-tiled.sh build   vkd3d-proton at the commit Proton 11.0 ships (tests
 #                                       enabled), scripts/test/d3d12-caps.c and vk-minmax.c, built
 #                                       for aarch64 in debian:bookworm (glibc 2.36 <= the guest's)
-#   scripts/test/vkd3d-tiled.sh disk    provisioned throwaway disk ($S/vm/test.img)
+#   scripts/test/vkd3d-tiled.sh disk    provisioned throwaway disk ($S/vm/test.img);
+#                                       waits for initramfs steamac.slot=stop poweroff
 #   scripts/test/vkd3d-tiled.sh start   boot it headless with SSH on $SSH_PORT (private copies of
 #                                       work/out/{Image,initramfs.cpio.gz,steamac-layer.img}; the
 #                                       host libraries are work/out/host/lib as they are now)

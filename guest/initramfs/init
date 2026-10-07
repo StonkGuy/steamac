@@ -34,7 +34,8 @@
 #   slot in the same boot.
 #
 # Kernel cmdline knobs (all optional):
-#   steamac.slot=A|B   one-shot boot of that slot, counters untouched
+#   steamac.slot=A|B|stop  force a slot without consuming an attempt, or power off
+#                         after provisioning/config (dev-only provision-only tests)
 #   steamac.shell=1    interactive shell on the console just before switch_root
 #   steamac.nomask=1   do not apply runtime unit masks
 #   steamac.layer=/dev/vdX  layer device (default: autodetect erofs disk)
@@ -666,6 +667,9 @@ msg "A/B state: BOOT_ORDER='$BOOT_ORDER' BOOT_A_LEFT=$BOOT_A_LEFT BOOT_B_LEFT=$B
 FORCED=$(getarg steamac.slot)
 case "$FORCED" in
     A|B) SLOT=$FORCED; msg "slot $SLOT forced by steamac.slot= (counters untouched)" ;;
+    stop) msg "steamac.slot=stop: provisioning/config complete; powering off (counters untouched)"
+          sync
+          poweroff -f ;;
     "")  if ! pick_slot; then
              warn "no slot has boot attempts left; resetting counters and booting the primary anyway"
              BOOT_A_LEFT=$MAX_TRIES; BOOT_B_LEFT=$MAX_TRIES
