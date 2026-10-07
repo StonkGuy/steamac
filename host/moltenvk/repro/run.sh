@@ -82,8 +82,10 @@
 #    per-layer mip tails, strict unbound image/buffer reads and shader residency, minimum-LOD clamps,
 #    binary/timeline sparse bind ordering, page relocation and image/plain-buffer aliases; vkd3d-proton's remap stress
 #    (100 rounds of tile range updates batched like its UpdateTileMappings: NULL ranges ending a vkQueueBindSparse must
-#    unmap); texel buffer views of sparse buffers made before and after binds, following rebinds and unmaps; residency of
-#    explicit-gradient, explicit-LOD and fragment implicit-LOD samples reaching or passing the last level (NEAREST and
+#    unmap); texel buffer views of sparse buffers made before and after binds, following rebinds and unmaps, and the
+#    residency of OpImageSparseRead/OpImageSparseFetch through them (CheckAccessFullyMapped after typed buffer loads,
+#    4- and 16-byte texels); residency of explicit-gradient, explicit-LOD and fragment implicit-LOD samples reaching or
+#    passing the last level (NEAREST and
 #    LINEAR mip); R32/R8 sampler MIN/MAX reduction over bilinear footprints and adjacent mip levels, with
 #    weighted-average controls.
 #    imageLoad residency through single-level storage views of levels > 0 is printed as KNOWN, not failed: Metal

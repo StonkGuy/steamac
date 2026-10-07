@@ -71,6 +71,14 @@
 #              hk's lowering: a 16-bit descriptor load and a max per sample when minLod is enabled, fetches below
 #              the minimum LOD read zero). vkd3d-proton's ResourceMinLODClamp needs it (test_view_min_lod 706/706;
 #              without it vkd3d-proton rebases views, 10 failures).
+#   0034       steamac: residency of sparse loads through texel buffer views (Metal has no sparse read of texture
+#              buffers: CheckAccessFullyMapped after typed buffer loads always reported resident, vkd3d-proton's
+#              test_buffer_feedback_instructions / test_sparse_default_mapping). Sparse residency buffers get an R8Uint
+#              placement sparse 2D array texture whose 64 KiB tiles are the buffer's pages, mapped to the same heap
+#              pages by the same queue mapping updates; texel buffer descriptors grow to 32 bytes and sparse loads take
+#              the residency of a sparse_read of their page's tile. Metal crashes in updateTextureMappings when a
+#              texture mapping update follows a buffer/texture-buffer one that followed a texture one: the queue
+#              signals and waits for an event in between (a signal alone let later buffer unmaps be overtaken).
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -238,6 +246,11 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0027 = steamac: sparse residency queries in shaders (MSL sparse_sample/sparse_read)"
 	echo "  0028 = steamac: sparse binding/residency via Metal 4 placement sparse resources (tiled resources)"
 	echo "  0029 = steamac: sampler min/max reduction emulated in shaders before Apple10"
+	echo "  0030 = steamac: unmaps of sparse buffer pages applied (resident one page buffer mapped after them)"
+	echo "  0031 = steamac: texel buffer views of sparse buffers (placement sparse texture buffers)"
+	echo "  0032 = steamac: sparse sample residency for LODs past the last level"
+	echo "  0033 = steamac: VK_EXT_image_view_min_lod by default"
+	echo "  0034 = steamac: residency of sparse loads through texel buffer views (residency texture per buffer)"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928); sparse residency feedback through views with"

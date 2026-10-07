@@ -1,0 +1,92 @@
+; Residency of typed buffer loads through texel buffer views (vkd3d-proton's CheckAccessFullyMapped after a typed
+; UAV/SRV buffer Load: OpImageSparseRead/OpImageSparseFetch on Dim Buffer, which GLSL can't express).
+; Bindings and push constants as sparse_texel.comp; mode 0: OpImageSparseRead of the storage texel buffer,
+; 1: OpImageSparseFetch of the uniform texel buffer. words[i] = 1 if texel i is resident, else 0.
+               OpCapability Shader
+               OpCapability SparseResidency
+               OpCapability ImageBuffer
+               OpCapability SampledBuffer
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gid
+               OpExecutionMode %main LocalSize 64 1 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+               OpDecorate %Params Block
+               OpMemberDecorate %Params 0 Offset 0
+               OpMemberDecorate %Params 1 Offset 4
+               OpDecorate %view Binding 0
+               OpDecorate %view DescriptorSet 0
+               OpDecorate %ro Binding 2
+               OpDecorate %ro DescriptorSet 0
+               OpDecorate %words_t ArrayStride 4
+               OpDecorate %Output BufferBlock
+               OpMemberDecorate %Output 0 NonReadable
+               OpMemberDecorate %Output 0 Offset 0
+               OpDecorate %dst NonReadable
+               OpDecorate %dst Binding 1
+               OpDecorate %dst DescriptorSet 0
+       %void = OpTypeVoid
+     %void_f = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+       %bool = OpTypeBool
+      %uint3 = OpTypeVector %uint 3
+      %uint4 = OpTypeVector %uint 4
+   %in_uint3 = OpTypePointer Input %uint3
+        %gid = OpVariable %in_uint3 Input
+    %in_uint = OpTypePointer Input %uint
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+     %Params = OpTypeStruct %uint %uint
+   %pc_Param = OpTypePointer PushConstant %Params
+          %p = OpVariable %pc_Param PushConstant
+    %pc_uint = OpTypePointer PushConstant %uint
+  %storage_t = OpTypeImage %uint Buffer 0 0 0 2 R32ui
+  %storage_p = OpTypePointer UniformConstant %storage_t
+       %view = OpVariable %storage_p UniformConstant
+  %sampled_t = OpTypeImage %uint Buffer 0 0 0 1 Unknown
+  %sampled_p = OpTypePointer UniformConstant %sampled_t
+         %ro = OpVariable %sampled_p UniformConstant
+    %ResType = OpTypeStruct %int %uint4
+    %words_t = OpTypeRuntimeArray %uint
+     %Output = OpTypeStruct %words_t
+   %Output_p = OpTypePointer Uniform %Output
+        %dst = OpVariable %Output_p Uniform
+     %uni_ui = OpTypePointer Uniform %uint
+       %main = OpFunction %void None %void_f
+      %entry = OpLabel
+      %gid_x = OpAccessChain %in_uint %gid %uint_0
+          %i = OpLoad %uint %gid_x
+    %count_p = OpAccessChain %pc_uint %p %int_0
+      %count = OpLoad %uint %count_p
+        %oob = OpUGreaterThanEqual %bool %i %count
+               OpSelectionMerge %body None
+               OpBranchConditional %oob %ret %body
+        %ret = OpLabel
+               OpReturn
+       %body = OpLabel
+     %mode_p = OpAccessChain %pc_uint %p %int_1
+       %mode = OpLoad %uint %mode_p
+     %is_img = OpIEqual %bool %mode %uint_0
+      %coord = OpBitcast %int %i
+               OpSelectionMerge %join None
+               OpBranchConditional %is_img %img %fetch
+        %img = OpLabel
+         %si = OpLoad %storage_t %view
+         %ri = OpImageSparseRead %ResType %si %coord
+     %code_i = OpCompositeExtract %int %ri 0
+               OpBranch %join
+      %fetch = OpLabel
+         %sf = OpLoad %sampled_t %ro
+         %rf = OpImageSparseFetch %ResType %sf %coord
+     %code_f = OpCompositeExtract %int %rf 0
+               OpBranch %join
+       %join = OpLabel
+       %code = OpPhi %int %code_i %img %code_f %fetch
+   %resident = OpImageSparseTexelsResident %bool %code
+        %val = OpSelect %uint %resident %uint_1 %uint_0
+        %out = OpAccessChain %uni_ui %dst %int_0 %i
+               OpStore %out %val
+               OpReturn
+               OpFunctionEnd
