@@ -336,7 +336,7 @@
     <div class="limits">
       <h3><span lang="en">Honest limits</span><span lang="ru">Честные ограничения</span></h3>
       <ul>
-        <li><span lang="en"><b>DirectX 12</b> runs at feature level 11_0 and shader model 6.0: games that require tiled resources (12_0) or shader model 6.6 (Unreal Engine 5) don't start.</span><span lang="ru"><b>DirectX 12</b> работает на уровне 11_0 и shader model 6.0: игры, которым нужны tiled-ресурсы (12_0) или shader model 6.6 (Unreal Engine 5), не запустятся.</span></li>
+        <li><span lang="en"><b>DirectX 12</b> runs at feature level 12_0 on KosmicKrisp (macOS 26+) and 11_0 on MoltenVK, shader model 6.0 on both: games that require 12_1 or shader model 6.6 (Unreal Engine 5) don't start.</span><span lang="ru"><b>DirectX 12</b> работает на уровне 12_0 с KosmicKrisp (macOS 26+) и 11_0 с MoltenVK, shader model 6.0 на обоих: игры, которым нужен 12_1 или shader model 6.6 (Unreal Engine 5), не запустятся.</span></li>
         <li><span lang="en"><b>Anti-cheat</b> that blocks virtual machines won't let you in.</span><span lang="ru"><b>Античиты</b>, блокирующие виртуальные машины, не пропустят.</span></li>
         <li><span lang="en"><b>First-time effects</b> stutter while Metal compiles the pipeline (~50–100 ms); after that it's cached, even across VM restarts.</span><span lang="ru"><b>Новые эффекты</b> подтормаживают, пока Metal компилирует конвейер (~50–100 мс); дальше всё из кеша, даже после перезапуска ВМ.</span></li>
       </ul>
@@ -365,7 +365,7 @@
       </div>
       <div class="card">
         <h3>DirectX 12</h3>
-        <p><span lang="en">vkd3d-proton. Feature level 11_0 and shader model 6.0 on both drivers: neither exposes the denormal float controls that shader model 6.2 needs. Stellar Blade Demo runs on both.</span><span lang="ru">vkd3d-proton. Уровень 11_0 и shader model 6.0 на обоих драйверах: ни один не даёт управления денормализованными числами, нужного shader model 6.2. Stellar Blade Demo работает на обоих.</span></p>
+        <p><span lang="en">vkd3d-proton. Feature level 12_0 on KosmicKrisp: real tiled resources (tier 2) on Metal 4 sparse resources. 11_0 on MoltenVK. Shader model 6.0 on both: neither exposes the denormal float controls that shader model 6.2 needs. Stellar Blade Demo and Resident Evil 2 run.</span><span lang="ru">vkd3d-proton. Уровень 12_0 на KosmicKrisp: настоящие tiled-ресурсы (tier 2) на sparse-ресурсах Metal 4. 11_0 на MoltenVK. Shader model 6.0 на обоих: ни один не даёт управления денормализованными числами, нужного shader model 6.2. Работают Stellar Blade Demo и Resident Evil 2.</span></p>
       </div>
       <div class="card">
         <h3>KosmicKrisp · Metal 4 · macOS 26+</h3>
@@ -482,8 +482,9 @@
       </div>
 
       <div class="get-card">
-        <h3><span lang="en">New in 1.7.x</span><span lang="ru">Новое в 1.7.x</span></h3>
+        <h3><span lang="en">New in 1.8</span><span lang="ru">Новое в 1.8</span></h3>
         <ul class="news">
+          <li><span lang="en">1.8: DirectX 12 feature level 12_0 on KosmicKrisp (macOS 26+) with real tiled resources, so games that require 12_0 can start; download errors explain a VPN or proxy in the way; GPU memory is budgeted next to the VM's RAM, so a game can't push the Mac into swap</span><span lang="ru">1.8: DirectX 12 уровня 12_0 на KosmicKrisp (macOS 26+) с настоящими tiled-ресурсами — запускаются игры, которым нужен 12_0; ошибки скачивания объясняют, что мешает VPN или прокси; видеопамять учитывается вместе с памятью ВМ, и игра не загоняет Mac в своп</span></li>
           <li><span lang="en">1.7.6: games no longer lose their GPU after a while (the app opened from Finder ran out of file descriptors); DualSense passthrough with touchpad, gyro, lightbar and adaptive triggers; MetalFX super resolution and Retina resolution</span><span lang="ru">1.7.6: игры больше не теряют GPU через какое-то время (приложению из Finder не хватало файловых дескрипторов); проброс DualSense с тачпадом, гироскопом, подсветкой и адаптивными курками; MetalFX super resolution и Retina-разрешение</span></li>
           <li><span lang="en">1.7.5: an opt-in crash reporter for Linux x86 games running under FEX, attached to Report a Problem</span><span lang="ru">1.7.5: отчёт о падениях x86-игр для Linux под FEX (включается параметром запуска) прикладывается к Report a Problem</span></li>
           <li><span lang="en">1.7.4: Steam Link and Remote Play find SteamOS on your local network (Settings → Advanced → LAN Remote Play); the 12/24-hour clock follows the Mac; Create Disk offers stable and rc only</span><span lang="ru">1.7.4: Steam Link и Remote Play находят SteamOS в локальной сети (Settings → Advanced → LAN Remote Play); формат часов 12/24 ч берётся с Mac; Create Disk предлагает только stable и rc</span></li>
