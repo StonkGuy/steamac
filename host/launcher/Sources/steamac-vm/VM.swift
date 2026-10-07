@@ -98,8 +98,9 @@ final class VM {
         // GPU: Venus only (no virgl GL), host-visible shm window for blobs. virglrenderer (in this
         // process) opens the Vulkan driver named by VKR_VULKAN_DRIVER (its patch 0013).
         setenv("VKR_VULKAN_DRIVER", "@rpath/" + o.vulkanDriver.library, 1)
+        setenv("VKR_GPU_BUDGET_MIB", String(o.gpuBudgetMiB), 1)
         OverlayView.vulkanDriver = o.vulkanDriver
-        log("gpu: Venus → \(o.vulkanDriver.name)")
+        log("gpu: Venus → \(o.vulkanDriver.name), \(o.gpuBudgetMiB) MiB advertised memory budget")
         let flags = o.gpuFlags ?? (STEAMAC_VIRGL_VENUS | STEAMAC_VIRGL_NO_VIRGL)
         try krun("krun_set_gpu_options2", krun_set_gpu_options2(ctx, flags, UInt64(o.shmMiB) << 20))
         let (gw, gh) = o.guestSize

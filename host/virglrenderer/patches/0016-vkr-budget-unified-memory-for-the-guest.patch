@@ -1,0 +1,72 @@
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -172,6 +172,39 @@
+    physical_dev->min_imported_host_pointer_alignment =
+       host_props.minImportedHostPointerAlignment;
+ }
++/* Apple unified RAM also backs guest RAM. Report the launcher's GPU working-set
++ * allowance instead of the entire Mac's RAM, consistently for every Vulkan
++ * consumer (DXVK, vkd3d, zink and native games), not just Steam's launch wrapper.
++ * This is reporting, not an allocation cap: Venus async allocations cannot
++ * deliver an allocation failure back to the application safely.
++ */
++static void
++vkr_physical_device_limit_memory(struct vkr_physical_device *physical_dev)
++{
++   const char *value = getenv("VKR_GPU_BUDGET_MIB");
++   if (!value || !*value)
++      return;
++   char *end;
++   const unsigned long mib = strtoul(value, &end, 10);
++   if (*end || mib < 256 || mib > 16384)
++      return;
++
++   VkPhysicalDeviceMemoryProperties *props = &physical_dev->memory_properties;
++   uint32_t local_heaps = 0;
++   for (uint32_t i = 0; i < props->memoryHeapCount; i++)
++      local_heaps += !!(props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
++   if (!local_heaps)
++      return;
++   const VkDeviceSize limit = ((VkDeviceSize)mib << 20) / local_heaps;
++   for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
++      VkMemoryHeap *heap = &props->memoryHeaps[i];
++      if (heap->flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT && heap->size > limit) {
++         vkr_log("GPU budget: heap %u clamped from %" PRIu64 " to %" PRIu64 " bytes",
++                 i, heap->size, limit);
++         heap->size = limit;
++      }
++   }
++}
+ 
+ static void
+ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_dev)
+@@ -180,6 +213,7 @@
+ 
+    VkPhysicalDevice handle = physical_dev->base.handle.physical_device;
+    vk->GetPhysicalDeviceMemoryProperties(handle, &physical_dev->memory_properties);
++   vkr_physical_device_limit_memory(physical_dev);
+ 
+    /* XXX When a VkMemoryType has VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, we
+     * assume any VkDeviceMemory with the memory type can be made external and
+@@ -777,6 +811,20 @@
+       vk->GetPhysicalDeviceMemoryProperties2(args->physicalDevice,
+                                              args->pMemoryProperties);
+    }
++   /* The live query above must not restore the unclamped host heap. Budget
++    * usage remains the driver's real estimate (it may exceed its budget).
++    */
++   args->pMemoryProperties->memoryProperties = physical_dev->memory_properties;
++   for (VkBaseOutStructure *p = args->pMemoryProperties->pNext; p; p = p->pNext) {
++      if (p->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT) {
++         VkPhysicalDeviceMemoryBudgetPropertiesEXT *budget = (void *)p;
++         for (uint32_t i = 0; i < physical_dev->memory_properties.memoryHeapCount; i++) {
++            const VkDeviceSize size = physical_dev->memory_properties.memoryHeaps[i].size;
++            if (budget->heapBudget[i] > size)
++               budget->heapBudget[i] = size;
++         }
++      }
++   }
+ }
+ 
+ static void

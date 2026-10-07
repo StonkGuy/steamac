@@ -907,6 +907,9 @@ private struct AdvancedTab: View {
                            + "comes from the same RAM, so the rest stays with macOS and the games' graphics.",
                            now: false, key: .memMiB)
                 }
+                Text("GPU budget: \(VMSizing.gpuBudgetMiB(memMiB: settings.memMiB > 0 ? settings.memMiB : AdvancedTab.autoGiB * 1024, host: AdvancedTab.host)) MiB. "
+                     + "macOS and driver reserve: \(VMSizing.hostReserveMiB(AdvancedTab.host)) MiB.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if settings.memMiB > 0 {
                     Stepper(value: Binding(get: { settings.memMiB / 1024 },
                                            set: { settings.memMiB = min(AdvancedTab.maxGiB, max(2, $0)) * 1024 }),

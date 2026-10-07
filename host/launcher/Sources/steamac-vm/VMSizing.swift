@@ -31,8 +31,19 @@ enum VMSizing {
 
     static let minAutoMemMiB = 4096, maxAutoMemMiB = 16384
     static let minAutoCPUs = 2, maxAutoCPUs = 8
-    /// Custom memory above this share of the Mac's RAM gets a warning in Settings.
-    static let memWarnShare = 0.6
+    /// macOS, the launcher, driver-internal allocations and other apps need room besides
+    /// guest RAM and Vulkan heaps. Keep at least 3 GiB, or a quarter of a larger Mac.
+    static func hostReserveMiB(_ host: Host) -> Int {
+        max(3072, Int(host.memBytes >> 22))
+    }
+
+    /// Shared by both host Vulkan drivers and the guest's VRAM reporting layer. This is
+    /// an advertised working-set budget, not an allocation cap: Venus allocations are
+    /// asynchronous, so rejecting them here would kill the guest context, not return OOM.
+    static func gpuBudgetMiB(memMiB: Int, host: Host = .current) -> Int {
+        let remaining = Int(host.memBytes >> 20) - memMiB - hostReserveMiB(host)
+        return min(16384, max(256, remaining / 256 * 256))
+    }
 
     /// Half the Mac's RAM, rounded to whole GiB, 4...16 GiB: 8 GB Mac → 4 GiB, 16 → 8, 32 and up → 16.
     /// The other half stays with macOS and the GPU (MoltenVK device memory, Metal heaps, the
@@ -55,9 +66,12 @@ enum VMSizing {
 
     /// Settings > Advanced: why a custom memory size is risky on this Mac, or nil.
     static func memWarning(memMiB: Int, host: Host) -> String? {
-        guard Double(memMiB) > Double(host.memBytes >> 20) * memWarnShare else { return nil }
-        return "More than 60% of this Mac's \(host.memGiB) GB. The Mac's GPU memory comes from the same RAM: "
-            + "with too little left, games can lose their GPU device (out of memory) and macOS starts swapping."
+        let gpu = gpuBudgetMiB(memMiB: memMiB, host: host)
+        let reserve = hostReserveMiB(host)
+        guard memMiB + gpu + reserve > Int(host.memBytes >> 20) || gpu < 2048 else { return nil }
+        return "\(memMiB) MiB VM RAM + \(gpu) MiB GPU budget + \(reserve) MiB reserved for macOS "
+            + "on this \(host.memGiB) GB Mac. Too little GPU memory remains: lower VM memory or graphics settings "
+            + "to avoid swapping, out-of-memory errors or the VM being killed."
     }
 
     /// Settings > Advanced: why a custom vCPU count is risky on this Mac, or nil.
@@ -68,12 +82,14 @@ enum VMSizing {
     }
 
     /// Boot log: the size and where it came from.
-    static func describe(cpus: Int, cpusSource: Source, memMiB: Int, memSource: Source, host: Host = .current) -> String {
+    static func describe(cpus: Int, cpusSource: Source, memMiB: Int, memSource: Source,
+                         gpuMiB: Int? = nil, host: Host = .current) -> String {
         let cores = host.perfCores.map { "\($0) performance cores of \(host.cores)" } ?? "\(host.cores) cores"
         let cpuWhy = cpusSource == .auto ? "automatic: \(cores), \(minAutoCPUs)-\(maxAutoCPUs)" : cpusSource.rawValue
         let memWhy = memSource == .auto
             ? "automatic: half of \(host.memGiB) GB RAM, \(minAutoMemMiB / 1024)-\(maxAutoMemMiB / 1024) GB" : memSource.rawValue
-        return "\(cpus) vCPUs (\(cpuWhy)), \(memMiB) MiB memory (\(memWhy))"
+        return "\(cpus) vCPUs (\(cpuWhy)), \(memMiB) MiB memory (\(memWhy)), "
+            + "\(gpuMiB ?? gpuBudgetMiB(memMiB: memMiB, host: host)) MiB GPU budget, \(hostReserveMiB(host)) MiB host reserve"
     }
 
     /// Settings self-test: the formulas on simulated Macs, and the warnings.
@@ -93,9 +109,15 @@ enum VMSizing {
             failures.append("sizing: \(p.map(String.init) ?? "-")P/\(n) cores → \(autoCPUs(host(16, p, n))) vCPUs, want \(want)")
         }
         let air = host(8, 4, 8)
-        if memWarning(memMiB: 4096, host: air) != nil { failures.append("sizing: 4 GB on an 8 GB Mac warned") }
+        if memWarning(memMiB: 4096, host: air) == nil { failures.append("sizing: 1 GiB GPU budget on an 8 GB Mac not warned") }
         if memWarning(memMiB: 5120, host: air) == nil { failures.append("sizing: 5 GB on an 8 GB Mac not warned") }
         if memWarning(memMiB: 16384, host: host(36, 10, 14)) != nil { failures.append("sizing: 16 GB on a 36 GB Mac warned") }
+        let budgets: [(UInt64, Int, Int)] = [(8, 4096, 1024), (16, 8192, 4096), (16, 9216, 3072),
+                                            (16, 12288, 256), (32, 16384, 8192), (64, 16384, 16384),
+                                            (8, 16384, 256)]
+        for (gb, vm, want) in budgets where gpuBudgetMiB(memMiB: vm, host: host(gb, 4, 8)) != want {
+            failures.append("sizing: GPU budget \(gb) GB / \(vm) MiB VM, want \(want)")
+        }
         if cpuWarning(cpus: 4, host: air) != nil { failures.append("sizing: 4 vCPUs on 4 P-cores warned") }
         if cpuWarning(cpus: 8, host: air) == nil { failures.append("sizing: 8 vCPUs on 4 P-cores not warned") }
         let here = Host.current

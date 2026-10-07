@@ -28,6 +28,13 @@ struct Options {
     var memMiB = VMSizing.autoMemMiB(.current)
     var cpusSource = VMSizing.Source.auto
     var memSource = VMSizing.Source.auto
+    /// --cmdline steamac.gpu_mib=N overrides both renderer and guest reporting for tests.
+    var gpuBudgetMiB: Int {
+        let prefix = "steamac.gpu_mib="
+        let word = cmdline.split(separator: " ").last { $0.hasPrefix(prefix) }
+        return word.flatMap { Int($0.dropFirst(prefix.count)) }
+            ?? VMSizing.gpuBudgetMiB(memMiB: memMiB)
+    }
     /// Initial window content size in points (`--display`, Settings > Display window size).
     var displayWidth = 1280
     var displayHeight = 800
@@ -443,6 +450,7 @@ struct Options {
             }
             add("steamac.ssh", o.sshPort == 0 ? "0" : "1")
             add("steamac.steam_client", o.steamClient.rawValue)
+            add("steamac.gpu_mib", String(VMSizing.gpuBudgetMiB(memMiB: o.memMiB)))
             if o.macTime {
                 add("steamac.tz", MacTime.zone)
                 add("steamac.clock24", MacTime.clock24.map { $0 ? "1" : "0" })
@@ -539,6 +547,13 @@ struct Options {
         guard !kernel.isEmpty else { throw OptionError("--kernel is required") }
         guard (1...255).contains(cpus) else { throw OptionError("--cpus must be 1..255") }
         guard memMiB >= 256 else { throw OptionError("--mem must be >= 256") }
+        let gpuWords = cmdline.split(separator: " ").filter { $0.hasPrefix("steamac.gpu_mib=") }
+        if !gpuWords.isEmpty {
+            guard gpuWords.count == 1, let value = Int(gpuWords[0].dropFirst("steamac.gpu_mib=".count)),
+                  (256...16384).contains(value) else {
+                throw OptionError("steamac.gpu_mib must occur once and be 256..16384 MiB")
+            }
+        }
         guard sshPort == 0 || (1024...65535).contains(sshPort) else {
             throw OptionError("--ssh-port must be 0 or 1024..65535")
         }

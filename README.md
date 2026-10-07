@@ -226,6 +226,23 @@ over saved values, but only for that launch: the field displays “overridden by
 | Sound | output device (System default follows macOS, or a specific CoreAudio device), volume/mute, Low/Normal/Safe buffer — via `krun_snd_set_*` (looked up with `dlsym`; with an older libkrun the fields are disabled with an explanation) | sound (`--no-sound`) |
 | Advanced | — | vCPU (`--cpus`), RAM (`--mem`), SSH enable/disable + port (`--ssh-port`, `--no-ssh`) and generated password, network (`--no-net`), disk image (`--disk`), Create New Disk…, Steam client (`--steam-client`, see “Steam client”), Vulkan driver (`--vulkan-driver`, see “Vulkan driver”) |
 
+**VM RAM and graphics share the Mac's memory.** Automatic VM RAM is half of physical RAM
+(4–16 GiB). On every boot the launcher also reserves at least 3 GiB, or a quarter of host RAM,
+for macOS, other apps and driver overhead; the remainder is the GPU budget (256 MiB–16 GiB,
+rounded down to 256 MiB). For a 16 GiB Mac this is 8 GiB VM + 4 GiB GPU + 4 GiB reserve;
+a custom 9 GiB VM leaves 3 GiB for graphics. Settings → Advanced shows both allowances
+and warns when custom VM memory leaves less than 2 GiB for graphics or exceeds the total.
+Both KosmicKrisp and MoltenVK advertise this budget through Venus's device-local heap and,
+when enabled, `VK_EXT_memory_budget`; zink's GL memory queries and DXVK/vkd3d therefore see
+the same smaller heap instead of the entire Mac's unified RAM (STEAMAC-S).
+`steamac.gpu_mib=` also updates Steam's VRAM-report layer. This guides games' texture budgets;
+it is not a hard allocation cap and cannot prevent every OOM if a game ignores it or other
+Mac apps consume the reserve. Lower VM RAM or texture settings in that case.
+For a throwaway-VM check, `--cmdline '… steamac.gpu_mib=3072'` overrides both host and guest
+reporting; `host/virglrenderer/test/memory_budget.c` queries heaps/budgets and fills real GPU
+buffers up to the advertised heap (run with `VN_DEBUG=mem_budget` to expose the budget extension;
+Venus leaves it disabled by default). Never run the allocation test on the developer's disk.
+
 **More room for games:** free space on the Mac is not automatically free space inside SteamOS.
 The home capacity is fixed when a disk is created. **Settings → Advanced → Grow Disk…** increases
 it without recreating the disk or deleting games (grow only, up to 4096 GiB). For the running disk,

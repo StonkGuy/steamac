@@ -368,7 +368,8 @@ do {
     log("booting \(options.kernel) cpus=\(options.cpus) mem=\(options.memMiB)MiB display=\(options.guestSize.0)x\(options.guestSize.1)"
         + " cmdline=\"\(options.cmdline)\"" + (Supervisor.bootNumber > 1 ? " (boot #\(Supervisor.bootNumber))" : ""))
     log("vm size: " + VMSizing.describe(cpus: options.cpus, cpusSource: options.cpusSource,
-                                        memMiB: options.memMiB, memSource: options.memSource))
+                                        memMiB: options.memMiB, memSource: options.memSource,
+                                        gpuMiB: options.gpuBudgetMiB))
     PerfStats.setEnabled(options.perfStats)
     // Settings > General toggles the stats live unless --perf-stats / STEAMAC_PERF_STATS fixed them.
     let perfSubscription = settings.$perfStats.dropFirst().sink { on in

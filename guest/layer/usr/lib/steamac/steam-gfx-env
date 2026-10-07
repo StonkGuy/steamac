@@ -3,15 +3,22 @@
 # /usr/share/deckard/steam_launch_wrapper_env_defaults.txt to
 # $XDG_RUNTIME_DIR/steam/env/gfx.txt (read by steam-launch-wrapper per game).
 #
-# The stock file clamps the Vulkan heap reported to games to 4096 MiB, but only
-# for VK_VRAM_REPORT_LIMIT_DEVICE_ID=0x5143:0x43051401 (Adreno 750). Under
-# Venus the device IDs are MoltenVK's (vendor 0x106b, deviceID encodes the macOS
-# version + GPU family), so the ID is read from the live device and substituted.
-# Without a Venus device the stock value stays (a no-op on this hardware).
+# The launcher budgets unified RAM for the VM, GPU and macOS (STEAMAC-S).
+# virglrenderer clamps the Venus heaps for every guest process. Match the stock
+# per-game VRAM layer to that budget instead of its fixed 4096 MiB: it must not
+# inflate smaller heaps or hide the extra GPU memory available on larger Macs.
 set -euo pipefail
 
 gfx=${XDG_RUNTIME_DIR:?}/steam/env/gfx.txt
 [[ -f $gfx ]] || exit 0
+budget=
+for word in $(cat /proc/cmdline); do
+    case $word in steamac.gpu_mib=*) budget=${word#*=} ;; esac
+done
+case $budget in
+    ''|*[!0-9]*) budget= ;;
+    *) if (( ${#budget} > 5 )) || (( 10#$budget < 256 || 10#$budget > 16384 )); then budget=; fi ;;
+esac
 
 # Bounded: a wedged virtio-gpu fence must never block steam.service start.
 id=$(timeout -k 2 10 vulkaninfo --summary 2>/dev/null | awk '
@@ -23,4 +30,8 @@ if [[ -z $id ]]; then
     exit 0
 fi
 sed -i "s/^VK_VRAM_REPORT_LIMIT_DEVICE_ID=.*/VK_VRAM_REPORT_LIMIT_DEVICE_ID=$id/" "$gfx"
+if [[ -n $budget ]]; then
+    sed -i "s/^VK_VRAM_REPORT_LIMIT_HEAP_SIZE=.*/VK_VRAM_REPORT_LIMIT_HEAP_SIZE=$budget/" "$gfx"
+    echo "steam-gfx-env: VK_VRAM_REPORT_LIMIT_HEAP_SIZE=$budget MiB (launcher GPU budget)" >&2
+fi
 echo "steam-gfx-env: VK_VRAM_REPORT_LIMIT_DEVICE_ID=$id (Venus)" >&2
