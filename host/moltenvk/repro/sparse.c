@@ -28,7 +28,7 @@ static uint32_t family, sparse_family;
 static VkCommandPool pool;
 static VkPhysicalDeviceMemoryProperties memory_props;
 static const char *dir;
-static int failures, recovering, view_min_lod;
+static int failures, recovering, view_min_lod, reduction;
 static jmp_buf recovery;
 
 static void abort_test(void)
@@ -282,11 +282,14 @@ static void image_descriptors(struct Pipeline *p, VkSampler sampler, VkImageView
 	};
 	vkUpdateDescriptorSets(dev, ARRAY_SIZE(writes), writes, 0, NULL);
 }
+/* Fetches, samples (explicit LOD) and imageLoads of image level `level` (mode 0) through a sampled view starting at
+ * level `base` (fetch/sample LOD level - base) and a single-level storage view of `level`: Metal reported the residency
+ * of views with baseMipLevel > 0 for the image's level (LOD) instead of (baseMipLevel + LOD), with the right data. */
 static void image_read(struct Pipeline *p, VkFormat format, VkSampler sampler, VkImageView sampled, VkImageView storage,
-	struct Buffer *out, uint32_t level, uint32_t layer, uint32_t tail, int state, uint32_t mode, float min_lod)
+	struct Buffer *out, uint32_t level, uint32_t base, uint32_t layer, uint32_t tail, int state, uint32_t mode, float min_lod)
 {
 	uint32_t width = mode ? SIDE : SIDE >> level;
-	struct ImagePush push = { width, width, level, layer, mode, min_lod };
+	struct ImagePush push = { width, width, level - base, layer, mode, min_lod };
 	image_descriptors(p, sampler, sampled, storage, out);
 	memset(out->map, 0xcd, out->size);
 	host_sync(out, 0);
@@ -297,7 +300,7 @@ static void image_read(struct Pipeline *p, VkFormat format, VkSampler sampler, V
 	submit(cmd, VK_NULL_HANDLE, 0, 0);
 	host_sync(out, 1);
 	struct Result *data = out->map;
-	uint32_t bad = 0, view_residency = 0;
+	uint32_t bad = 0;
 	for (uint32_t y = 0; y < width; y++) for (uint32_t x = 0; x < width; x++) {
 		struct Result *r = &data[y * width + x];
 		uint32_t lev = mode ? (uint32_t)min_lod : level;
@@ -308,15 +311,8 @@ static void image_read(struct Pipeline *p, VkFormat format, VkSampler sampler, V
 			uint32_t ml = mode && method == 2 ? 0 : lev;
 			uint32_t mx = mode && method == 2 ? x : sx, my = mode && method == 2 ? y : sy;
 			int mb = resident(mx, my, ml, layer, tail, state);
-			/* imageLoad goes through a single-level storage view (baseMipLevel = level). Metal reports residency
-			 * of such views for the image's level (lod) instead of (baseMipLevel + lod): a Metal bug, counted
-			 * apart as a known gap (values are checked). */
-			if ((!mode || method == 0) && r->resident[method] != (uint32_t)mb) {
-				if (method == 2 && lev > 0)
-					view_residency++;
-				else
-					mismatch = 1;
-			}
+			if ((!mode || method == 0) && r->resident[method] != (uint32_t)mb)
+				mismatch = 1;
 			for (uint32_t c = 0; c < 4; c++) {
 				float want = expected(format, mx, my, ml, layer, c, mb);
 				if (!isfinite(values[method][c]) || fabsf(values[method][c] - want) > 0.00001f) mismatch = 1;
@@ -329,13 +325,10 @@ static void image_read(struct Pipeline *p, VkFormat format, VkSampler sampler, V
 				r->fetch[0],r->fetch[1],r->fetch[2],r->fetch[3],r->resident[0], r->sample[0],r->sample[1],r->sample[2],r->sample[3],r->resident[1],
 				r->load[0],r->load[1],r->load[2],r->load[3],r->resident[2]);
 	}
-	check(!bad, "%s %s L%u layer%u state%d: %u texels, %u mismatches%s",
+	check(!bad, "%s %s L%u layer%u state%d%s: %u texels, %u mismatches%s",
 		format == VK_FORMAT_R32_SFLOAT ? "R32" : "RGBA8", mode ? "min-LOD clamp" : state == 2 ? "image alias fetch/sample/imageLoad" : "fetch/sample/imageLoad",
-		mode ? (uint32_t)min_lod : level, layer, state, width * width, bad, mode ? " (textureLod(0) control)" : "");
-	if (view_residency)
-		printf("KNOWN %s L%u layer%u: imageLoad residency through a view with baseMipLevel %u wrong for %u texels "
-			"(Metal reports the image's level 0 residency for views)\n",
-			format == VK_FORMAT_R32_SFLOAT ? "R32" : "RGBA8", level, layer, level, view_residency);
+		mode ? (uint32_t)min_lod : level, layer, state, base ? " (views with baseMipLevel > 0)" : "", width * width, bad,
+		mode ? " (textureLod(0) control)" : "");
 }
 
 static void image_test(VkFormat format)
@@ -455,12 +448,33 @@ static void image_test(VkFormat format)
 	VkImageView storage[LEVELS];
 	for (uint32_t level = 0; level < LEVELS; level++) storage[level] = view_create(image, format, level, 1, LAYERS);
 	for (uint32_t level = 0; level < LEVELS; level++) for (uint32_t layer = 0; layer < LAYERS; layer++)
-		image_read(&p, format, sampler, sampled, storage[level], &out, level, layer, first, 0, 0, 0);
+		image_read(&p, format, sampler, sampled, storage[level], &out, level, 0, layer, first, 0, 0, 0);
+	/* Views from level 1 and 2: their level 0 is the partly bound level 1 and the unbound level 2; R32 also through a
+	 * MIN reduction sampler (one texel footprint: same values; emulated in shaders before Apple10) */
+	VkSampler min_sampler = VK_NULL_HANDLE;
+	if (format == VK_FORMAT_R32_SFLOAT && reduction) {
+		VkSamplerReductionModeCreateInfo rci = { VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO,
+			.reductionMode = VK_SAMPLER_REDUCTION_MODE_MIN };
+		VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .pNext = &rci, .magFilter = VK_FILTER_NEAREST,
+			.minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+			.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+			.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = LEVELS };
+		CK(vkCreateSampler(dev, &sci, NULL, &min_sampler));
+	}
+	for (uint32_t base = 1; base <= 2; base++) {
+		VkImageView based = view_create(image, format, base, LEVELS - base, LAYERS);
+		for (uint32_t level = base; level < LEVELS; level++) for (uint32_t layer = 0; layer < LAYERS; layer++) {
+			image_read(&p, format, sampler, based, storage[level], &out, level, base, layer, first, 0, 0, 0);
+			if (min_sampler) image_read(&p, format, min_sampler, based, storage[level], &out, level, base, layer, first, 0, 0, 0);
+		}
+		vkDestroyImageView(dev, based, NULL);
+	}
+	if (min_sampler) vkDestroySampler(dev, min_sampler, NULL);
 	for (uint32_t layer = 0; layer < LAYERS; layer++) for (uint32_t min_lod = 1; min_lod <= 2; min_lod++)
-		image_read(&p, format, sampler, sampled, storage[0], &out, 0, layer, first, 0, 1, (float)min_lod);
+		image_read(&p, format, sampler, sampled, storage[0], &out, 0, 0, layer, first, 0, 1, (float)min_lod);
 	VkImageView alias_sampled = view_create(alias, format, 0, LEVELS, LAYERS);
 	VkImageView alias_storage = view_create(alias, format, 0, 1, LAYERS);
-	image_read(&p, format, sampler, alias_sampled, alias_storage, &out, 0, 0, first, 2, 0, 0);
+	image_read(&p, format, sampler, alias_sampled, alias_storage, &out, 0, 0, 0, first, 2, 0, 0);
 	/* Host signal -> sparse wait/signal -> compute wait exercises timeline binds. */
 	VkSemaphore timeline = semaphore(1);
 	VkSemaphoreSignalInfo signal = { VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = timeline, .value = 1 };
@@ -481,8 +495,8 @@ static void image_test(VkFormat format)
 	submit(cmd, timeline, 2, 1);
 	check(1, "%s unbind (0,0), reuse the same physical page at (3,3), timeline wait 1/signal 2", name);
 	for (uint32_t layer = 0; layer < LAYERS; layer++)
-		image_read(&p, format, sampler, sampled, storage[0], &out, 0, layer, first, 1, 0, 0);
-	image_read(&p, format, sampler, alias_sampled, alias_storage, &out, 0, 0, first, 2, 0, 0);
+		image_read(&p, format, sampler, sampled, storage[0], &out, 0, 0, layer, first, 1, 0, 0);
+	image_read(&p, format, sampler, alias_sampled, alias_storage, &out, 0, 0, 0, first, 2, 0, 0);
 	vkDestroySemaphore(dev, timeline, NULL);
 	vkDestroyImageView(dev, alias_storage, NULL);
 	vkDestroyImageView(dev, alias_sampled, NULL);
@@ -634,22 +648,39 @@ static void frag_draw(VkImageView texture, VkSampler sampler, float bias, struct
 		vkFreeMemory(dev, targets[i].memory, NULL);
 	}
 }
-static void grad_check(struct Buffer *out, const VkClearColorValue colors[3], const char *name, uint32_t linear, uint32_t level)
+/* level 0/1: samples or fetches of that view level; 2: a texel fetch below the view's minimum LOD reads zero (its
+ * residency is not checked); 3: a gather (component 0) of view level 0, footprint (x..x+1, y..y+1) clamped to the edge. */
+static int grad_bound(uint32_t x, uint32_t y, uint32_t level)
+{
+	return level == 1 || ((level == 0 || level == 3) && x / 128 == y / 128);
+}
+static void grad_check(struct Buffer *out, const VkClearColorValue colors[3], const char *what, const char *name, uint32_t linear,
+	uint32_t level)
 {
 	const struct GradResult *r = out->map;
 	uint32_t bad = 0;
 	for (uint32_t y = 0; y < 256; y++) for (uint32_t x = 0; x < 256; x++) {
-		/* level 2: a texel fetch below the view's minimum LOD reads zero (its residency is not checked) */
-		int bound = level == 1 || (level == 0 && x / 128 == y / 128);
 		const struct GradResult *g = &r[y * 256 + x];
+		float want[4];
+		int bound = grad_bound(x, y, level);
+		for (uint32_t i = 0; i < 4; i++) want[i] = bound ? colors[level & 1].float32[i] : 0.0f;
+		if (level == 3) {
+			uint32_t x1 = x < 255 ? x + 1 : x, y1 = y < 255 ? y + 1 : y;
+			const uint32_t tx[4] = { x, x1, x1, x }, ty[4] = { y1, y1, y, y };
+			for (uint32_t i = 0; i < 4; i++) {
+				int b = grad_bound(tx[i], ty[i], 0);
+				want[i] = b ? colors[0].float32[0] : 0.0f;
+				bound &= b;
+			}
+		}
 		int ok = level == 2 || g->resident[0] == (uint32_t)bound;
-		for (uint32_t i = 0; i < 4; i++) ok &= fabsf(g->color[i] - (bound ? colors[level].float32[i] : 0.0f)) < 0.01f;
+		for (uint32_t i = 0; i < 4; i++) ok &= fabsf(g->color[i] - want[i]) < 0.01f;
 		if (!ok && bad++ < 3)
-			printf("     (%u,%u) %s: expected L%u %g resident=%d, got (%g,%g,%g,%g) resident=%u\n", x, y, name, level,
-				bound ? colors[level].float32[0] : 0.0f, bound, g->color[0], g->color[1], g->color[2], g->color[3], g->resident[0]);
+			printf("     (%u,%u) %s: expected L%u (%g,%g,%g,%g) resident=%d, got (%g,%g,%g,%g) resident=%u\n", x, y, name, level & 1,
+				want[0], want[1], want[2], want[3], bound, g->color[0], g->color[1], g->color[2], g->color[3], g->resident[0]);
 	}
-	check(!bad, "RGBA8 2-level %s mip %s: %s, 65536 texels, %u wrong values or residency",
-		name, linear ? "LINEAR" : "NEAREST", level == 2 ? "zero" : level ? "level 1" : "level 0", bad);
+	check(!bad, "RGBA8 %s %s mip %s: %s, 65536 texels, %u wrong values or residency", what,
+		name, linear ? "LINEAR" : "NEAREST", level == 2 ? "zero" : level == 3 ? "gather level 0" : level ? "level 1" : "level 0", bad);
 }
 static void grad_descriptors(struct Pipeline *p, VkSampler sampler, VkImageView view, struct Buffer *out)
 {
@@ -674,35 +705,43 @@ static void grad_run(struct Pipeline *p, struct Buffer *out, const struct GradPu
 	submit(cmd, VK_NULL_HANDLE, 0, 0);
 	host_sync(out, 1);
 }
-static void grad_test(void)
+/* base 0: the 256x256 2-level image above. base 1: a 512x512 3-level image whose levels 1 and 2 are bound and cleared like
+ * that image's levels 0 and 1, with the other half of level 0 bound (tiles (1,0) and (0,1)) in a third color, read through
+ * a view of levels 1-2: Metal reported the residency of views with baseMipLevel > 0 for the image's level (LOD), here the
+ * other half of level 0. Samplers clamp the LOD to [-16, 16], to at most 0 and to at least 1. */
+static void grad_test(uint32_t base)
 {
-	VkImage image = image_create(VK_FORMAT_R8G8B8A8_UNORM, 256, 2, 1, 1);
+	VkImage image = image_create(VK_FORMAT_R8G8B8A8_UNORM, 256 << base, 2 + base, 1, 1);
 	VkMemoryRequirements mr;
 	vkGetImageMemoryRequirements(dev, image, &mr);
-	VkDeviceMemory mem = allocate(3 * PAGE, memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+	VkDeviceMemory mem = allocate(5 * PAGE, memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
 	VkSparseImageMemoryBind tiles[] = {
-		{ .subresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0}, .offset = {0,0,0}, .extent = {128,128,1}, .memory = mem, .memoryOffset = 0 },
-		{ .subresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0}, .offset = {128,128,0}, .extent = {128,128,1}, .memory = mem, .memoryOffset = PAGE },
-		{ .subresource = {VK_IMAGE_ASPECT_COLOR_BIT,1,0}, .offset = {0,0,0}, .extent = {128,128,1}, .memory = mem, .memoryOffset = 2 * PAGE },
+		{ .subresource = {VK_IMAGE_ASPECT_COLOR_BIT,base,0}, .offset = {0,0,0}, .extent = {128,128,1}, .memory = mem, .memoryOffset = 0 },
+		{ .subresource = {VK_IMAGE_ASPECT_COLOR_BIT,base,0}, .offset = {128,128,0}, .extent = {128,128,1}, .memory = mem, .memoryOffset = PAGE },
+		{ .subresource = {VK_IMAGE_ASPECT_COLOR_BIT,base + 1,0}, .offset = {0,0,0}, .extent = {128,128,1}, .memory = mem, .memoryOffset = 2 * PAGE },
+		{ .subresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0}, .offset = {128,0,0}, .extent = {128,128,1}, .memory = mem, .memoryOffset = 3 * PAGE },
+		{ .subresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0}, .offset = {0,128,0}, .extent = {128,128,1}, .memory = mem, .memoryOffset = 4 * PAGE },
 	};
-	VkSparseImageMemoryBindInfo binds = {image, ARRAY_SIZE(tiles), tiles};
+	VkSparseImageMemoryBindInfo binds = {image, base ? 5 : 3, tiles};
 	VkBindSparseInfo bi = { VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .imageBindCount = 1, .pImageBinds = &binds };
 	CK(vkQueueBindSparse(sparse_queue, 1, &bi, VK_NULL_HANDLE));
 	CK(vkQueueWaitIdle(sparse_queue));
 	const VkClearColorValue colors[3] = { {{0.2f, 0.4f, 0.6f, 0.8f}}, {{0.5f, 0.5f, 0.5f, 0.5f}}, {{0}} };
+	const VkClearColorValue other = {{0.9f, 0.1f, 0.3f, 0.7f}};
 	VkCommandBuffer cmd = begin();
-	image_barrier(cmd, image, 2, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+	image_barrier(cmd, image, 2 + base, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
 		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-	for (uint32_t level = 0; level < 2; level++) {
+	for (uint32_t level = 0; level < 2 + base; level++) {
 		VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1 };
-		vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, &colors[level], 1, &range);
+		vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, level < base ? &other : &colors[level - base], 1, &range);
 	}
 	barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 	submit(cmd, VK_NULL_HANDLE, 0, 0);
 	struct Buffer out = host_buffer(256 * 256 * sizeof(struct GradResult), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 	VkDescriptorType types[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
 	struct Pipeline p = pipeline_create("sparse_grad.comp.spv", types, 2, sizeof(struct GradPush));
-	VkImageView view = view_create(image, VK_FORMAT_R8G8B8A8_UNORM, 0, 2, 1);
+	VkImageView view = view_create(image, VK_FORMAT_R8G8B8A8_UNORM, base, 2, 1);
+	char what[64];
 	const float t = 1.0f / 256;
 	/* Gradients in normalized coordinates (1/256 = one texel: LOD 0, 2/256: LOD 1, vkd3d-proton's (1,1): LOD 8.5) */
 	const struct { const char *name; struct GradPush push; uint32_t level; } cases[] = {
@@ -718,36 +757,46 @@ static void grad_test(void)
 		{ "LOD 1", { {0, 0}, {0, 0}, 1, 0, 2 }, 1 },
 		{ "LOD 1.9", { {0, 0}, {0, 0}, 1.9f, 0, 2 }, 1 },
 		{ "LOD 5", { {0, 0}, {0, 0}, 5, 0, 2 }, 1 },
+		{ "texelFetch level 0", { {0, 0}, {0, 0}, 0, 0, 3 }, 0 },
+		{ "texelFetch level 1", { {0, 0}, {0, 0}, 1, 0, 3 }, 1 },
+		{ "Gather", { {0, 0}, {0, 0}, 0, 0, 4 }, 3 },
 	};
-	for (uint32_t linear = 0; linear < 2; linear++) {
+	/* Fragment shader samples with implicit LODs: one texel per pixel plus a bias */
+	const struct { const char *name; float bias; uint32_t level; } biases[] = {
+		{ "fragment Sample", 0, 0 }, { "fragment SampleBias 1", 1, 1 }, { "fragment SampleBias 5 (past the last level)", 5, 1 },
+	};
+	const struct { const char *name; float min, max; uint32_t lo, hi; } clamps[] = {
+		{ "", -16, 16, 0, 1 }, { ", sampler maxLod 0", 0, 0, 0, 0 }, { ", sampler minLod 1", 1, 16, 1, 1 },
+	};
+	for (uint32_t linear = 0; linear < 2; linear++) for (uint32_t s = 0; s < ARRAY_SIZE(clamps); s++) {
 		VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST,
 			.mipmapMode = linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
 			.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-			.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .minLod = -16, .maxLod = 16 };
+			.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .minLod = clamps[s].min, .maxLod = clamps[s].max };
 		VkSampler sampler;
 		CK(vkCreateSampler(dev, &sci, NULL, &sampler));
+		snprintf(what, sizeof(what), "%s%s", base ? "view of levels 1-2" : "2-level", clamps[s].name);
 		grad_descriptors(&p, sampler, view, &out);
 		for (uint32_t c = 0; c < ARRAY_SIZE(cases); c++) {
+			uint32_t level = cases[c].level, sampled = cases[c].push.mode < 3;
+			if (sampled) level = level < clamps[s].lo ? clamps[s].lo : level > clamps[s].hi ? clamps[s].hi : level;
 			grad_run(&p, &out, &cases[c].push);
-			grad_check(&out, colors, cases[c].name, linear, cases[c].level);
+			grad_check(&out, colors, what, cases[c].name, linear, level);
 		}
-		/* Fragment shader samples with implicit LODs: one texel per pixel plus a bias */
-		const struct { const char *name; float bias; uint32_t level; } biases[] = {
-			{ "fragment Sample", 0, 0 }, { "fragment SampleBias 1", 1, 1 }, { "fragment SampleBias 5 (past the last level)", 5, 1 },
-		};
 		for (uint32_t c = 0; c < ARRAY_SIZE(biases); c++) {
+			uint32_t level = biases[c].level < clamps[s].lo ? clamps[s].lo : biases[c].level > clamps[s].hi ? clamps[s].hi : biases[c].level;
 			frag_draw(view, sampler, biases[c].bias, &out);
-			grad_check(&out, colors, biases[c].name, linear, biases[c].level);
+			grad_check(&out, colors, what, biases[c].name, linear, level);
 		}
-		/* vkd3d-proton's ResourceMinLODClamp: a view with VkImageViewMinLodCreateInfoEXT::minLod 1 over the partly
-		 * bound level 0 samples the fully bound level 1, and fetches of level 0 are out of the view. */
-		if (!view_min_lod) {
+		/* vkd3d-proton's ResourceMinLODClamp: a view with VkImageViewMinLodCreateInfoEXT::minLod 1 (from its base) over the
+		 * partly bound level samples the fully bound next level, and fetches of the partly bound level are out of the view. */
+		if (s == 0 && !view_min_lod) {
 			check(0, "VK_EXT_image_view_min_lod unavailable: sparse views with a minimum LOD not tested");
-		} else {
-			VkImageViewMinLodCreateInfoEXT min_lod = { VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT, .minLod = 1.0f };
+		} else if (s == 0) {
+			VkImageViewMinLodCreateInfoEXT min_lod = { VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT, .minLod = base + 1.0f };
 			VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = &min_lod, .image = image,
 				.viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
-				.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 2, 0, 1 } };
+				.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, base, 2, 0, 1 } };
 			VkImageView clamped;
 			CK(vkCreateImageView(dev, &vci, NULL, &clamped));
 			const struct { const char *name; struct GradPush push; uint32_t level; } min_lod_cases[] = {
@@ -759,10 +808,10 @@ static void grad_test(void)
 			grad_descriptors(&p, sampler, clamped, &out);
 			for (uint32_t c = 0; c < ARRAY_SIZE(min_lod_cases); c++) {
 				grad_run(&p, &out, &min_lod_cases[c].push);
-				grad_check(&out, colors, min_lod_cases[c].name, linear, min_lod_cases[c].level);
+				grad_check(&out, colors, what, min_lod_cases[c].name, linear, min_lod_cases[c].level);
 			}
 			frag_draw(clamped, sampler, 0, &out);
-			grad_check(&out, colors, "view minLod 1, fragment Sample", linear, 1);
+			grad_check(&out, colors, what, "view minLod 1, fragment Sample", linear, 1);
 			vkDestroyImageView(dev, clamped, NULL);
 		}
 		vkDestroySampler(dev, sampler, NULL);
@@ -1340,6 +1389,7 @@ int main(int argc, char **argv)
 		view_min_lod |= !strcmp(exts[i].extensionName, VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME) && fmin.minLod;
 	free(exts);
 	printf("     VK_EXT_image_view_min_lod minLod=%d\n", view_min_lod);
+	reduction = p12.filterMinmaxSingleComponentFormats && f12.samplerFilterMinmax;
 	VkPhysicalDeviceImageViewMinLodFeaturesEXT enabled_min = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT,
 		.minLod = VK_TRUE };
 	if (view_min_lod) enabled12.pNext = &enabled_min;
@@ -1364,7 +1414,8 @@ int main(int argc, char **argv)
 		else {
 			if (!setjmp(recovery)) image_test(VK_FORMAT_R8G8B8A8_UNORM);
 			if (!setjmp(recovery)) image_test(VK_FORMAT_R32_SFLOAT);
-			if (!setjmp(recovery)) grad_test();
+			if (!setjmp(recovery)) grad_test(0);
+			if (!setjmp(recovery)) grad_test(1);
 		}
 	}
 	if (do_buffer) {

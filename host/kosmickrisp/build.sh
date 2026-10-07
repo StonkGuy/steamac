@@ -47,8 +47,7 @@
 #              strict non-resident reads, per-layer mip tails from the first level smaller than a tile;
 #              sparse resources bind only the device-local memory type (never a host-pointer import).
 #              Not available: sparse 3D (Metal's 3D tiles are one slice deep, not Vulkan's standard 3D
-#              blocks), sparse MSAA. Known Metal issue: residency feedback through a view with
-#              baseMipLevel > 0 reports the image's level (lod) instead of (base + lod) (data is right).
+#              blocks), sparse MSAA.
 #   0029       steamac: sampler min/max reduction (VK_EXT_sampler_filter_minmax, filterMinmaxSingleComponentFormats)
 #              before Apple10, where Metal's reductionMode is unsupported: point samplers plus a shader
 #              footprint reduction (exact for 1D/2D/3D/arrays; anisotropy ignored, cube corners approximated).
@@ -79,6 +78,14 @@
 #              the residency of a sparse_read of their page's tile. Metal crashes in updateTextureMappings when a
 #              texture mapping update follows a buffer/texture-buffer one that followed a texture one: the queue
 #              signals and waits for an event in between (a signal alone let later buffer unmaps be overtaken).
+#   0035       steamac: sparse residency through views with baseMipLevel > 0, and of gathers. Metal reports
+#              such a view's residency for the image's level/LOD without the base (fetch, explicit LOD,
+#              imageLoad; gradient and implicit LODs only in their clamps), and a gather resident when its
+#              footprint crosses into an unbound tile. Such views get residency views from level 0 (storage
+#              image descriptors grow to 16 bytes); sparse operations through them take the residency of the
+#              same operation on that view at level/LOD + base, with the sampler's LOD clamps applied in the
+#              shader (samplers get an unclamped copy when they could matter); gathers take that of a
+#              bilinear sample of their level through a LINEAR unclamped copy of the sampler.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -251,10 +258,10 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0032 = steamac: sparse sample residency for LODs past the last level"
 	echo "  0033 = steamac: VK_EXT_image_view_min_lod by default"
 	echo "  0034 = steamac: residency of sparse loads through texel buffer views (residency texture per buffer)"
+	echo "  0035 = steamac: sparse residency through views with baseMipLevel > 0 (residency views from level 0), and of gathers"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
-	echo "the overflow counter (draft !44928); sparse residency feedback through views with"
-	echo "baseMipLevel > 0 (Metal reports level lod of the image instead of base + lod)."
+	echo "the overflow counter (draft !44928)."
 } > "$out/KOSMICKRISP.txt.tmp.$$"
 mv -f "$out/KOSMICKRISP.txt.tmp.$$" "$out/KOSMICKRISP.txt"
 

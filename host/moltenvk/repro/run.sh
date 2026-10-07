@@ -84,12 +84,12 @@
 #    (100 rounds of tile range updates batched like its UpdateTileMappings: NULL ranges ending a vkQueueBindSparse must
 #    unmap); texel buffer views of sparse buffers made before and after binds, following rebinds and unmaps, and the
 #    residency of OpImageSparseRead/OpImageSparseFetch through them (CheckAccessFullyMapped after typed buffer loads,
-#    4- and 16-byte texels); residency of explicit-gradient, explicit-LOD and fragment implicit-LOD samples reaching or
-#    passing the last level (NEAREST and
-#    LINEAR mip); R32/R8 sampler MIN/MAX reduction over bilinear footprints and adjacent mip levels, with
-#    weighted-average controls.
-#    imageLoad residency through single-level storage views of levels > 0 is printed as KNOWN, not failed: Metal
-#    reports residency of a view with baseMipLevel b for the image's level lod instead of b + lod (values are right).
+#    4- and 16-byte texels); residency of explicit-gradient, explicit-LOD, fragment implicit-LOD samples, fetches and
+#    gathers reaching or passing the last level (NEAREST and LINEAR mip), through samplers clamping the LOD and through
+#    views with baseMipLevel > 0 (also fetches, explicit-LOD samples through a MIN reduction sampler and imageLoad of
+#    storage views of levels > 0: Metal reported the image's level lod instead of base + lod); gathers whose footprint
+#    crosses into an unbound tile (Metal reported them resident); R32/R8 sampler MIN/MAX reduction over bilinear
+#    footprints and adjacent mip levels, with weighted-average controls.
 # All run with Metal API validation in assert mode (MTL_DEBUG_LAYER), so a Metal validation error
 # fails the run instead of aborting a VM later.
 # All applicable tests must pass on MoltenVK. On KosmicKrisp all but 5 and 10 must pass (1 sizes the descriptor pool with

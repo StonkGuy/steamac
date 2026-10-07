@@ -1,13 +1,15 @@
 #version 460
-// vkd3d-proton's texture_feedback SampleGrad/SampleLevel: residency of explicit-gradient (with and without a MinLod
-// clamp) and explicit-LOD samples of a 256x256 two-level image, including LODs past the last level.
+// vkd3d-proton's texture_feedback SampleGrad/SampleLevel/Gather: residency of explicit-gradient (with and without a
+// MinLod clamp) and explicit-LOD samples of a 256x256 two-level view, including LODs past the last level, fetches and
+// gathers.
 #extension GL_ARB_sparse_texture2 : require
 #extension GL_ARB_sparse_texture_clamp : require
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D tex;
 struct Result { vec4 color; uvec4 resident; };
 layout(std430, set = 0, binding = 1) buffer Output { Result results[]; };
-// mode 0: gradients, 1: gradients + MinLod, 2: explicit LOD, 3: texelFetch of level lod
+// mode 0: gradients, 1: gradients + MinLod, 2: explicit LOD, 3: texelFetch of level lod, 4: Gather (component 0) a
+// quarter texel right and down of the center, so that all 4 texels have a nonzero bilinear weight
 layout(push_constant) uniform Params { vec2 dx; vec2 dy; float lod; float minLod; uint mode; } p;
 void main()
 {
@@ -21,7 +23,9 @@ void main()
         code = sparseTextureGradClampARB(tex, uv, p.dx, p.dy, p.minLod, c);
     else if (p.mode == 2)
         code = sparseTextureLodARB(tex, uv, p.lod, c);
-    else
+    else if (p.mode == 3)
         code = sparseTexelFetchARB(tex, ivec2(xy) >> int(p.lod), int(p.lod), c);
+    else
+        code = sparseTextureGatherARB(tex, uv + 0.25 / 256.0, c);
     results[xy.y * 256 + xy.x] = Result(c, uvec4(sparseTexelsResidentARB(code) ? 1u : 0u));
 }
