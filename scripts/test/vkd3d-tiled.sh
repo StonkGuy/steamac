@@ -43,7 +43,8 @@ TESTS_DEFAULT=(
 
 ssh_g() {
     sshpass -p "${STEAMOS_PASSWORD:-steamos}" ssh -q -p "$PORT" -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 steamos@127.0.0.1 "$@"
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o ControlMaster=auto \
+        -o ControlPath="/tmp/vkd3d-tiled-ssh-$PORT" -o ControlPersist=120 steamos@127.0.0.1 "$@"
 }
 
 c_build() { # container side: /src (vkd3d-proton), /out, /t (scripts/test)
@@ -126,8 +127,13 @@ run() {
     while [[ -e $S/results-$n ]]; do n=$((n + 1)); done
     R=$S/results-$n; mkdir -p "$R"
     local i
-    for i in 1 2 3; do ssh_g 'mkdir -p ~/vkd3d-tiled' && break; sleep 3; done
-    (cd "$S/out/bin" && COPYFILE_DISABLE=1 tar --no-xattrs -cf - .) | ssh_g 'tar -xf - -C ~/vkd3d-tiled'
+    # retried: right after boot the guest's sshd occasionally drops a session
+    for i in 1 2 3 4 5; do
+        (cd "$S/out/bin" && COPYFILE_DISABLE=1 tar --no-xattrs -cf - .) \
+            | ssh_g 'mkdir -p ~/vkd3d-tiled && tar -xf - -C ~/vkd3d-tiled' && break
+        ((i < 5)) || { echo "copy to the guest failed" >&2; exit 1; }
+        sleep 5
+    done
     {
         echo "== host: macOS $(sw_vers -productVersion), driver ${VULKAN_DRIVER:-kosmickrisp}, $(cat "$S/vm/vm.env" 2>/dev/null)," \
             "$(stat -f '%Sm %N' "$REPO"/work/out/host/lib/libvulkan_kosmickrisp*.dylib 2>/dev/null | head -1)"
@@ -146,7 +152,7 @@ run() {
         local rc=0 line
         ssh_g "cd ~/vkd3d-tiled && ${GUEST_ENV:-} VKD3D_SHADER_CACHE_PATH=0 VKD3D_TEST_MATCH=$t \
             LD_LIBRARY_PATH=. timeout ${TEST_TIMEOUT:-300} ./d3d12 2>&1" > "$R/$t.log" || rc=$?
-        line=$(grep -E '^d3d12: [0-9]+ tests executed' "$R/$t.log" | tail -1)
+        line=$(grep -E '^d3d12: [0-9]+ tests executed' "$R/$t.log" | tail -1 || :)
         local verdict=PASS skipped=0
         [[ $line =~ \ ([0-9]+)\ skipped ]] && skipped=${BASH_REMATCH[1]}
         if ((rc == 124)); then verdict=TIMEOUT
