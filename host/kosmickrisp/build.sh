@@ -105,6 +105,11 @@
 #              results live in chunks of 32768 created as needed (16 per device; a render pass writes the
 #              chunk of its active query, a query of another chunk restarts the Metal render pass); timestamp
 #              pools take 32-entry chunks of 32 process-wide counter heaps of 4096.
+#   0038       steamac: a command queue error first logs the failed command buffer's GPU time and the semaphore
+#              waits submitted before their signal that are still unsignalled (value, current value, age; the
+#              queue keeps the last 8). STEAMAC-G: M3/M4/M5 lose devices with MTL4CommandQueueErrorTimeout after
+#              Steam's UI starts; on an M1 Max a Metal 4 queue wait that is never signalled ends after 4.0 s
+#              without an error, so the message has to tell such a wait from GPU work that ran too long.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -280,6 +285,7 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0035 = steamac: sparse residency through views with baseMipLevel > 0 (residency views from level 0), and of gathers"
 	echo "  0036 = steamac: sampler min/max emulation only for draws with a reduction sampler bound (second program)"
 	echo "  0037 = steamac: occlusion queries past one visibility buffer (chunks), timestamp pools on shared counter heaps"
+	echo "  0038 = steamac: command queue errors name the GPU time and still unsignalled semaphore waits"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."
