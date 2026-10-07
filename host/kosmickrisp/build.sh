@@ -47,7 +47,8 @@
 #              strict non-resident reads, per-layer mip tails from the first level smaller than a tile;
 #              sparse resources bind only the device-local memory type (never a host-pointer import).
 #              Not available: sparse 3D (Metal's 3D tiles are one slice deep, not Vulkan's standard 3D
-#              blocks), sparse MSAA.
+#              blocks), sparse MSAA. Within one render pass, depth writes to unbound tiles stay in tile
+#              memory for later draws of the pass (D3D12 Tiled Resources Tier 2 allows that cache).
 #   0029       steamac: sampler min/max reduction (VK_EXT_sampler_filter_minmax, filterMinmaxSingleComponentFormats)
 #              before Apple10, where Metal's reductionMode is unsupported: point samplers plus a shader
 #              footprint reduction (exact for 1D/2D/3D/arrays; anisotropy ignored, cube corners approximated).

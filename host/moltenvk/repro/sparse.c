@@ -823,6 +823,184 @@ static void grad_test(uint32_t base)
 	vkFreeMemory(dev, mem, NULL);
 }
 
+/* vkd3d-proton's test_sparse_depth_stencil_rendering: a 256x256 D32 sparse image with tile (0,0) bound, cleared to 0.5,
+ * then full-screen draws with depth test GREATER and depth writes: depth 0.25 writing 200, then depth 0.2 writing 150.
+ * Unbound tiles read depth 0 and drop writes (residencyNonResidentStrict), so each draw passes there and the second
+ * leaves 150; the bound tile keeps 0.5 and fails both (0). Draws in separate render passes must see that. Within one
+ * render pass Apple GPUs keep depth in tile memory, so the second draw tests against the first one's 0.25 (200): D3D12
+ * Tiled Resources Tier 2 allows it ("writes to non-mapped tiles can end up in a cache that subsequent reads could pick
+ * up"), vkd3d-proton's test expects the ideal behavior (todo on RADV); printed, not failed. After the passes, depth reads
+ * 0 in the unbound tiles and 0.5 in the bound one. */
+struct DepthPush { float depth, value; };
+static void depth_test(void)
+{
+	const VkFormat format = VK_FORMAT_D32_SFLOAT;
+	VkPhysicalDeviceSparseImageFormatInfo2 fi = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SPARSE_IMAGE_FORMAT_INFO_2,
+		.format = format, .type = VK_IMAGE_TYPE_2D, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+		.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT };
+	uint32_t count = 0;
+	vkGetPhysicalDeviceSparseImageFormatProperties2(pd, &fi, &count, NULL);
+	if (!count) {
+		check(1, "D32 sparse images not supported: sparse depth not tested");
+		return;
+	}
+	VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT, .imageType = VK_IMAGE_TYPE_2D,
+		.format = format, .extent = {256, 256, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+		.tiling = VK_IMAGE_TILING_OPTIMAL, .usage = fi.usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+	VkImage depth;
+	CK(vkCreateImage(dev, &ici, NULL, &depth));
+	VkMemoryRequirements mr;
+	vkGetImageMemoryRequirements(dev, depth, &mr);
+	VkDeviceMemory mem = allocate(PAGE, memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+	VkSparseImageMemoryBind tile = { .subresource = {VK_IMAGE_ASPECT_DEPTH_BIT,0,0}, .extent = {128,128,1}, .memory = mem };
+	VkSparseImageMemoryBindInfo binds = {depth, 1, &tile};
+	VkBindSparseInfo bi = { VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .imageBindCount = 1, .pImageBinds = &binds };
+	CK(vkQueueBindSparse(sparse_queue, 1, &bi, VK_NULL_HANDLE));
+	CK(vkQueueWaitIdle(sparse_queue));
+	ici.flags = 0;
+	ici.format = VK_FORMAT_R32_SFLOAT;
+	ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	VkImage color;
+	CK(vkCreateImage(dev, &ici, NULL, &color));
+	vkGetImageMemoryRequirements(dev, color, &mr);
+	VkDeviceMemory color_mem = allocate(mr.size, memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+	CK(vkBindImageMemory(dev, color, color_mem, 0));
+	VkImageViewCreateInfo vci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = depth, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = format, .subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 } };
+	VkImageView views[2];
+	CK(vkCreateImageView(dev, &vci, NULL, &views[1]));
+	vci.image = color;
+	vci.format = VK_FORMAT_R32_SFLOAT;
+	vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	CK(vkCreateImageView(dev, &vci, NULL, &views[0]));
+	VkAttachmentDescription attachments[2] = {
+		{ .format = VK_FORMAT_R32_SFLOAT, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE, .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL },
+		{ .format = format, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE, .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL },
+	};
+	VkAttachmentReference color_ref = { 0, VK_IMAGE_LAYOUT_GENERAL }, depth_ref = { 1, VK_IMAGE_LAYOUT_GENERAL };
+	VkSubpassDescription subpass = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1,
+		.pColorAttachments = &color_ref, .pDepthStencilAttachment = &depth_ref };
+	VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 2, .pAttachments = attachments,
+		.subpassCount = 1, .pSubpasses = &subpass };
+	VkRenderPass rp;
+	CK(vkCreateRenderPass(dev, &rpci, NULL, &rp));
+	VkFramebufferCreateInfo fci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp, .attachmentCount = 2,
+		.pAttachments = views, .width = 256, .height = 256, .layers = 1 };
+	VkFramebuffer fb;
+	CK(vkCreateFramebuffer(dev, &fci, NULL, &fb));
+	VkPushConstantRange push = { VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(struct DepthPush) };
+	VkPipelineLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .pushConstantRangeCount = 1, .pPushConstantRanges = &push };
+	VkPipelineLayout layout;
+	CK(vkCreatePipelineLayout(dev, &lci, NULL, &layout));
+	VkShaderModule vs = module("sparse_depth.vert.spv"), fs = module("sparse_depth.frag.spv");
+	VkPipelineShaderStageCreateInfo stages[] = {
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main" },
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main" },
+	};
+	VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+	VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+	VkViewport viewport = { 0, 0, 256, 256, 0, 1 };
+	VkRect2D scissor = { {0, 0}, {256, 256} };
+	VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .pViewports = &viewport,
+		.scissorCount = 1, .pScissors = &scissor };
+	VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL,
+		.cullMode = VK_CULL_MODE_NONE, .lineWidth = 1 };
+	VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+	VkPipelineDepthStencilStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = VK_TRUE,
+		.depthWriteEnable = VK_TRUE, .depthCompareOp = VK_COMPARE_OP_GREATER };
+	VkPipelineColorBlendAttachmentState blend = { .colorWriteMask = 0xf };
+	VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &blend };
+	VkGraphicsPipelineCreateInfo gci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = stages,
+		.pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vp, .pRasterizationState = &rs,
+		.pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &cb, .layout = layout, .renderPass = rp };
+	VkPipeline pipeline;
+	CK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, NULL, &pipeline));
+	vkDestroyShaderModule(dev, vs, NULL);
+	vkDestroyShaderModule(dev, fs, NULL);
+	struct Buffer out = host_buffer(2 * 256 * 256 * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	const struct DepthPush draws[2] = { { 0.25f, 200 }, { 0.2f, 150 } };
+	for (uint32_t one_pass = 0; one_pass < 2; one_pass++) {
+		VkCommandBuffer cmd = begin();
+		VkImageMemoryBarrier layouts[2];
+		for (uint32_t i = 0; i < 2; i++)
+			layouts[i] = (VkImageMemoryBarrier){ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+				.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+				.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = i ? depth : color,
+				.subresourceRange = { i ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, layouts);
+		VkClearDepthStencilValue clear_depth = { 0.5f, 0 };
+		VkClearColorValue clear_color = {{0}};
+		VkImageSubresourceRange depth_range = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }, color_range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		vkCmdClearDepthStencilImage(cmd, depth, VK_IMAGE_LAYOUT_GENERAL, &clear_depth, 1, &depth_range);
+		vkCmdClearColorImage(cmd, color, VK_IMAGE_LAYOUT_GENERAL, &clear_color, 1, &color_range);
+		barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+			VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+		VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = scissor };
+		for (uint32_t d = 0; d < 2; d++) {
+			if (!one_pass || d == 0) vkCmdBeginRenderPass(cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			vkCmdPushConstants(cmd, layout, push.stageFlags, 0, sizeof(draws[d]), &draws[d]);
+			vkCmdDraw(cmd, 3, 1, 0, 0);
+			if (!one_pass || d == 1) vkCmdEndRenderPass(cmd);
+			if (!one_pass && d == 0)
+				barrier(cmd, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+					VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+					VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+					VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+					VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+		}
+		barrier(cmd, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_ACCESS_TRANSFER_READ_BIT);
+		VkBufferImageCopy copies[2] = {
+			{ .bufferOffset = 0, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = {256, 256, 1} },
+			{ .bufferOffset = 256 * 256 * 4, .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 }, .imageExtent = {256, 256, 1} },
+		};
+		vkCmdCopyImageToBuffer(cmd, color, VK_IMAGE_LAYOUT_GENERAL, out.buffer, 1, &copies[0]);
+		vkCmdCopyImageToBuffer(cmd, depth, VK_IMAGE_LAYOUT_GENERAL, out.buffer, 1, &copies[1]);
+		barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+		submit(cmd, VK_NULL_HANDLE, 0, 0);
+		host_sync(&out, 1);
+		const float *values = out.map, *depths = values + 256 * 256;
+		uint32_t bad = 0, cached = 0, bad_depth = 0;
+		for (uint32_t y = 0; y < 256; y++) for (uint32_t x = 0; x < 256; x++) {
+			int bound = x < 128 && y < 128;
+			float value = values[y * 256 + x], want = bound ? 0.0f : 150.0f;
+			if (one_pass && !bound && value == 200.0f)
+				cached++;
+			else if (value != want && bad++ < 3)
+				printf("     (%u,%u) %s: expected %g, got %g\n", x, y, one_pass ? "one render pass" : "two render passes", want, value);
+			float d = depths[y * 256 + x], want_depth = bound ? 0.5f : 0.0f;
+			if (d != want_depth && bad_depth++ < 3)
+				printf("     (%u,%u) depth after the passes: expected %g, got %g\n", x, y, want_depth, d);
+		}
+		check(!bad && !bad_depth, "D32 sparse depth test/write in %s: 65536 pixels, %u wrong colors, %u wrong depths after the passes",
+			one_pass ? "one render pass" : "two render passes", bad, bad_depth);
+		if (cached)
+			printf("INFO D32 sparse depth in one render pass: %u pixels of unbound tiles tested against the first draw's depth "
+				"(tile memory; Tiled Resources Tier 2 allows it)\n", cached);
+	}
+	buffer_destroy(&out);
+	vkDestroyPipeline(dev, pipeline, NULL);
+	vkDestroyPipelineLayout(dev, layout, NULL);
+	vkDestroyFramebuffer(dev, fb, NULL);
+	vkDestroyRenderPass(dev, rp, NULL);
+	vkDestroyImageView(dev, views[0], NULL);
+	vkDestroyImageView(dev, views[1], NULL);
+	vkDestroyImage(dev, color, NULL);
+	vkDestroyImage(dev, depth, NULL);
+	vkFreeMemory(dev, color_mem, NULL);
+	vkFreeMemory(dev, mem, NULL);
+}
+
 static void buffer_test(void)
 {
 	const VkDeviceSize size = 1024 * 1024;
@@ -1416,6 +1594,7 @@ int main(int argc, char **argv)
 			if (!setjmp(recovery)) image_test(VK_FORMAT_R32_SFLOAT);
 			if (!setjmp(recovery)) grad_test(0);
 			if (!setjmp(recovery)) grad_test(1);
+			if (!setjmp(recovery)) depth_test();
 		}
 	}
 	if (do_buffer) {

@@ -88,8 +88,10 @@
 #    gathers reaching or passing the last level (NEAREST and LINEAR mip), through samplers clamping the LOD and through
 #    views with baseMipLevel > 0 (also fetches, explicit-LOD samples through a MIN reduction sampler and imageLoad of
 #    storage views of levels > 0: Metal reported the image's level lod instead of base + lod); gathers whose footprint
-#    crosses into an unbound tile (Metal reported them resident); R32/R8 sampler MIN/MAX reduction over bilinear
-#    footprints and adjacent mip levels, with weighted-average controls.
+#    crosses into an unbound tile (Metal reported them resident); a D32 sparse depth attachment with unbound tiles
+#    (depth tests read 0 and writes are dropped across render passes; within one render pass tile memory keeps them,
+#    printed as INFO: Tiled Resources Tier 2 allows it); R32/R8 sampler MIN/MAX reduction over bilinear footprints and
+#    adjacent mip levels, with weighted-average controls.
 # All run with Metal API validation in assert mode (MTL_DEBUG_LAYER), so a Metal validation error
 # fails the run instead of aborting a VM later.
 # All applicable tests must pass on MoltenVK. On KosmicKrisp all but 5 and 10 must pass (1 sizes the descriptor pool with
