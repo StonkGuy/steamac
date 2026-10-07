@@ -87,6 +87,16 @@
 #              same operation on that view at level/LOD + base, with the sampler's LOD clamps applied in the
 #              shader (samplers get an unclamped copy when they could matter); gathers take that of a
 #              bilinear sample of their level through a LINEAR unclamped copy of the sampler.
+#   0036       steamac: sampler min/max emulation (0029) only for draws/dispatches with a reduction sampler
+#              bound. It cost every sample, also through ordinary samplers (twice the GPU time of
+#              sampling-bound shaders, 1.3-1.6x their compile time). Pipelines sampling from descriptor sets
+#              get a program without the emulation (immutable samplers resolved at compile time) and one
+#              with it, used while a bound set (per-set count of reduction samplers, never decremented)
+#              holds one; the second program's MSL is built at creation, its Metal compile happens on first
+#              use (first at creation once a set of the pipeline's layout got a reduction sampler: descriptor
+#              heaps). Update-after-bind sets that get one after recording make the submission re-record the
+#              command buffer; one-time-submit buffers use the emulating program for them. MESA_KK_DEBUG=minmax
+#              logs reduction samplers, emulating/plain programs compiled and re-recordings.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -260,6 +270,7 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0033 = steamac: VK_EXT_image_view_min_lod by default"
 	echo "  0034 = steamac: residency of sparse loads through texel buffer views (residency texture per buffer)"
 	echo "  0035 = steamac: sparse residency through views with baseMipLevel > 0 (residency views from level 0), and of gathers"
+	echo "  0036 = steamac: sampler min/max emulation only for draws with a reduction sampler bound (second program)"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."

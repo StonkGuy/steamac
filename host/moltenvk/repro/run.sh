@@ -91,7 +91,12 @@
 #    crosses into an unbound tile (Metal reported them resident); a D32 sparse depth attachment with unbound tiles
 #    (depth tests read 0 and writes are dropped across render passes; within one render pass tile memory keeps them,
 #    printed as INFO: Tiled Resources Tier 2 allows it); R32/R8 sampler MIN/MAX reduction over bilinear footprints and
-#    adjacent mip levels, with weighted-average controls.
+#    adjacent mip levels, with weighted-average controls, through immutable samplers, update-after-bind sets that get
+#    the reduction sampler after recording (replayed at submission, and one-time-submit) and sets rewritten before a
+#    resubmission; then (sparse minmax-log, MESA_KK_DEBUG=minmax) where KosmicKrisp emulates MIN/MAX (before Apple10),
+#    dispatches without a reduction sampler bound must run the pipeline's program without the emulation (its log
+#    names every other program compiled: none until a reduction sampler is bound, then the emulating one once; a
+#    pipeline created after its layout got one compiles the emulating program first and the plain one on first use).
 # All run with Metal API validation in assert mode (MTL_DEBUG_LAYER), so a Metal validation error
 # fails the run instead of aborting a VM later.
 # All applicable tests must pass on MoltenVK. On KosmicKrisp all but 5 and 10 must pass (1 sizes the descriptor pool with
@@ -277,4 +282,5 @@ build host_memory
 if [ "$driver" = kosmickrisp ]; then
 	build sparse
 	"$work/sparse" "$gspv"
+	"$work/sparse" "$gspv" minmax-log
 fi

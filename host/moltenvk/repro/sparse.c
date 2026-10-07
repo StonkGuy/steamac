@@ -2,7 +2,8 @@
  * D3D12 Tiled Resources Tier 2 as used by vkd3d-proton: sparse image/buffer
  * mappings, strict non-resident reads, residency instructions, minimum LOD,
  * aliasing, and sampler min/max reduction. No unsupported feature is enabled.
- * Run: sparse <geometry-spv directory> [image|buffer|minmax|features]
+ * Run: sparse <geometry-spv directory> [image|buffer|minmax|minmax-log|features]
+ * (minmax-log: KosmicKrisp's MESA_KK_DEBUG=minmax log of the sampler min/max programs it compiles)
  * Each independent subtest continues after a failure; API errors abandon only
  * that subtest. The process intentionally leaves remaining handles to exit on
  * an API failure (a device-loss path must not prevent the other diagnostics).
@@ -14,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <vulkan/vulkan.h>
 
 #define PAGE 65536ull
@@ -159,15 +161,19 @@ static void pipeline_destroy(struct Pipeline *p)
 	vkDestroyPipelineLayout(dev, p->layout, NULL);
 	vkDestroyDescriptorSetLayout(dev, p->dsl, NULL);
 }
-static VkCommandBuffer begin(void)
+static VkCommandBuffer begin_flags(VkCommandBufferUsageFlags flags)
 {
 	VkCommandBufferAllocateInfo ai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool,
 		.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
 	VkCommandBuffer cmd;
 	CK(vkAllocateCommandBuffers(dev, &ai, &cmd));
-	VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+	VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = flags };
 	CK(vkBeginCommandBuffer(cmd, &bi));
 	return cmd;
+}
+static VkCommandBuffer begin(void)
+{
+	return begin_flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 }
 static void barrier(VkCommandBuffer cmd, VkPipelineStageFlags src, VkAccessFlags src_access,
 	VkPipelineStageFlags dst, VkAccessFlags dst_access)
@@ -187,6 +193,13 @@ static void submit(VkCommandBuffer cmd, VkSemaphore wait, uint64_t value, int ti
 	CK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
 	CK(vkQueueWaitIdle(queue));
 	vkFreeCommandBuffers(dev, pool, 1, &cmd);
+}
+/* Submits an ended command buffer and waits; the caller frees it. */
+static void submit_ended(VkCommandBuffer cmd)
+{
+	VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
+	CK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+	CK(vkQueueWaitIdle(queue));
 }
 static void dispatch(VkCommandBuffer cmd, struct Pipeline *p, const void *push, uint32_t size, uint32_t x, uint32_t y)
 {
@@ -1362,9 +1375,9 @@ static float reduction_expected(float u, float v, float lod, VkSamplerReductionM
 	}
 	return result;
 }
-static void minmax_test(VkFormat format)
+struct MinmaxImage { VkImage image; VkDeviceMemory mem; VkImageView view; };
+static struct MinmaxImage minmax_image(VkFormat format)
 {
-	const char *name = format == VK_FORMAT_R32_SFLOAT ? "R32" : "R8";
 	VkFormatProperties props;
 	vkGetPhysicalDeviceFormatProperties(pd, format, &props);
 	require((props.optimalTilingFeatures & (VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
@@ -1374,12 +1387,12 @@ static void minmax_test(VkFormat format)
 	VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = format,
 		.extent = {4,4,1}, .mipLevels = 2, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
 		.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT };
-	VkImage image;
-	CK(vkCreateImage(dev, &ici, NULL, &image));
+	struct MinmaxImage m;
+	CK(vkCreateImage(dev, &ici, NULL, &m.image));
 	VkMemoryRequirements mr;
-	vkGetImageMemoryRequirements(dev, image, &mr);
-	VkDeviceMemory mem = allocate(mr.size, memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
-	CK(vkBindImageMemory(dev, image, mem, 0));
+	vkGetImageMemoryRequirements(dev, m.image, &mr);
+	m.mem = allocate(mr.size, memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT));
+	CK(vkBindImageMemory(dev, m.image, m.mem, 0));
 	uint32_t bpp = format == VK_FORMAT_R32_SFLOAT ? 4 : 1;
 	struct Buffer upload = host_buffer(20 * bpp, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 	for (uint32_t l = 0; l < 2; l++) {
@@ -1396,15 +1409,83 @@ static void minmax_test(VkFormat format)
 		{ .bufferOffset = 16 * bpp, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,1,0,1}, .imageExtent = {2,2,1} },
 	};
 	VkCommandBuffer cmd = begin();
-	image_barrier(cmd, image, 2, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	image_barrier(cmd, m.image, 2, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 	barrier(cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-	vkCmdCopyBufferToImage(cmd, upload.buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 2, copies);
-	image_barrier(cmd, image, 2, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	vkCmdCopyBufferToImage(cmd, upload.buffer, m.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 2, copies);
+	image_barrier(cmd, m.image, 2, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 	submit(cmd, VK_NULL_HANDLE, 0, 0);
 	buffer_destroy(&upload);
-	VkImageView view = view_create(image, format, 0, 2, 1);
+	m.view = view_create(m.image, format, 0, 2, 1);
+	return m;
+}
+static void minmax_image_destroy(struct MinmaxImage *m)
+{
+	vkDestroyImageView(dev, m->view, NULL);
+	vkDestroyImage(dev, m->image, NULL);
+	vkFreeMemory(dev, m->mem, NULL);
+}
+struct MinmaxSample { float u, v, lod; uint32_t index; };
+/* Exact texel centers also test exclusion of zero-weight neighbors. */
+static const struct MinmaxSample minmax_samples[] = {
+	{0.375f,0.375f,0,0}, {0.4375f,0.5625f,0,0}, {0.5f,0.5f,0,0}, {0.0625f,0.9375f,0,0},
+	{0.375f,0.375f,1,0}, {0.5f,0.5f,1,0}, {0.25f,0.25f,1,0},
+	/* Avoid the implementation-dependent nearest-mip tie at LOD 0.5. */
+	{0.375f,0.375f,0.25f,0}, {0.4375f,0.5625f,0.75f,0}, {0.5f,0.5f,0.625f,0},
+};
+static VkSampler minmax_sampler(VkSamplerReductionMode mode, VkSamplerMipmapMode mipmap)
+{
+	VkSamplerReductionModeCreateInfo reduction = { VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO, .reductionMode = mode };
+	VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .pNext = &reduction,
+		.magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = mipmap,
+		.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+		.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = 1 };
+	VkSampler sampler;
+	CK(vkCreateSampler(dev, &sci, NULL, &sampler));
+	return sampler;
+}
+static void minmax_reset(struct Buffer *out)
+{
+	memset(out->map, 0xff, out->size);
+	host_sync(out, 0);
+}
+/* Samples minmax_samples through binding 0 of set into binding 1 (sparse_minmax.comp). */
+static void minmax_record(VkCommandBuffer cmd, VkPipeline pipeline, VkPipelineLayout layout, VkDescriptorSet set)
+{
+	barrier(cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+	for (uint32_t i = 0; i < ARRAY_SIZE(minmax_samples); i++) {
+		struct MinmaxSample push = minmax_samples[i];
+		push.index = i;
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, NULL);
+		vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+		vkCmdDispatch(cmd, 1, 1, 1);
+	}
+	barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+}
+static void minmax_check(struct Buffer *out, VkSamplerReductionMode mode, VkSamplerMipmapMode mipmap, const char *what)
+{
+	static const char *const mode_names[] = {
+		[VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE] = "WEIGHTED_AVERAGE",
+		[VK_SAMPLER_REDUCTION_MODE_MIN] = "MIN", [VK_SAMPLER_REDUCTION_MODE_MAX] = "MAX" };
+	host_sync(out, 1);
+	float *values = out->map;
+	uint32_t bad = 0;
+	for (uint32_t i = 0; i < ARRAY_SIZE(minmax_samples); i++) {
+		const struct MinmaxSample *s = &minmax_samples[i];
+		float want = reduction_expected(s->u,s->v,s->lod,mode,mipmap);
+		/* Allows fixed-point interpolation of the weighted-average control, not a wrong extremum. */
+		float tolerance = mode == VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE ? 0.003f : 0.00002f;
+		if ((!isfinite(values[i]) || fabsf(values[i] - want) > tolerance) && bad++ < 4)
+			printf("     uv=(%g,%g) lod=%g expected=%g got=%g\n", s->u,s->v,s->lod,want,values[i]);
+	}
+	check(!bad, "%s reduction %s, mip %s: %zu samples, %u mismatches", what, mode_names[mode],
+		mipmap == VK_SAMPLER_MIPMAP_MODE_LINEAR ? "LINEAR" : "NEAREST", ARRAY_SIZE(minmax_samples), bad);
+}
+static void minmax_test(VkFormat format)
+{
+	struct MinmaxImage img = minmax_image(format);
 	struct Buffer out = host_buffer(64 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	VkDescriptorType types[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
 	struct Pipeline p = pipeline_create("sparse_minmax.comp.spv", types, 2, 16);
@@ -1412,68 +1493,286 @@ static void minmax_test(VkFormat format)
 	VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = p.set, .dstBinding = 1,
 		.descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &output };
 	vkUpdateDescriptorSets(dev, 1, &write, 0, NULL);
-	struct Sample {float u,v,lod; uint32_t index;};
-	/* Exact texel centers also test exclusion of zero-weight neighbors. */
-	const struct Sample samples[] = {
-		{0.375f,0.375f,0,0}, {0.4375f,0.5625f,0,0}, {0.5f,0.5f,0,0}, {0.0625f,0.9375f,0,0},
-		{0.375f,0.375f,1,0}, {0.5f,0.5f,1,0}, {0.25f,0.25f,1,0},
-		/* Avoid the implementation-dependent nearest-mip tie at LOD 0.5. */
-		{0.375f,0.375f,0.25f,0}, {0.4375f,0.5625f,0.75f,0}, {0.5f,0.5f,0.625f,0},
-	};
 	const VkSamplerReductionMode modes[] = {VK_SAMPLER_REDUCTION_MODE_MIN,VK_SAMPLER_REDUCTION_MODE_MAX,VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE};
-	const char *mode_names[] = {"MIN","MAX","WEIGHTED_AVERAGE"};
 	for (uint32_t m = 0; m < ARRAY_SIZE(modes); m++) for (uint32_t mip = 0; mip < 2; mip++) {
 		VkSamplerMipmapMode mm = mip ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-		VkSamplerReductionModeCreateInfo reduction = { VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO, .reductionMode = modes[m] };
-		VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .pNext = &reduction,
-			.magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = mm,
-			.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-			.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = 1 };
-		VkSampler sampler;
-		CK(vkCreateSampler(dev, &sci, NULL, &sampler));
-		VkDescriptorImageInfo input = {sampler,view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+		VkSampler sampler = minmax_sampler(modes[m], mm);
+		VkDescriptorImageInfo input = {sampler,img.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 		write = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = p.set, .dstBinding = 0,
 			.descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &input };
 		vkUpdateDescriptorSets(dev, 1, &write, 0, NULL);
-		memset(out.map, 0xff, out.size);
-		host_sync(&out, 0);
-		cmd = begin();
-		barrier(cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-		for (uint32_t i = 0; i < ARRAY_SIZE(samples); i++) {
-			struct Sample push = samples[i];
-			push.index = i;
-			dispatch(cmd, &p, &push, sizeof(push), 1, 1);
-		}
-		barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+		minmax_reset(&out);
+		VkCommandBuffer cmd = begin();
+		minmax_record(cmd, p.pipeline, p.layout, p.set);
 		submit(cmd, VK_NULL_HANDLE, 0, 0);
-		host_sync(&out, 1);
-		float *values = out.map;
-		uint32_t bad = 0;
-		for (uint32_t i = 0; i < ARRAY_SIZE(samples); i++) {
-			float want = reduction_expected(samples[i].u,samples[i].v,samples[i].lod,modes[m],mm);
-			/* Allows fixed-point interpolation of the weighted-average control, not a wrong extremum. */
-			float tolerance = modes[m] == VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE ? 0.003f : 0.00002f;
-			if ((!isfinite(values[i]) || fabsf(values[i] - want) > tolerance) && bad++ < 4)
-				printf("     uv=(%g,%g) lod=%g expected=%g got=%g\n", samples[i].u,samples[i].v,samples[i].lod,want,values[i]);
-		}
-		check(!bad, "%s reduction %s, mip %s: %zu samples, %u mismatches", name, mode_names[m], mip ? "LINEAR" : "NEAREST", ARRAY_SIZE(samples), bad);
+		minmax_check(&out, modes[m], mm, format == VK_FORMAT_R32_SFLOAT ? "R32" : "R8");
 		vkDestroySampler(dev, sampler, NULL);
 	}
 	pipeline_destroy(&p);
 	buffer_destroy(&out);
-	vkDestroyImageView(dev, view, NULL);
-	vkDestroyImage(dev, image, NULL);
-	vkFreeMemory(dev, mem, NULL);
+	minmax_image_destroy(&img);
+}
+
+/* Set layout 0 of sparse_minmax.comp (combined image sampler, output buffer), optionally with an immutable
+ * sampler or update-after-bind, and a pool of `sets` sets of it. */
+struct MinmaxLayout { VkDescriptorSetLayout dsl; VkPipelineLayout layout; VkDescriptorPool pool; };
+static struct MinmaxLayout minmax_layout(const VkSampler *immutable, int update_after_bind, uint32_t sets)
+{
+	struct MinmaxLayout l;
+	VkDescriptorSetLayoutBinding bindings[] = {
+		{ 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, immutable },
+		{ 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL },
+	};
+	VkDescriptorBindingFlags flags[] = { VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, 0 };
+	VkDescriptorSetLayoutBindingFlagsCreateInfo fci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
+		.bindingCount = 2, .pBindingFlags = flags };
+	VkDescriptorSetLayoutCreateInfo dci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.pNext = update_after_bind ? &fci : NULL,
+		.flags = update_after_bind ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT : 0,
+		.bindingCount = 2, .pBindings = bindings };
+	CK(vkCreateDescriptorSetLayout(dev, &dci, NULL, &l.dsl));
+	VkPushConstantRange push = { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(struct MinmaxSample) };
+	VkPipelineLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &l.dsl,
+		.pushConstantRangeCount = 1, .pPushConstantRanges = &push };
+	CK(vkCreatePipelineLayout(dev, &lci, NULL, &l.layout));
+	VkDescriptorPoolSize sizes[] = { {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sets}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets} };
+	VkDescriptorPoolCreateInfo pci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.flags = update_after_bind ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT : 0,
+		.maxSets = sets, .poolSizeCount = 2, .pPoolSizes = sizes };
+	CK(vkCreateDescriptorPool(dev, &pci, NULL, &l.pool));
+	return l;
+}
+static void minmax_layout_destroy(struct MinmaxLayout *l)
+{
+	vkDestroyDescriptorPool(dev, l->pool, NULL);
+	vkDestroyPipelineLayout(dev, l->layout, NULL);
+	vkDestroyDescriptorSetLayout(dev, l->dsl, NULL);
+}
+/* `variant` is specialization data no constant uses: it keeps the runtime's pipeline cache from returning the
+ * shaders of an earlier pipeline. */
+static VkPipeline minmax_pipeline_cached(VkPipelineLayout layout, uint32_t variant, VkPipelineCache cache)
+{
+	VkShaderModule m = module("sparse_minmax.comp.spv");
+	VkSpecializationInfo spec = { .dataSize = sizeof(variant), .pData = &variant };
+	VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+		.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m,
+			.pName = "main", .pSpecializationInfo = &spec },
+		.layout = layout };
+	VkPipeline pipeline;
+	CK(vkCreateComputePipelines(dev, cache, 1, &ci, NULL, &pipeline));
+	vkDestroyShaderModule(dev, m, NULL);
+	return pipeline;
+}
+static VkPipeline minmax_pipeline(VkPipelineLayout layout, uint32_t variant)
+{
+	return minmax_pipeline_cached(layout, variant, VK_NULL_HANDLE);
+}
+static void minmax_write_sampler(VkDescriptorSet set, VkImageView view, VkSampler sampler)
+{
+	VkDescriptorImageInfo input = {sampler,view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+	VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
+		.descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &input };
+	vkUpdateDescriptorSets(dev, 1, &write, 0, NULL);
+}
+static VkDescriptorSet minmax_set(struct MinmaxLayout *l, VkImageView view, VkSampler sampler, struct Buffer *out)
+{
+	VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = l->pool,
+		.descriptorSetCount = 1, .pSetLayouts = &l->dsl };
+	VkDescriptorSet set;
+	CK(vkAllocateDescriptorSets(dev, &ai, &set));
+	minmax_write_sampler(set, view, sampler);
+	VkDescriptorBufferInfo output = {out->buffer,0,out->size};
+	VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 1,
+		.descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &output };
+	vkUpdateDescriptorSets(dev, 1, &write, 0, NULL);
+	return set;
+}
+static void minmax_run(VkPipeline pipeline, VkPipelineLayout layout, VkDescriptorSet set, struct Buffer *out)
+{
+	minmax_reset(out);
+	VkCommandBuffer cmd = begin();
+	minmax_record(cmd, pipeline, layout, set);
+	submit(cmd, VK_NULL_HANDLE, 0, 0);
+}
+
+/* Where KosmicKrisp emulates min/max reduction (before Apple10), pipelines have a program without the
+ * emulation for samplers from descriptor sets, used unless a bound set holds a reduction sampler: reduction
+ * samplers must reduce through immutable samplers, through update-after-bind sets that get them after recording
+ * (the command buffer is replayed at submission) and through one-time-submit command buffers (not replayable). */
+static void minmax_paths_test(int update_after_bind)
+{
+	struct MinmaxImage img = minmax_image(VK_FORMAT_R32_SFLOAT);
+	struct Buffer out = host_buffer(64 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	VkSampler min_linear = minmax_sampler(VK_SAMPLER_REDUCTION_MODE_MIN, VK_SAMPLER_MIPMAP_MODE_LINEAR);
+	VkSampler max_nearest = minmax_sampler(VK_SAMPLER_REDUCTION_MODE_MAX, VK_SAMPLER_MIPMAP_MODE_NEAREST);
+	VkSampler average = minmax_sampler(VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE, VK_SAMPLER_MIPMAP_MODE_LINEAR);
+
+	struct MinmaxLayout fixed = minmax_layout(&min_linear, 0, 1);
+	VkPipeline pipeline = minmax_pipeline(fixed.layout, 1);
+	VkDescriptorSet set = minmax_set(&fixed, img.view, VK_NULL_HANDLE, &out);
+	minmax_run(pipeline, fixed.layout, set, &out);
+	minmax_check(&out, VK_SAMPLER_REDUCTION_MODE_MIN, VK_SAMPLER_MIPMAP_MODE_LINEAR, "R32 immutable sampler:");
+	vkDestroyPipeline(dev, pipeline, NULL);
+	minmax_layout_destroy(&fixed);
+
+	/* A pipeline read back from pipeline cache data carries both programs */
+	struct MinmaxLayout plain = minmax_layout(NULL, 0, 1);
+	VkPipelineCacheCreateInfo cci = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+	VkPipelineCache cache;
+	CK(vkCreatePipelineCache(dev, &cci, NULL, &cache));
+	vkDestroyPipeline(dev, minmax_pipeline_cached(plain.layout, 5, cache), NULL);
+	size_t size = 0;
+	CK(vkGetPipelineCacheData(dev, cache, &size, NULL));
+	void *data = malloc(size);
+	require(data != NULL, "allocate pipeline cache data");
+	CK(vkGetPipelineCacheData(dev, cache, &size, data));
+	vkDestroyPipelineCache(dev, cache, NULL);
+	cci.initialDataSize = size;
+	cci.pInitialData = data;
+	CK(vkCreatePipelineCache(dev, &cci, NULL, &cache));
+	free(data);
+	pipeline = minmax_pipeline_cached(plain.layout, 5, cache);
+	set = minmax_set(&plain, img.view, min_linear, &out);
+	minmax_run(pipeline, plain.layout, set, &out);
+	minmax_check(&out, VK_SAMPLER_REDUCTION_MODE_MIN, VK_SAMPLER_MIPMAP_MODE_LINEAR, "R32 pipeline from pipeline cache data:");
+	vkDestroyPipeline(dev, pipeline, NULL);
+	vkDestroyPipelineCache(dev, cache, NULL);
+	minmax_layout_destroy(&plain);
+
+	if (!update_after_bind) {
+		check(0, "update-after-bind min/max cases unavailable (descriptorBindingSampledImageUpdateAfterBind missing)");
+	} else {
+		struct MinmaxLayout uab = minmax_layout(NULL, 1, 2);
+		pipeline = minmax_pipeline(uab.layout, 2);
+		for (int once = 0; once < 2; once++) {
+			const char *what = once ? "R32 update-after-bind sampler written after recording, one-time submit:"
+			                        : "R32 update-after-bind sampler written after recording, replayed:";
+			set = minmax_set(&uab, img.view, average, &out);
+			minmax_reset(&out);
+			VkCommandBuffer cmd = begin_flags(once ? VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT : 0);
+			minmax_record(cmd, pipeline, uab.layout, set);
+			CK(vkEndCommandBuffer(cmd));
+			minmax_write_sampler(set, img.view, max_nearest);
+			submit_ended(cmd);
+			minmax_check(&out, VK_SAMPLER_REDUCTION_MODE_MAX, VK_SAMPLER_MIPMAP_MODE_NEAREST, what);
+			if (!once) {
+				/* Resubmitted after the set went back to a weighted-average sampler */
+				minmax_write_sampler(set, img.view, average);
+				minmax_reset(&out);
+				submit_ended(cmd);
+				minmax_check(&out, VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE, VK_SAMPLER_MIPMAP_MODE_LINEAR,
+					"R32 update-after-bind sampler rewritten, resubmitted:");
+			}
+			vkFreeCommandBuffers(dev, pool, 1, &cmd);
+		}
+		vkDestroyPipeline(dev, pipeline, NULL);
+		minmax_layout_destroy(&uab);
+	}
+	vkDestroySampler(dev, min_linear, NULL);
+	vkDestroySampler(dev, max_nearest, NULL);
+	vkDestroySampler(dev, average, NULL);
+	buffer_destroy(&out);
+	minmax_image_destroy(&img);
+}
+
+/* stderr of the process (fd 2) goes to log_file during minmax_log_test */
+static FILE *log_file;
+static long log_mark(void)
+{
+	fflush(stderr);
+	return lseek(fileno(log_file), 0, SEEK_END);
+}
+/* Occurrences of needle the driver logged since mark */
+static uint32_t log_count(long mark, const char *needle)
+{
+	long end = log_mark();
+	char *text = calloc(1, (size_t)(end - mark) + 1);
+	require(text != NULL, "allocate log");
+	require(pread(fileno(log_file), text, (size_t)(end - mark), mark) == end - mark, "read log");
+	uint32_t count = 0;
+	for (const char *p = text; (p = strstr(p, needle)) != NULL; p += strlen(needle)) count++;
+	free(text);
+	return count;
+}
+/* MESA_KK_DEBUG=minmax logs every program compiled after the one a pipeline gets at creation ("<plain|min/max
+ * emulating> program of a pipeline compiled on first use") and emulating programs compiled at creation: a
+ * dispatch can only have used a program that was compiled. */
+static void minmax_log_test(void)
+{
+	struct MinmaxImage img = minmax_image(VK_FORMAT_R32_SFLOAT);
+	struct Buffer out = host_buffer(64 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	VkSampler average = minmax_sampler(VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE, VK_SAMPLER_MIPMAP_MODE_LINEAR);
+	struct MinmaxLayout l = minmax_layout(NULL, 0, 2);
+
+	long mark = log_mark();
+	VkPipeline first = minmax_pipeline(l.layout, 3);
+	VkDescriptorSet regular = minmax_set(&l, img.view, average, &out);
+	minmax_run(first, l.layout, regular, &out);
+	minmax_check(&out, VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE, VK_SAMPLER_MIPMAP_MODE_LINEAR, "R32 log, no reduction sampler:");
+	uint32_t n = log_count(mark, "program of a pipeline compiled");
+	check(n == 0, "no reduction sampler bound: dispatches ran the program without min/max emulation (%u emulating programs compiled)", n);
+
+	mark = log_mark();
+	VkSampler min_linear = minmax_sampler(VK_SAMPLER_REDUCTION_MODE_MIN, VK_SAMPLER_MIPMAP_MODE_LINEAR);
+	if (!log_count(mark, "sampler with a min/max reduction created (emulated)")) {
+		printf("INFO hardware sampler min/max reduction (Apple10 and later): nothing emulated, no programs to log\n");
+		vkDestroyPipeline(dev, first, NULL);
+		minmax_layout_destroy(&l);
+		vkDestroySampler(dev, average, NULL);
+		vkDestroySampler(dev, min_linear, NULL);
+		buffer_destroy(&out);
+		minmax_image_destroy(&img);
+		return;
+	}
+	VkDescriptorSet reducing = minmax_set(&l, img.view, min_linear, &out);
+	minmax_run(first, l.layout, reducing, &out);
+	minmax_check(&out, VK_SAMPLER_REDUCTION_MODE_MIN, VK_SAMPLER_MIPMAP_MODE_LINEAR, "R32 log, reduction sampler bound:");
+	n = log_count(mark, "min/max emulating program of a pipeline compiled on first use");
+	check(n == 1 && log_count(mark, "program of a pipeline compiled") == 1,
+		"reduction sampler bound: the emulating program compiled on first use (%u)", n);
+
+	mark = log_mark();
+	minmax_run(first, l.layout, regular, &out);
+	minmax_check(&out, VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE, VK_SAMPLER_MIPMAP_MODE_LINEAR, "R32 log, back to no reduction sampler:");
+	n = log_count(mark, "program of a pipeline compiled");
+	check(n == 0, "both programs compiled: switching back compiles nothing (%u)", n);
+
+	mark = log_mark();
+	VkPipeline second = minmax_pipeline(l.layout, 4);
+	n = log_count(mark, "min/max emulating program of a pipeline compiled at creation");
+	check(n == 1, "pipeline created after a set of its layout got a reduction sampler: emulating program compiled at creation (%u)", n);
+	mark = log_mark();
+	minmax_run(second, l.layout, reducing, &out);
+	minmax_check(&out, VK_SAMPLER_REDUCTION_MODE_MIN, VK_SAMPLER_MIPMAP_MODE_LINEAR, "R32 log, second pipeline, reduction sampler bound:");
+	n = log_count(mark, "program of a pipeline compiled");
+	check(n == 0, "second pipeline, reduction sampler bound: nothing compiled (%u)", n);
+	mark = log_mark();
+	minmax_run(second, l.layout, regular, &out);
+	minmax_check(&out, VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE, VK_SAMPLER_MIPMAP_MODE_LINEAR, "R32 log, second pipeline, no reduction sampler:");
+	n = log_count(mark, "plain program of a pipeline compiled on first use");
+	check(n == 1, "second pipeline, no reduction sampler bound: the program without emulation compiled on first use (%u)", n);
+
+	vkDestroyPipeline(dev, first, NULL);
+	vkDestroyPipeline(dev, second, NULL);
+	minmax_layout_destroy(&l);
+	vkDestroySampler(dev, average, NULL);
+	vkDestroySampler(dev, min_linear, NULL);
+	buffer_destroy(&out);
+	minmax_image_destroy(&img);
 }
 
 int main(int argc, char **argv)
 {
-	if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2],"image") && strcmp(argv[2],"buffer") && strcmp(argv[2],"minmax") && strcmp(argv[2],"features"))) {
-		fprintf(stderr, "usage: %s <spv dir> [image|buffer|minmax|features]\n", argv[0]);
+	if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2],"image") && strcmp(argv[2],"buffer") && strcmp(argv[2],"minmax") &&
+		strcmp(argv[2],"minmax-log") && strcmp(argv[2],"features"))) {
+		fprintf(stderr, "usage: %s <spv dir> [image|buffer|minmax|minmax-log|features]\n", argv[0]);
 		return 2;
 	}
 	dir = argv[1];
 	const char *selector = argc == 3 ? argv[2] : "all";
+	int do_minmax_log = !strcmp(selector,"minmax-log");
+	/* KosmicKrisp logs which sampler min/max programs it compiles (minmax_log_test) */
+	if (do_minmax_log) setenv("MESA_KK_DEBUG", "minmax", 1);
 	VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_3 };
 	VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };
 	VkInstance instance;
@@ -1556,7 +1855,8 @@ int main(int argc, char **argv)
 		.shaderResourceResidency = f.features.shaderResourceResidency, .shaderResourceMinLod = f.features.shaderResourceMinLod,
 	};
 	VkPhysicalDeviceVulkan12Features enabled12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-		.timelineSemaphore = f12.timelineSemaphore, .samplerFilterMinmax = f12.samplerFilterMinmax };
+		.timelineSemaphore = f12.timelineSemaphore, .samplerFilterMinmax = f12.samplerFilterMinmax,
+		.descriptorBindingSampledImageUpdateAfterBind = f12.descriptorBindingSampledImageUpdateAfterBind };
 	/* vkd3d-proton's ResourceMinLODClamp (without it, it rebases views and reports a wrong level) */
 	uint32_t ext_count = 0;
 	vkEnumerateDeviceExtensionProperties(pd, NULL, &ext_count, NULL);
@@ -1606,12 +1906,27 @@ int main(int argc, char **argv)
 			if (!setjmp(recovery)) buffer_view_test();
 		}
 	}
-	if (do_minmax) {
+	if (do_minmax || do_minmax_log) {
 		if (!(p12.filterMinmaxSingleComponentFormats && f12.samplerFilterMinmax))
 			check(0, "sampler MIN/MAX tests unavailable (filterMinmaxSingleComponentFormats or samplerFilterMinmax missing)");
-		else {
+		else if (do_minmax_log) {
+			/* The driver's log goes to a file, then to stdout indented */
+			log_file = tmpfile();
+			require(log_file != NULL, "create log file");
+			fflush(stderr);
+			int saved_stderr = dup(2);
+			require(saved_stderr >= 0 && dup2(fileno(log_file), 2) >= 0, "redirect stderr");
+			if (!setjmp(recovery)) minmax_log_test();
+			fflush(stderr);
+			dup2(saved_stderr, 2);
+			close(saved_stderr);
+			char line[1024];
+			rewind(log_file);
+			while (fgets(line, sizeof(line), log_file)) printf("\t%s", line);
+		} else {
 			if (!setjmp(recovery)) minmax_test(VK_FORMAT_R32_SFLOAT);
 			if (!setjmp(recovery)) minmax_test(VK_FORMAT_R8_UNORM);
+			if (!setjmp(recovery)) minmax_paths_test(f12.descriptorBindingSampledImageUpdateAfterBind);
 		}
 	}
 	printf("sparse: %d failure(s)\n", failures);
