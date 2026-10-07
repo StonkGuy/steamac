@@ -150,7 +150,7 @@ final class DiskCreator {
             throw OptionError(busy ? "another SteamOS disk is being created with the download cache \(cacheRoot): wait for it to finish or cancel it"
                                    : "\(lockPath): \(String(cString: strerror(errno)))")
         }
-        guard !fm.fileExists(atPath: path) else { throw OptionError("\(path) already exists (never overwritten; delete it or choose another path)") }
+        guard !fm.fileExists(atPath: path) else { throw DiskCreationFilesystem.Rejection("\(path) already exists (never overwritten; delete it or choose another path)") }
         let ca = try RaucBundle.loadCA(caPath)
 
         // 1. metadata
@@ -278,7 +278,7 @@ final class DiskCreator {
         lock.lock(); task = t; lock.unlock()
     }
 
-    private func fetch(_ url: URL) throws -> Data {
+    func fetch(_ url: URL) throws -> Data {
         let sem = DispatchSemaphore(value: 0)
         var result: Swift.Result<Data, Error> = .failure(Cancelled())
         let t = URLSession.shared.dataTask(with: url) { d, resp, err in
@@ -514,10 +514,10 @@ final class DiskCreator {
         log("create-disk: space: need ~\(gb(needDisk)) on \(disk) (free \(gb(freeDisk)))"
             + (sameVolume ? "" : ", ~\(gb(cacheNeed + margin)) for the chunk cache on \(cache) (free \(gb(freeCache)))"))
         guard freeDisk >= needDisk else {
-            throw OptionError("not enough free space: \(gb(needDisk)) needed on the volume of \(disk), \(gb(freeDisk)) free")
+            throw DiskCreationFilesystem.Rejection("not enough free space: \(gb(needDisk)) needed on the volume of \(disk), \(gb(freeDisk)) free")
         }
         guard sameVolume || freeCache >= cacheNeed + margin else {
-            throw OptionError("not enough free space for the download cache: \(gb(cacheNeed + margin)) needed in \(cache), \(gb(freeCache)) free")
+            throw DiskCreationFilesystem.Rejection("not enough free space for the download cache: \(gb(cacheNeed + margin)) needed in \(cache), \(gb(freeCache)) free")
         }
     }
 }

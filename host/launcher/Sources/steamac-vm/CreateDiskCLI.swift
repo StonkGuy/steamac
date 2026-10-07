@@ -53,6 +53,7 @@ enum CreateDiskCLI {
             exit(130)
         } catch {
             log("create-disk: error: \(error)")
+            log("create-disk: \(NetworkFailure.message(error, server: .valve))")
             CrashReporting.diskCreationFailed(error, branch: request.branch)
             CrashReporting.flush()
             exit(1)

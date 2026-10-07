@@ -269,7 +269,10 @@ final class UpdateChecker {
 
     private static func outcome(data: Data?, response: URLResponse?, error: Error?, cached: Data?, current: String,
                                 url: URL, defaults: UserDefaults) -> Outcome {
-        if let error { return .failed(error.localizedDescription) }
+        if let error {
+            log("update: error: \(error)")
+            return .failed(NetworkFailure.message(error, server: .updates))
+        }
         var body = data
         var etag: String?
         if let http = response as? HTTPURLResponse {

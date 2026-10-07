@@ -526,9 +526,21 @@ enum CrashReporting {
         report(.provisionFailed, key: normalize(reason), message: "Provisioning failed: \(reason.isEmpty ? "(no reason given)" : reason)")
     }
 
+    /// Build the same report for capture and the provisioning self-test (which never sends).
+    /// Foundation errors group by domain/code, not NSError's pointers, task UUIDs or URLs.
+    /// OptionError has no meaningful numeric code: retain its normalised diagnostic so bugs
+    /// such as failed publication and bundle verification do not collapse into one issue.
+    static func diskCreationReport(_ error: Error) -> (key: String, message: String, extra: [String: String])? {
+        guard !(error is DiskCreationFilesystem.Rejection), !(error is DiskCreator.Cancelled) else { return nil }
+        let e = error as NSError
+        let diagnostic = error is OptionError ? normalize("\(error)") : "\(e.domain) \(e.code)"
+        return (diagnostic, "Disk creation failed: \(diagnostic)", ["error_detail": "\(error)"])
+    }
+
     static func diskCreationFailed(_ error: Error, branch: String) {
-        let text = "\(error)"
-        report(.diskCreationFailed, key: normalize(text), message: "Disk creation failed: \(text)", tags: ["steamos_branch": branch])
+        guard let failure = diskCreationReport(error) else { return }
+        report(.diskCreationFailed, key: failure.key, message: failure.message,
+               tags: ["steamos_branch": branch], extra: failure.extra)
     }
 
     // MARK: log lines

@@ -463,6 +463,14 @@ before downloading because of its 4 GiB per-file limit (the temporary rootfs alo
 Read-only volumes are also rejected. Unlike APFS, exFAT has no sparse files: it needs space for the
 full selected disk size plus the temporary rootfs and download cache, even before games are installed;
 the launcher checks this space before reconstructing the rootfs.
+These expected rejections (including an existing destination file) are logged, not sent as errors
+to Sentry. Unexpected creation failures still report: Foundation errors group by domain and code,
+with the original technical diagnostic in the event details rather than pointers/task IDs in the title.
+
+If a download cannot reach Valve securely, the window explains that a VPN, proxy, or network filter
+may be interfering: try disabling it or using another network. Update checks give the same advice
+for GitHub. Technical details stay in the launcher log. HTTPS uses macOS's standard certificate
+validation and TLS settings; the pinned Valve CA below verifies the downloaded bundle, not HTTPS.
 
 1. `https://steamdeck-atomupd.steamos.cloud/meta/holo/steamos/aarch64/vr/<branch>.json` → the latest
    candidate (`update_path`, `chunks_store_path`).
@@ -499,6 +507,10 @@ Space: ~14 GB on the disk volume during creation (~9 GB afterward), ~6 GB of cac
 success unless `--keep-cache` is specified). Checks: `work/out/steamac-vm --selftest-provision` —
 GPT against the Docker-built disk (`work/out/steamos.img` is opened read-only;
 `--reference-disk IMG`), CMS/squashfs against the `work/cache/rootfs` cache, cpio, SHA-512 crypt.
+The self-test also checks network messages, stable error fingerprints and log-only location
+rejections. To exercise an actual TLS failure without sending any events, point
+`STEAMAC_PROVISION_TEST_TLS_URL=https://localhost:PORT/` at a local server with an untrusted
+certificate when running `--selftest-provision`; it prints the message, title and fingerprint.
 
 ## Steam client
 

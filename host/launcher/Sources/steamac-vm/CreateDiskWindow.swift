@@ -81,7 +81,7 @@ final class CreateDiskModel: ObservableObject {
                 case .failure(let e):
                     log("create-disk (UI): error: \(e)")
                     CrashReporting.diskCreationFailed(e, branch: request.branch)
-                    self.error = "\(e)"
+                    self.error = NetworkFailure.message(e, server: .valve)
                     self.interrupted = true
                 }
             }
@@ -165,7 +165,7 @@ private struct CreateDiskView: View {
                             ProgressView(value: model.status?.fraction ?? 0)
                             Text(model.error ?? model.status?.detail ?? "")
                                 .font(.caption).foregroundStyle(model.error != nil ? Color.red : Color.secondary)
-                                .lineLimit(3).textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                         }
                     }
                 }
