@@ -3,7 +3,7 @@ import Foundation
 
 /// Filesystem-specific checks and publication for the SteamOS disk creator.
 enum DiskCreationFilesystem {
-    /// An expected rejection of the chosen location/capacity, not a launcher defect.
+    /// An expected rejection of the chosen location/capacity or busy cache, not a launcher defect.
     struct Rejection: Error, CustomStringConvertible {
         let description: String
         init(_ description: String) { self.description = description }

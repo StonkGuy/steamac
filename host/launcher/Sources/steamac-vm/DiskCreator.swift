@@ -119,6 +119,22 @@ final class DiskCreator {
     static var desyncPath: String? { locate("desync", dev: ["host/bin/desync"]) }
     static var caPath: String? { locate("steamdeck-images.pem", dev: ["../../scripts/keys/steamdeck-images.pem"]) }
 
+    /// Caller closes the returned descriptor only after all creation work finishes.
+    static func acquireCreationLock(cacheRoot: String) throws -> Int32 {
+        let lockPath = cacheRoot + "/creation.lock"
+        let fd = open(lockPath, O_RDWR | O_CREAT | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { throw OptionError("\(lockPath): \(String(cString: strerror(errno)))") }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            let error = errno
+            close(fd)
+            if error == EWOULDBLOCK {
+                throw DiskCreationFilesystem.Rejection("another SteamOS disk is being created with the download cache \(cacheRoot): wait for it to finish or cancel it")
+            }
+            throw OptionError("\(lockPath): \(String(cString: strerror(error)))")
+        }
+        return fd
+    }
+
     // MARK: run
 
     func run(_ r: Request) throws -> Result {
@@ -141,15 +157,8 @@ final class DiskCreator {
         let cacheRoot = DiskCreator.cacheRoot(forDisk: path)
         let chunkCache = cacheRoot + "/desync"
         try fm.createDirectory(atPath: cacheRoot, withIntermediateDirectories: true)
-        let lockPath = cacheRoot + "/creation.lock"
-        let lockFD = open(lockPath, O_RDWR | O_CREAT | O_CLOEXEC, 0o644)
-        guard lockFD >= 0 else { throw OptionError("\(lockPath): \(String(cString: strerror(errno)))") }
+        let lockFD = try DiskCreator.acquireCreationLock(cacheRoot: cacheRoot)
         defer { close(lockFD) }
-        guard flock(lockFD, LOCK_EX | LOCK_NB) == 0 else {
-            let busy = errno == EWOULDBLOCK
-            throw OptionError(busy ? "another SteamOS disk is being created with the download cache \(cacheRoot): wait for it to finish or cancel it"
-                                   : "\(lockPath): \(String(cString: strerror(errno)))")
-        }
         guard !fm.fileExists(atPath: path) else { throw DiskCreationFilesystem.Rejection("\(path) already exists (never overwritten; delete it or choose another path)") }
         let ca = try RaucBundle.loadCA(caPath)
 

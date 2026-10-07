@@ -79,6 +79,28 @@ enum ProvisionSelfTest {
             check(CrashReporting.diskCreationReport(RaucBundle.trustFailure(signer: signer, detail: "steamos-dev-images")) != nil,
                   "other trust failures stay reportable: \(signer)")
         }
+        attempt("concurrent disk creation") {
+            let dir = NSTemporaryDirectory() + "steamac-lock-\(UUID().uuidString)"
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let first = try DiskCreator.acquireCreationLock(cacheRoot: dir)
+            defer { close(first) }
+            do {
+                let second = try DiskCreator.acquireCreationLock(cacheRoot: dir)
+                close(second)
+                check(false, "second disk creation must be rejected")
+            } catch {
+                check("\(error)".contains("wait for it to finish or cancel it"), "concurrent creation explains how to proceed")
+                check(CrashReporting.diskCreationReport(error) == nil, "concurrent creation guard is log-only")
+            }
+            do {
+                let fd = try DiskCreator.acquireCreationLock(cacheRoot: dir + "/missing")
+                close(fd)
+                check(false, "missing cache must fail")
+            } catch {
+                check(CrashReporting.diskCreationReport(error) != nil, "unexpected lock filesystem error stays reportable")
+            }
+        }
 
         // Optional real development-signed Valve bundle; never accepted or reported.
         if let path = ProcessInfo.processInfo.environment["STEAMAC_PROVISION_TEST_DEV_BUNDLE"] {
