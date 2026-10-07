@@ -1,0 +1,12 @@
+#version 450
+// vk-minmax: sample tex at each coordinate in pc.uv[] and write the red channel.
+layout(local_size_x = 4) in;
+layout(binding = 0) uniform sampler2D tex;
+layout(binding = 1, std430) writeonly buffer Out { float result[]; };
+layout(push_constant) uniform PC { vec2 uv[4]; } pc;
+
+void main()
+{
+    uint i = gl_LocalInvocationID.x;
+    result[i] = textureLod(tex, pc.uv[i], 0.0).r;
+}
