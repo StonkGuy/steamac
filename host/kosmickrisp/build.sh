@@ -63,6 +63,10 @@
 #              the Venus context): views are placement sparse texture buffers from the page below the view,
 #              mapped like the buffer's pages (recorded per buffer, mapped heaps retained) at creation and on
 #              every later bind.
+#   0032       steamac: sparse sample residency for LODs past the last level. Metal samples the last level
+#              but reported the missing level past it not resident (vkd3d-proton's texture_feedback
+#              SampleGrad); sparse samples limit the LOD to the view's last level (level/min_lod_clamp/the
+#              implicit LOD through the bias) and take the last level's residency for gradients past it.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver

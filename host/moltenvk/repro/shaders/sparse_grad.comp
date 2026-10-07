@@ -1,0 +1,25 @@
+#version 460
+// vkd3d-proton's texture_feedback SampleGrad/SampleLevel: residency of explicit-gradient (with and without a MinLod
+// clamp) and explicit-LOD samples of a 256x256 two-level image, including LODs past the last level.
+#extension GL_ARB_sparse_texture2 : require
+#extension GL_ARB_sparse_texture_clamp : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D tex;
+struct Result { vec4 color; uvec4 resident; };
+layout(std430, set = 0, binding = 1) buffer Output { Result results[]; };
+// mode 0: gradients, 1: gradients + MinLod, 2: explicit LOD
+layout(push_constant) uniform Params { vec2 dx; vec2 dy; float lod; float minLod; uint mode; } p;
+void main()
+{
+    uvec2 xy = gl_GlobalInvocationID.xy;
+    vec2 uv = (vec2(xy) + 0.5) / 256.0;
+    vec4 c;
+    int code;
+    if (p.mode == 0)
+        code = sparseTextureGradARB(tex, uv, p.dx, p.dy, c);
+    else if (p.mode == 1)
+        code = sparseTextureGradClampARB(tex, uv, p.dx, p.dy, p.minLod, c);
+    else
+        code = sparseTextureLodARB(tex, uv, p.lod, c);
+    results[xy.y * 256 + xy.x] = Result(c, uvec4(sparseTexelsResidentARB(code) ? 1u : 0u));
+}
