@@ -181,6 +181,20 @@ enum ProvisionSelfTest {
             }
         }
 
+        attempt("disk folder without write permission") {
+            let fm = FileManager.default
+            let dir = NSTemporaryDirectory() + "steamac-readonly-\(UUID().uuidString)"
+            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            defer { chmod(dir, 0o755); try? fm.removeItem(atPath: dir) }
+            try DiskCreationFilesystem.requireWritable(directory: dir)
+            check((try? fm.contentsOfDirectory(atPath: dir))?.isEmpty == true, "write probe leaves nothing behind")
+            chmod(dir, 0o555)
+            var rejected = false
+            do { try DiskCreationFilesystem.requireWritable(directory: dir) }
+            catch { rejected = error is DiskCreationFilesystem.Rejection && CrashReporting.diskCreationReport(error) == nil }
+            check(rejected, "unwritable folder rejected before download, log-only (STEAMAC-2H)")
+        }
+
         // GPT: writer -> reader round trip on a sparse temp file.
         let table = DiskLayout.table(homeGiB: DiskLayout.defaultHomeGiB)
         attempt("GPT round trip") {

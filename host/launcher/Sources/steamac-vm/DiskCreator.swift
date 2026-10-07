@@ -145,7 +145,12 @@ final class DiskCreator {
         guard (8...4096).contains(r.homeGiB) else { throw OptionError("home size must be 8..4096 GiB") }
         let path = (r.path as NSString).standardizingPath
         let dir = (path as NSString).deletingLastPathComponent
-        try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        do {
+            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        } catch let e as CocoaError where e.code == .fileWriteNoPermission {
+            throw DiskCreationFilesystem.Rejection("no permission to create \(dir): choose a folder you can write to")
+        }
+        try DiskCreationFilesystem.requireWritable(directory: dir)
         let gpt = DiskLayout.table(homeGiB: r.homeGiB)
         let diskBytes = gpt.sectors * DiskLayout.sector
         let rootBytes = DiskLayout.rootMiB * DiskLayout.mib

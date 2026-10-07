@@ -39,6 +39,28 @@ enum DiskCreationFilesystem {
         return dense
     }
 
+    /// Before downloading: the folder must accept new files (the cache folder, the partial disk).
+    /// Volumes that honour ownership can hold folders the user may not write to (STEAMAC-2H).
+    static func requireWritable(directory: String) throws {
+        let probe = directory + "/.steamac-write-probe-\(getpid())"
+        let fd = open(probe, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd < 0 else {
+            close(fd)
+            unlink(probe)
+            return
+        }
+        let error = errno
+        switch error {
+        case EACCES, EPERM:
+            throw Rejection("no permission to write in \(directory): choose a folder you can write to, "
+                + "or allow writing in Finder → Get Info → Sharing & Permissions")
+        case EEXIST:
+            return
+        default:
+            throw OptionError("\(directory): \(String(cString: strerror(error)))")
+        }
+    }
+
     /// The caller must hold creation.lock until publication is complete.
     static func publish(partial: String, destination: String) throws {
         if renamex_np(partial, destination, UInt32(RENAME_EXCL)) == 0 { return }

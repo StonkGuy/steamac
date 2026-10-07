@@ -477,7 +477,7 @@ code (`SteamOSLicense.eulaURL`) changes.
 
 External APFS, Mac OS Extended, and exFAT volumes can hold the disk. FAT32/MS-DOS is rejected
 before downloading because of its 4 GiB per-file limit (the temporary rootfs alone is 10 GiB).
-Read-only volumes are also rejected. Unlike APFS, exFAT has no sparse files: it needs space for the
+Read-only volumes and folders you can't write to are also rejected. Unlike APFS, exFAT has no sparse files: it needs space for the
 full selected disk size plus the temporary rootfs and download cache, even before games are installed;
 the launcher checks this space before reconstructing the rootfs.
 These expected rejections (including an existing destination file or a busy download cache) are logged, not sent as errors
