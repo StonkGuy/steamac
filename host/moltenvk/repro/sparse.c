@@ -578,6 +578,102 @@ static void buffer_test(void)
 	vkFreeMemory(dev, mem, NULL);
 }
 
+/* test_update_tile_mappings_remap_stress (vkd3d-proton): every iteration a new 64-page memory filled with word
+ * index + 1 (through a plain buffer on it), the old memory freed while still mapped, then 7 tile range updates on a
+ * 64-page sparse buffer batched into vkQueueBindSparse calls as vkd3d-proton does (a call ends where a range overlaps
+ * a page of the batch): NULL ranges after mapped ones in the same call must unmap. */
+struct TileRange { uint32_t tile, heap_tile, count, kind; /* 0 NULL, 1 map, 2 reuse heap_tile */ };
+static void buffer_remap_test(void)
+{
+	const uint32_t tiles = 64, words = (uint32_t)(tiles * PAGE / 4), probe = 50000 / 4;
+	VkBuffer sparse = buffer_create(tiles * PAGE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT | VK_BUFFER_CREATE_SPARSE_ALIASED_BIT);
+	VkMemoryRequirements mr;
+	vkGetBufferMemoryRequirements(dev, sparse, &mr);
+	uint32_t type = memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	struct Buffer upload = host_buffer(tiles * PAGE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+	for (uint32_t i = 0; i < words; i++) ((uint32_t *)upload.map)[i] = i + 1;
+	host_sync(&upload, 0);
+	struct Buffer out = host_buffer(tiles * PAGE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	VkDescriptorType types[] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+	struct Pipeline p = pipeline_create("sparse_buffer.comp.spv", types, 2, sizeof(uint32_t));
+	VkDescriptorBufferInfo inputs[] = {{sparse,0,VK_WHOLE_SIZE},{out.buffer,0,VK_WHOLE_SIZE}};
+	VkWriteDescriptorSet writes[2];
+	for (uint32_t i = 0; i < 2; i++) writes[i] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = p.set, .dstBinding = i, .descriptorCount = 1, .descriptorType = types[i], .pBufferInfo = &inputs[i] };
+	vkUpdateDescriptorSets(dev, 2, writes, 0, NULL);
+	VkDeviceMemory old = VK_NULL_HANDLE;
+	uint32_t bad_iters = 0, bad_total = 0;
+	for (uint32_t iter = 0; iter < 100; iter++) {
+		const struct TileRange ranges[] = {
+			{ 0, 0, 64, 0 }, { 4 + (iter & 31), 8 + (iter & 1), 3, 1 }, { 1 + (iter & 14), 2 + (iter & 4), 40, 1 },
+			{ 13 + (iter & 9), 0, 9, 0 }, { 13 + (iter & 7), 19 + (iter & 4), 8, 2 }, { 30 + (iter & 5), 0, 7, 0 },
+			{ 1 + (iter & 3), 0, 7, 0 },
+		};
+		VkDeviceMemory mem = allocate(tiles * PAGE, type);
+		VkBuffer placed = buffer_create(tiles * PAGE, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0);
+		CK(vkBindBufferMemory(dev, placed, mem, 0));
+		if (old) vkFreeMemory(dev, old, NULL);
+		old = mem;
+		VkCommandBuffer cmd = begin();
+		VkBufferCopy copy = { 0, 0, tiles * PAGE };
+		vkCmdCopyBuffer(cmd, upload.buffer, placed, 1, &copy);
+		submit(cmd, VK_NULL_HANDLE, 0, 0);
+		vkDestroyBuffer(dev, placed, NULL);
+		/* vkd3d-proton's batching: one VkSparseBufferMemoryBindInfo per range, the call flushed before a range that
+		 * overlaps the batch; per page binds for REUSE_SINGLE_TILE. */
+		VkSparseMemoryBind binds[ARRAY_SIZE(ranges)][64];
+		VkSparseBufferMemoryBindInfo infos[ARRAY_SIZE(ranges)];
+		uint64_t batch = 0;
+		uint32_t first = 0;
+		for (uint32_t r = 0; r <= ARRAY_SIZE(ranges); r++) {
+			uint64_t mask = 0;
+			if (r < ARRAY_SIZE(ranges))
+				mask = ranges[r].count == 64 ? ~0ull : ((1ull << ranges[r].count) - 1) << ranges[r].tile;
+			if (r == ARRAY_SIZE(ranges) || (batch & mask)) {
+				VkBindSparseInfo bi = { VK_STRUCTURE_TYPE_BIND_SPARSE_INFO, .bufferBindCount = r - first, .pBufferBinds = &infos[first] };
+				CK(vkQueueBindSparse(sparse_queue, 1, &bi, VK_NULL_HANDLE));
+				batch = 0;
+				first = r;
+			}
+			if (r == ARRAY_SIZE(ranges)) break;
+			batch |= mask;
+			const struct TileRange *t = &ranges[r];
+			uint32_t n = t->kind == 2 ? t->count : 1;
+			for (uint32_t i = 0; i < n; i++)
+				binds[r][i] = (VkSparseMemoryBind){ .resourceOffset = (t->tile + i) * PAGE, .size = (t->kind == 2 ? 1 : t->count) * PAGE,
+					.memory = t->kind ? mem : VK_NULL_HANDLE, .memoryOffset = t->kind ? t->heap_tile * PAGE : 0 };
+			infos[r] = (VkSparseBufferMemoryBindInfo){ sparse, n, binds[r] };
+		}
+		CK(vkQueueWaitIdle(sparse_queue));
+		cmd = begin();
+		dispatch(cmd, &p, &words, sizeof(words), words / 64, 1);
+		barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+		submit(cmd, VK_NULL_HANDLE, 0, 0);
+		host_sync(&out, 1);
+		uint32_t bad = 0;
+		for (uint32_t i = 0; i < tiles; i++) {
+			uint32_t want = 0;
+			for (uint32_t j = 0; j < ARRAY_SIZE(ranges); j++) {
+				const struct TileRange *t = &ranges[j];
+				if (i < t->tile || i >= t->tile + t->count) continue;
+				want = t->kind == 0 ? 0 : (uint32_t)((t->heap_tile + (t->kind == 2 ? 0 : i - t->tile)) * PAGE / 4) + probe + 1;
+			}
+			uint32_t got = ((uint32_t *)out.map)[i * PAGE / 4 + probe];
+			if (got != want && bad++ < 3 && bad_iters < 2)
+				printf("     iter %u tile %u expected %u got %u\n", iter, i, want, got);
+		}
+		bad_iters += !!bad;
+		bad_total += bad;
+	}
+	check(!bad_total, "sparse buffer remap stress (vkd3d-proton batching, NULL after mapped ranges): 100 iterations, %u wrong tiles in %u", bad_total, bad_iters);
+	vkFreeMemory(dev, old, NULL);
+	pipeline_destroy(&p);
+	buffer_destroy(&out);
+	buffer_destroy(&upload);
+	vkDestroyBuffer(dev, sparse, NULL);
+}
+
 static float minmax_value(uint32_t x, uint32_t y, uint32_t level)
 {
 	/* Deliberately neither monotonic nor symmetric; UNORM data is exactly byte/255. */
@@ -830,7 +926,10 @@ int main(int argc, char **argv)
 	if (do_buffer) {
 		if (!(f.features.sparseBinding && f.features.sparseResidencyBuffer && f.features.sparseResidencyAliased && sparse_present))
 			check(0, "sparse buffer/alias tests unavailable (required features above missing)");
-		else if (!setjmp(recovery)) buffer_test();
+		else {
+			if (!setjmp(recovery)) buffer_test();
+			if (!setjmp(recovery)) buffer_remap_test();
+		}
 	}
 	if (do_minmax) {
 		if (!(p12.filterMinmaxSingleComponentFormats && f12.samplerFilterMinmax))

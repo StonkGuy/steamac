@@ -53,6 +53,11 @@
 #              before Apple10, where Metal's reductionMode is unsupported: point samplers plus a shader
 #              footprint reduction (exact for 1D/2D/3D/arrays; anisotropy ignored, cube corners approximated).
 #              With 0027/0028 vkd3d-proton reports Tiled Resources Tier 2, hence feature level 12_0.
+#   0030       steamac: unmaps of sparse buffer pages are applied. Metal held back MTL4CommandQueue unmaps of
+#              placement sparse buffers (and texture buffers) until the queue mapped a page of a resident
+#              resource: an unmap ending a vkQueueBindSparse left the page mapped (vkd3d-proton's
+#              test_update_tile_mappings_remap_stress). A bind submit that unmapped buffer pages ends by
+#              mapping the queue's resident one page buffer.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
