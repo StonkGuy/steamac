@@ -34,7 +34,9 @@ setenv("MVK_CONFIG_LOG_LEVEL", "1", 0)
 // process before Metal is first used; the window's layer then shows or hides it at runtime
 // (developerHUDProperties `mode`, default "off" in WindowController). Without this variable
 // macOS 15 ignores those properties. Command buffers that present nothing (MoltenVK's) get no HUD.
-if Supervisor.isChild && !options.headless { setenv("MTL_HUD_ENABLED", "1", 1) }
+// Only when the saved setting is on: with it off libMTLHud stays unloaded, so turning the HUD on
+// mid-run shows nothing until the next boot.
+if Supervisor.isChild && !options.headless && settings.metalHUD { setenv("MTL_HUD_ENABLED", "1", 1) }
 
 // Crash reporting (Settings > General; both the supervisor and each VM process).
 CrashReporting.setUp(options: options, settings: settings)
@@ -114,8 +116,11 @@ final class Lifecycle: NSObject, NSApplicationDelegate {
     func requestShutdown(force: Bool = false) {
         CrashReporting.noteUserExit()
         if let at = requestedAt {
-            // A terminal ^C reaches both the supervisor and us; its forwarded copy is not a second request.
-            if !force && Date().timeIntervalSince(at) < 1 { return }
+            // A terminal ^C / SIGTERM reaches both the supervisor and this process: only the
+            // supervisor's forwarded copy (running inside a signal handler, `inSignalHandler`) is
+            // the duplicate. A user's second window close / menu quit is a real second request
+            // and escalates to a force quit, even within the debounce window.
+            if !force && inSignalHandler && Date().timeIntervalSince(at) < 1 { return }
             forceQuit()
         }
         if force { forceQuit() }
@@ -259,11 +264,18 @@ extension Lifecycle: NSMenuItemValidation {
 let lifecycle = Lifecycle()
 let display = DisplayBackend()
 var signalSources: [DispatchSourceSignal] = []
+/// True while a signal's handler runs: lets requestShutdown tell the supervisor's forwarded copy
+/// of a Ctrl-C / SIGTERM (a duplicate of the user's own signal) from a second user request.
+var inSignalHandler = false
 
 func onSignal(_ sig: Int32, _ handler: @escaping () -> Void) {
     signal(sig, SIG_IGN)
     let s = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-    s.setEventHandler(handler: handler)
+    s.setEventHandler {
+        inSignalHandler = true
+        handler()
+        inSignalHandler = false
+    }
     s.resume()
     signalSources.append(s)
 }
@@ -398,11 +410,13 @@ do {
     let renderer = Renderer()
     let presenter = Presenter(display: display, renderer: renderer)
     let wc = WindowController(title: windowTitle, width: options.displayWidth, height: options.displayHeight,
-                              pixelScale: options.pixelScale, renderer: renderer, inputs: inputs, mouseMode: options.mouseMode)
+                              pixelScale: options.pixelScale * options.renderScale, renderer: renderer, inputs: inputs, mouseMode: options.mouseMode)
     if let f = Supervisor.windowFrame, !f.isEmpty { wc.window.setFrame(NSRectFromString(f), display: false) }
     presenter.view = wc.view
     PerfStats.instance.attach(view: wc.view)
-    wc.view.metalLayer.framebufferOnly = false   // SIGUSR1 can read back the presented drawable
+    // framebufferOnly stays true (a readable drawable forfeits direct-to-display, so every
+    // presented frame would be resolved/copied); the frame-dump paths flip it off for the one
+    // capture and back (WindowController.captureWindow).
     windowController = wc
     presenter.onScanoutResize = { [weak wc] w, h in wc?.scanoutResized(width: w, height: h) }
     display.sink = presenter

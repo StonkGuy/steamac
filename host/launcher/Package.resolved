@@ -1,13 +1,20 @@
 {
-  "originHash" : "13a0a12159ba59d08d7bb83e84581353b7ab2afd8b1107b0cc4c57069393ac53",
+  "originHash" : "725981ca62875190f7b706705ebd762f5ad0ce92d7ad58c1cfd225460f6e84e7",
   "pins" : [
+    {
+      "identity" : "kscrash",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/getsentry/KSCrash.git",
+      "state" : {
+        "revision" : "18a633dec20c265f03386294f9d82d208bb13094"
+      }
+    },
     {
       "identity" : "sentry-cocoa",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/getsentry/sentry-cocoa.git",
       "state" : {
-        "revision" : "b539e098293067be54fa5cf1f11d9e16cdbba94a",
-        "version" : "9.30.0"
+        "revision" : "b539e098293067be54fa5cf1f11d9e16cdbba94a"
       }
     }
   ],

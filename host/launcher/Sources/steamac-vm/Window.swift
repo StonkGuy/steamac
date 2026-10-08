@@ -86,8 +86,12 @@ final class WindowController: NSObject, NSWindowDelegate {
     private var inFullScreenTransition = false
     static let minGuestSize = NSSize(width: 800, height: 500)
     /// Guest pixels per window point for this session (Settings > Display > Retina resolution:
-    /// the screen's backing scale at boot, else 1).
+    /// the screen's backing scale at boot, else 1) times the render scale (Settings > Display >
+    /// "Render scale", below 1 to render fewer guest pixels for MetalFX to upscale).
     let pixelScale: Double
+    /// This boot renders fewer guest pixels than the window (renderScale < 1): MetalFX super
+    /// resolution is forced on so those pixels are upscaled with it instead of a plain blur.
+    private let renderScaled: Bool
     /// Settle time after the last size change before the guest is asked to switch modes.
     static let guestResizeDebounce: TimeInterval = 0.25
 
@@ -98,6 +102,7 @@ final class WindowController: NSObject, NSWindowDelegate {
         self.mouseMode = mouseMode
         self.baseTitle = title
         self.pixelScale = pixelScale
+        self.renderScaled = pixelScale < 1
         let guest = WindowController.guestSize(points: CGSize(width: width, height: height), scale: pixelScale)
         self.scanoutSize = guest
         self.requestedGuestSize = guest
@@ -216,11 +221,12 @@ final class WindowController: NSObject, NSWindowDelegate {
 
     /// Guest display size for a content size in points at `scale` guest pixels per point: rounded
     /// down to even, at least `minGuestSize`, at most VM.maxDisplaySide per side (a scale above 1
-    /// is lowered, keeping the aspect, until the longer side fits).
+    /// is lowered, keeping the aspect, until the longer side fits). Below 1 (`renderScale`) the
+    /// guest renders fewer pixels than the window for MetalFX super resolution to upscale.
     static func guestSize(points: CGSize, scale: Double) -> (Int, Int) {
         let maxSide = VM.maxDisplaySide & ~1
         let pw = max(minGuestSize.width, points.width), ph = max(minGuestSize.height, points.height)
-        let s = max(1, min(scale, Double(maxSide) / Double(max(pw, ph))))
+        let s = min(max(0.25, scale), Double(maxSide) / Double(max(pw, ph)))
         return (min(maxSide, Int(Double(pw) * s) & ~1), min(maxSide, Int(Double(ph) * s) & ~1))
     }
 
@@ -454,9 +460,11 @@ final class WindowController: NSObject, NSWindowDelegate {
     }
 
     private func applySuperResolution(_ on: Bool) {
-        view.renderer.superResolution = on
-        log("display: MetalFX super resolution \(on ? "on" : "off")"
-            + (on && !Renderer.superResolutionSupported ? " (not supported on this GPU)" : ""))
+        let effective = on || renderScaled   // renderScale < 1 needs the upscaler to be useful
+        view.renderer.superResolution = effective
+        log("display: MetalFX super resolution \(effective ? "on" : "off")"
+            + (effective && !Renderer.superResolutionSupported ? " (not supported on this GPU)" : "")
+            + (renderScaled ? " (forced by render scale < 1)" : ""))
         view.redraw()   // an idle guest sends no new frame
     }
 
@@ -529,8 +537,12 @@ final class WindowController: NSObject, NSWindowDelegate {
     /// GPU-idle indicator, the progress pill, the "Game paused" / "SteamOS is sleeping" cards and
     /// the "Resuming…" chip on top, at 2x.
     func captureWindow(_ done: @escaping (_ drawable: CGImage?, _ composite: CGImage?) -> Void) {
+        let wasFramebufferOnly = view.metalLayer.framebufferOnly
         view.renderer.captureNextDraw = { [weak self] bytes, w, h in
             DispatchQueue.main.async {
+                // Restore on the main thread: this callback runs on a Metal completion thread, and
+                // the setting is the app's (the self-tests deliberately turn it off), not always true.
+                self?.view.metalLayer.framebufferOnly = wasFramebufferOnly
                 let drawable = PNG.image(bgra: bytes, width: w, height: h)
                 guard let self else { return done(drawable, nil) }
                 var composite = self.overlay.renderImage(scale: 2, under: drawable)
@@ -542,6 +554,7 @@ final class WindowController: NSObject, NSWindowDelegate {
                 done(drawable, composite)
             }
         }
+        view.metalLayer.framebufferOnly = false   // readable drawable for this one capture
         view.redraw()
     }
 

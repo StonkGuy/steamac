@@ -8,7 +8,7 @@ let package = Package(
     platforms: [.macOS(.v15)],
     dependencies: [
         // Crash/error reporting (CrashReporting.swift). Static Sentry.xcframework (binary target).
-        .package(url: "https://github.com/getsentry/sentry-cocoa.git", exact: "9.30.0"),
+        .package(url: "https://github.com/getsentry/sentry-cocoa.git", revision: "b539e098293067be54fa5cf1f11d9e16cdbba94a"),
     ],
     targets: [
         .systemLibrary(name: "CKrun", path: "Sources/CKrun"),

@@ -52,13 +52,26 @@ final class InputDevice {
 
     // MARK: producer side
 
-    /// Queue a batch of events followed by SYN_REPORT. Dropped (whole batch) if the guest
-    /// driver is not active yet or the queue is full, so SYN groups never get split.
+    /// Queue a batch of events followed by SYN_REPORT, so SYN groups never get split. Dropped
+    /// (whole batch) if the guest driver is not active yet or the queue cannot fit it, but not
+    /// before evicting room: a key/button release is never dropped (losing one leaves the guest
+    /// thinking the key is still held). Whole older SYN groups that hold no release (relative
+    /// motion, key/button presses) are evicted oldest-first; a queued release is never evicted, so
+    /// if the oldest group already holds one the batch is dropped rather than split. An incoming
+    /// batch whose own release cannot fit evicts without that guarantee instead of dropping it.
     func send(_ events: [(UInt16, UInt16, Int32)]) {
         guard !events.isEmpty else { return }
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        guard active, count + events.count + 1 <= InputDevice.capacity else { return }
+        guard active else { return }
+        let needed = events.count + 1
+        if count + needed > InputDevice.capacity {
+            evictForRoom(needed)
+            // The protected eviction stopped at a queued release and the batch still does not fit:
+            // evict freely rather than drop a batch that may itself carry a release.
+            while count + needed > InputDevice.capacity { dropOldestGroup() }
+        }
+        guard count + needed <= InputDevice.capacity else { return }
         let wasEmpty = count == 0
         for (type, code, value) in events {
             push(krun_input_event(type: type, code: code, value: UInt32(bitPattern: value)))
@@ -68,6 +81,52 @@ final class InputDevice {
             var b: UInt8 = 1
             _ = Darwin.write(writeFd, &b, 1)
         }
+    }
+
+    /// Free `need` slots by dropping the oldest whole SYN groups that hold no key/button release
+    /// (relative motion and key/button presses are expendable; a release is not).
+    private func evictForRoom(_ need: Int) {
+        while count + need > InputDevice.capacity, let groupSize = olderGroupEnd(from: head) {
+            count -= groupSize
+            head = (head + groupSize) % InputDevice.capacity
+        }
+    }
+
+    /// Drop the oldest SYN group unconditionally (a release in it goes too): the last resort that
+    /// keeps an incoming batch instead of dropping it whole.
+    private func dropOldestGroup() {
+        guard count > 0 else { return }
+        guard let end = oldestGroupEnd(from: head) else {
+            count = 0
+            head = 0
+            return
+        }
+        count -= end
+        head = (head + end) % InputDevice.capacity
+    }
+
+    /// Ring distance from `head` to the end of the oldest SYN group made only of non-release
+    /// events, or nil if the group runs off the end (no SYN_REPORT yet) or contains a release.
+    private func olderGroupEnd(from head: Int) -> Int? {
+        guard let end = oldestGroupEnd(from: head) else { return nil }
+        for n in 0..<end {
+            let e = queue[(head + n) % InputDevice.capacity]
+            // A key/button release (keys and buttons are EV_KEY) must never be evicted.
+            if e.type == EV.KEY && e.value == 0 { return nil }
+        }
+        return end
+    }
+
+    /// Ring distance from `head` to the SYN_REPORT that ends the oldest group (nil if it has none
+    /// yet: a batch is pushed whole, so this only happens for the group being built).
+    private func oldestGroupEnd(from head: Int) -> Int? {
+        var n = 0
+        while n < count {
+            let e = queue[(head + n) % InputDevice.capacity]
+            if e.type == EV.SYN && e.code == SYN.REPORT && e.value == 0 { return n + 1 }
+            n += 1
+        }
+        return nil
     }
 
     private func push(_ e: krun_input_event) {

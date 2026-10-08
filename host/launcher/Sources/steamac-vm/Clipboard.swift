@@ -154,6 +154,10 @@ final class ClipboardPort {
     private let cond = NSCondition()
     private var queue: [(kind: ClipCodec.Kind, data: Data)] = []
     private var writerStarted = false
+    /// The write pipe failed with a non-EINTR error and was logged (writer is restarted, not dead).
+    private var writerFailed = false
+    /// A full write queue was logged once (frames are dropped under a stall).
+    private var droppedQueueLogged = false
 
     init() throws {
         var out: [Int32] = [0, 0], inp: [Int32] = [0, 0]
@@ -167,7 +171,22 @@ final class ClipboardPort {
         let frame = ClipCodec.encode(kind, seq: seq, payload)
         cond.lock()
         if kind == .set { queue.removeAll { $0.kind == .set } }   // only the newest content matters
-        if queue.count < 16 { queue.append((kind, frame)) }
+        if queue.count < 16 {
+            queue.append((kind, frame))
+        } else if kind == .ack || kind == .state {
+            // Acks and state (echo suppression, sharing on/off) are
+            // load-bearing, not replaceable like a newer .set: make room by
+            // dropping the oldest instead of the ack.
+            queue.removeFirst()
+            queue.append((kind, frame))
+            if !droppedQueueLogged {
+                droppedQueueLogged = true
+                log("clipboard: write queue full; dropped an older frame to keep a \(kind)")
+            }
+        } else if !droppedQueueLogged {
+            droppedQueueLogged = true
+            log("clipboard: write queue full; dropped a \(kind) frame")
+        }
         if !writerStarted {
             writerStarted = true
             let t = Thread { [weak self] in self?.writeLoop() }
@@ -184,14 +203,43 @@ final class ClipboardPort {
             while queue.isEmpty { cond.wait() }
             let frame = queue.removeFirst().data
             cond.unlock()
-            frame.withUnsafeBytes { p in
-                var off = 0
-                while off < p.count {
-                    let n = Darwin.write(writeFd, p.baseAddress! + off, p.count - off)
-                    if n < 0 { if errno == EINTR { continue }; return }
-                    off += n
+            let err = writeFrame(frame)
+            if err == 0 {
+                cond.lock()
+                if writerFailed {
+                    writerFailed = false
+                    log("clipboard: the guest write pipe is working again")
                 }
+                cond.unlock()
+                continue
             }
+            // A hard error must not kill the writer for the session: clear `writerStarted` under
+            // the lock so the next send starts a new one, and end *this* thread (returning from
+            // the write closure alone would leave it looping and race the new writer for the queue).
+            cond.lock()
+            writerStarted = false
+            let first = !writerFailed
+            writerFailed = true
+            cond.unlock()
+            if first { log("clipboard: the guest write pipe failed: \(String(cString: strerror(err))); will retry") }
+            return
+        }
+    }
+
+    /// One whole frame to the guest (blocking: a guest that does not read must not stall the main
+    /// thread); 0, or the `errno` of a hard write error.
+    private func writeFrame(_ data: Data) -> Int32 {
+        data.withUnsafeBytes { p in
+            var off = 0
+            while off < p.count {
+                let n = Darwin.write(writeFd, p.baseAddress! + off, p.count - off)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return errno
+                }
+                off += n
+            }
+            return 0
         }
     }
 
@@ -332,18 +380,39 @@ final class ClipboardSync {
             }
             return
         }
-        var text = pasteboard.string(forType: .string).map { Data($0.utf8) }
+        let text = pasteboard.string(forType: .string).map { Data($0.utf8) }
         var png: Data?
         // A copied Finder file is its name (text), not its icon.
+        var tiff: Data?
         if !types.contains(.fileURL) {
             if let p = pasteboard.data(forType: .png) {
                 png = p
             } else if types.contains(.tiff) || NSImage.canInit(with: pasteboard),
-                      let image = NSImage(pasteboard: pasteboard), let tiff = image.tiffRepresentation,
-                      let rep = NSBitmapImageRep(data: tiff) {
-                png = rep.representation(using: .png, properties: [:])
+                      let image = NSImage(pasteboard: pasteboard), let t = image.tiffRepresentation {
+                tiff = t
             }
         }
+        // The pasteboard is read on the main thread, but a TIFF-only item is
+        // re-encoded to PNG on a background queue: encoding a 4K screenshot
+        // takes tens of ms and would drop a guest frame on every copy.
+        guard let t = tiff else {
+            finish(text: text, png: png, cc: cc)
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let encoded = NSBitmapImageRep(data: t)?.representation(using: .png, properties: [:])
+            DispatchQueue.main.async {
+                self?.finish(text: text, png: encoded, cc: cc)
+            }
+        }
+    }
+
+    /// Limit checks, echo suppression and the send, after any off-main image
+    /// encode; `cc` drops the item if the pasteboard changed meanwhile.
+    private func finish(text: Data?, png: Data?, cc: Int) {
+        guard cc == lastChangeCount, enabled, guestConnected, !vmPaused else { return }
+        var text = text
+        var png = png
         if let t = text, t.count > ClipCodec.textMax {
             log("clipboard: Mac text of \(ClipCodec.size(t.count)) exceeds the \(ClipCodec.size(ClipCodec.textMax)) limit: not shared")
             text = nil

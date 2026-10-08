@@ -24,7 +24,7 @@ final class LauncherSettings: ObservableObject {
              closeAction, checkForUpdates, followMacTime, shareClipboard, shareConcealedClipboard
         // Display
         case dpiSource, fixedDPI, fixedWidthMM, fixedHeightMM, refreshRate, followWindowSize, windowWidth, windowHeight,
-             windowSizePreset, retinaResolution, metalHUD, superResolution
+             windowSizePreset, retinaResolution, metalHUD, superResolution, renderScale
         // Mouse
         case autoCaptureGames, gameNames
         // Controller
@@ -37,7 +37,7 @@ final class LauncherSettings: ObservableObject {
         var nextStart: Bool {
             switch self {
             case .openFullscreen, .dpiSource, .fixedDPI, .fixedWidthMM, .fixedHeightMM, .refreshRate,
-                 .windowWidth, .windowHeight, .windowSizePreset, .retinaResolution, .soundEnabled, .cpus, .memMiB, .sshEnabled,
+                 .windowWidth, .windowHeight, .windowSizePreset, .retinaResolution, .renderScale, .soundEnabled, .cpus, .memMiB, .sshEnabled,
                  .sshPort, .network, .lanRemotePlay,
                  .diskImage, .steamClient, .followMacTime, .vulkanDriver:
                 return true
@@ -272,6 +272,9 @@ final class LauncherSettings: ObservableObject {
     @Published var metalHUD = false { didSet { save(.metalHUD, metalHUD) } }
     /// MetalFX spatial upscaling of the guest picture to the window's pixel size (Renderer); applies now.
     @Published var superResolution = false { didSet { save(.superResolution, superResolution) } }
+    /// Guest render scale 0.25...1.0 of the window's pixel size (Options.renderScale): the guest
+    /// renders fewer pixels and MetalFX super resolution upscales them to the window; next start.
+    @Published var renderScale = 1.0 { didSet { save(.renderScale, renderScale) } }
     // Mouse
     @Published var autoCaptureGames = true { didSet { save(.autoCaptureGames, autoCaptureGames) } }
     @Published private(set) var games: [Game] = []
@@ -367,6 +370,7 @@ final class LauncherSettings: ObservableObject {
         bool(.retinaResolution, &retinaResolution)
         bool(.metalHUD, &metalHUD)
         bool(.superResolution, &superResolution)
+        if let v = d.object(forKey: Key.renderScale.rawValue) as? Double { renderScale = min(1, max(0.25, v)) }
         bool(.autoCaptureGames, &autoCaptureGames)
         bool(.virtualPad, &virtualPad)
         if let s = d.string(forKey: Key.padType.rawValue).flatMap(PadType.init(rawValue:)) { padType = s }
@@ -442,6 +446,7 @@ final class LauncherSettings: ObservableObject {
         case .retinaResolution: guard let b else { return false }; retinaResolution = b
         case .metalHUD: guard let b else { return false }; metalHUD = b
         case .superResolution: guard let b else { return false }; superResolution = b
+        case .renderScale: guard let d, (0.25...1.0).contains(d) else { return false }; renderScale = d
         case .autoCaptureGames: guard let b else { return false }; autoCaptureGames = b
         case .gameNames: return false
         case .virtualPad: guard let b else { return false }; virtualPad = b
@@ -486,7 +491,7 @@ final class LauncherSettings: ObservableObject {
         fixedHeightMM = fresh.fixedHeightMM; refreshRate = fresh.refreshRate; followWindowSize = fresh.followWindowSize
         windowWidth = fresh.windowWidth; windowHeight = fresh.windowHeight; windowSizePreset = fresh.windowSizePreset
         retinaResolution = fresh.retinaResolution
-        metalHUD = fresh.metalHUD; superResolution = fresh.superResolution
+        metalHUD = fresh.metalHUD; superResolution = fresh.superResolution; renderScale = fresh.renderScale
         autoCaptureGames = fresh.autoCaptureGames
         virtualPad = fresh.virtualPad; padType = fresh.padType; dualSensePassthrough = fresh.dualSensePassthrough
         controllerID = fresh.controllerID; swapABXY = fresh.swapABXY

@@ -32,6 +32,9 @@ final class StallMonitor {
     /// nil = no counters (VM not running, no GPU): never shows.
     private let sample: () -> Counters?
     private var timer: DispatchSourceTimer?
+    /// Timer suspended while its gate is closed (kept in step with resume/suspend: libdispatch
+    /// aborts the process on an unbalanced suspend, so `stop()` must resume before cancelling).
+    private var timerSuspended = false
     private var counters: Counters?
     private var countersAvailable = false
     private var lastActivity = CACurrentMediaTime()
@@ -76,12 +79,24 @@ final class StallMonitor {
         t.setEventHandler { [weak self] in self?.poll() }
         t.resume()
         timer = t
+        timerSuspended = false
+        updateTimerState()
     }
 
     func stop() {
+        // Never cancel a suspended source: libdispatch aborts the process on an unbalanced suspend.
+        if timerSuspended { timer?.resume(); timerSuspended = false }
         timer?.cancel()
         timer = nil
         hide(reason: "stopped")
+    }
+
+    /// Timer suspended while its gate is closed: no 4 Hz main-queue wakeups
+    /// while the indicator is off or suppressed.
+    private func updateTimerState() {
+        guard let timer, gateOpen == timerSuspended else { return }
+        timerSuspended = !gateOpen
+        if gateOpen { timer.resume() } else { timer.suspend() }
     }
 
     /// The VM ran again after a pause (suspend, guest sleep) or the Mac woke from sleep (stopped
@@ -119,6 +134,7 @@ final class StallMonitor {
         let now = CACurrentMediaTime()
         if gateOpen { gateOpenedAt = now }
         evaluate(now)
+        updateTimerState()
     }
 
     // MARK: sampling

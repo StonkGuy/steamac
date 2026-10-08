@@ -12,15 +12,33 @@ final class Renderer {
     private let pipeline: MTLRenderPipelineState
     private let linear: MTLSamplerState
     private let nearest: MTLSamplerState
-    private(set) var texture: MTLTexture?
+    /// One frame texture shared by three ring slots, so an upload need not wait for the previous
+    /// frame's command buffer to stop sampling before it can overwrite texels.
+    private struct FrameSlot {
+        var texture: MTLTexture
+        /// Command buffer that samples this slot last, or nil if none has. Commands on one queue
+        /// start and finish in commit order, so the newest buffer stands in for the older ones.
+        var user: MTLCommandBuffer?
+        /// Commit order of `user`, to pick the oldest slot when all of them are still in flight.
+        var seq = 0
+        var busy: Bool { user.map { $0.status != .completed } ?? false }
+    }
+    private var slots: [FrameSlot] = []
+    /// Slot the draw path samples: the one `upload` wrote most recently.
+    private var currentSlot = 0
+    /// Monotonic per-draw counter stamped into the slot a command buffer samples.
+    private var useSeq = 0
+    /// The texture shown last; read by the presenter for sizing and by `fitRect`/`encode`.
+    var texture: MTLTexture? { slots.indices.contains(currentSlot) ? slots[currentSlot].texture : nil }
     /// Self-test hook: copy the next presented drawable (requires layer.framebufferOnly = false)
     /// and hand back BGRA bytes + size on a Metal completion thread.
     var captureNextDraw: (([UInt8], Int, Int) -> Void)?
     /// Called once, on the main queue, after a drawable has actually reached the screen.
     var onFirstOnScreen: (() -> Void)?
     private var textureGeneration = -1
-    private var lastCommandBuffer: MTLCommandBuffer?
     static let layerFormat: MTLPixelFormat = .bgra8Unorm
+    /// Ring size: enough that two frames in flight leave a slot to write while a third draws.
+    private static let slotCount = 3
 
     /// MetalFX spatial upscaling of the guest frame to its on-screen pixel size whenever that is
     /// larger (Settings > Display, "MetalFX super resolution"); otherwise the plain linear/nearest draw.
@@ -91,7 +109,8 @@ final class Renderer {
         }
     }
 
-    /// Upload the damaged part of `frame` (everything if the texture is new).
+    /// Upload the damaged part of `frame` (everything if the texture is new) into a free ring
+    /// slot: only when every slot is still being sampled does this wait for the GPU.
     func upload(_ frame: TakenFrame) {
         let b = frame.buffer
         var full = frame.damage == nil
@@ -102,11 +121,28 @@ final class Renderer {
             td.usage = .shaderRead
             td.storageMode = .shared
             td.swizzle = swizzle
-            texture = device.makeTexture(descriptor: td)
+            slots = (0..<Renderer.slotCount).compactMap { _ in
+                device.makeTexture(descriptor: td).map { FrameSlot(texture: $0) }
+            }
+            currentSlot = 0
             textureGeneration = frame.generation
             full = true
         }
-        guard let texture else { return }
+        guard !slots.isEmpty else { return }
+        var chosen = currentSlot
+        if slots[chosen].busy {
+            if let free = slots.indices.first(where: { !slots[$0].busy }) {
+                // A free slot's texels are not the frame the damage rect was measured against.
+                chosen = free
+            } else {
+                // Every slot is in flight: wait for the oldest command buffer, as before.
+                chosen = slots.indices.min { slots[$0].seq < slots[$1].seq } ?? chosen
+                slots[chosen].user?.waitUntilCompleted()
+            }
+            full = true
+            currentSlot = chosen
+        }
+        slots[chosen].user = nil
         let rect: DamageRect
         if full {
             rect = DamageRect(x0: 0, y0: 0, x1: b.width, y1: b.height)
@@ -115,15 +151,14 @@ final class Renderer {
         } else {
             return
         }
-        // Don't overwrite texels a previous command buffer may still be sampling.
-        lastCommandBuffer?.waitUntilCompleted()
         let src = b.ptr.advanced(by: rect.y0 * b.stride + rect.x0 * 4)
-        texture.replace(region: MTLRegionMake2D(rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0),
-                        mipmapLevel: 0, withBytes: src, bytesPerRow: b.stride)
+        slots[chosen].texture.replace(region: MTLRegionMake2D(rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0),
+                                      mipmapLevel: 0, withBytes: src, bytesPerRow: b.stride)
     }
 
     func dropTexture() {
-        texture = nil
+        slots = []
+        currentSlot = 0
         textureGeneration = -1
         releaseScaler()
     }
@@ -259,7 +294,13 @@ final class Renderer {
         }
         cb.present(drawable)
         cb.commit()
-        lastCommandBuffer = cb
+        // The frame texture in this command buffer is in use until it completes; the next upload
+        // picks another slot rather than waiting.
+        if slots.indices.contains(currentSlot) {
+            slots[currentSlot].user = cb
+            useSeq += 1
+            slots[currentSlot].seq = useSeq
+        }
     }
 
     /// Render exactly like `draw(to:)` into an offscreen BGRA texture and read it back

@@ -21,7 +21,10 @@ enum MouseMode: String {
 struct Options {
     var kernel: String = ""
     var initrd: String?
-    var cmdline = "console=hvc0 loglevel=4 rootwait"
+    /// virtio_snd.msg_timeout_ms: the CoreAudio backend starts a capture stream synchronously on the
+    /// control queue; opening the Mac microphone can take longer than the guest driver's 1 s default,
+    /// the guest then abandons PCM_START, PipeWire is killed by systemd and games freeze (VRChat).
+    var cmdline = "console=hvc0 loglevel=4 rootwait virtio_snd.msg_timeout_ms=10000"
     var disks: [DiskSpec] = []
     /// Settings > Advanced, --cpus / --mem, else automatic for this Mac (VMSizing; applySettings).
     var cpus = VMSizing.autoCPUs(.current)
@@ -41,9 +44,16 @@ struct Options {
     /// Guest pixels per window point: the target screen's backing scale with Settings > Display >
     /// Retina resolution, else 1 (fixed for the boot, like the EDID DPI).
     var pixelScale = 1.0
-    /// Guest display size at boot: the window size times `pixelScale` (WindowController.guestSize).
+    /// Settings > Display "Render scale" / --render-scale: guest pixels per window pixel. 1 = off
+    /// (the guest renders at the window's pixel size). Below 1 the guest renders fewer pixels and
+    /// MetalFX super resolution upscales them back to the drawable (Renderer), which is cheap next
+    /// to the guest drawing them; fixed for the boot (it sizes the EDID mode, like `pixelScale`).
+    var renderScale = 1.0
+    /// Guest display size at boot: the window size times `pixelScale` and `renderScale`
+    /// (WindowController.guestSize).
     var guestSize: (Int, Int) {
-        WindowController.guestSize(points: CGSize(width: displayWidth, height: displayHeight), scale: pixelScale)
+        WindowController.guestSize(points: CGSize(width: displayWidth, height: displayHeight),
+                                   scale: pixelScale * renderScale)
     }
     var refreshRate = 60
     var dpi: Int?
@@ -75,7 +85,10 @@ struct Options {
     var gamepad = true
     /// `--pad`: what the guest's gamepad is this run (instead of Settings > Controller).
     var padType: LauncherSettings.PadType?
-    var krunLogLevel: UInt32 = 2
+    /// virglrenderer routes its INFO messages through libkrun at warn level, hundreds per second during
+    /// games (e.g. "host memory import is unsupported for memory type 0"), each a formatted write to the
+    /// launcher log: 1 (error) instead of 2 (warn).
+    var krunLogLevel: UInt32 = 1
     var selftestDisplay = false
     var selftestOut: String?
     var inputSelftestDelay: Double?
@@ -143,8 +156,9 @@ struct Options {
 
       --kernel PATH        raw arm64 Image (KRUN_KERNEL_FORMAT_RAW)
       --initrd PATH        initramfs
-      --cmdline STR        kernel command line (default: "console=hvc0 loglevel=4 rootwait"; fsck.repair=yes,
-                           steamac.ssh/steam_client/tz are added unless STR sets them)
+      --cmdline STR        kernel command line (default: "console=hvc0 loglevel=4 rootwait
+                           virtio_snd.msg_timeout_ms=10000"; fsck.repair=yes, steamac.ssh/steam_client/tz
+                           are added unless STR sets them)
       --disk PATH[:ro]     raw virtio-blk disk; repeatable, order = vda, vdb, ...
       --cpus N             vCPUs (default: Settings > Advanced, automatic = this Mac's performance
                            cores, 2..8)
@@ -154,6 +168,9 @@ struct Options {
                            the window: content size in points = guest pixels, x the screen's backing
                            scale with Settings > Display > Retina resolution (even, min 800x500, max
                            4094), applied when a resize / fullscreen switch ends
+      --render-scale S     guest render scale 0.25..1.0 of the window's pixel size (default 1 = off,
+                           Settings > Display "Render scale"): the guest renders fewer pixels and
+                           MetalFX super resolution upscales them to the window; next start
       --refresh HZ         EDID refresh rate (default 60)
       --dpi N              EDID pixel density instead of the default physical size (below)
       --display-mm WxH     EDID physical size in millimetres at the initial size (overrides --dpi)
@@ -191,7 +208,7 @@ struct Options {
                            (xpad); dualsense, dualshock4: Sony pad as the Linux hid-playstation /
                            hid-sony drivers expose it (PlayStation button glyphs in Steam). Any
                            connected controller drives it; its rumble plays on that controller.
-      --krun-log-level N   libkrun log level 0=off .. 5=trace (default 2=warn)
+      --krun-log-level N   libkrun log level 0=off .. 5=trace (default 1=error)
       --steam-client C     Steam client SteamOS starts (kernel cmdline steamac.steam_client=C, added on
                            every boot; default: Settings > Advanced "Steam client", deck unless changed):
                            deck: public ARM64 Steam Deck client (steamdeck_stable);
@@ -311,6 +328,12 @@ struct Options {
                 let parts = v.lowercased().split(separator: "x").compactMap { Int($0) }
                 guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { throw OptionError("--display: expected WxH, got \(v)") }
                 o.displayWidth = parts[0]; o.displayHeight = parts[1]
+            case "--render-scale":
+                let v = try value(a)
+                guard let s = Double(v), (0.25...1.0).contains(s) else {
+                    throw OptionError("--render-scale must be 0.25..1.0")
+                }
+                o.renderScale = s
             case "--refresh": o.refreshRate = try int(a)
             case "--dpi":
                 let d = try int(a)
@@ -526,6 +549,8 @@ struct Options {
         if s.retinaResolution && !headless {
             pixelScale = max(1, WindowController.targetScreen()?.backingScaleFactor ?? 1)
         }
+        if given("--render-scale") { ov[.renderScale] = "--render-scale \(renderScale)" }
+        else { renderScale = min(1, max(0.25, s.renderScale)) }
         if given("--dpi") || given("--display-mm") {
             let flag = displayMM.map { "--display-mm \($0.0)x\($0.1)" } ?? "--dpi \(dpi ?? 0)"
             for k in [LauncherSettings.Key.dpiSource, .fixedDPI, .fixedWidthMM, .fixedHeightMM] { ov[k] = flag }

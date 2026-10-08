@@ -28,10 +28,17 @@ ls "$KRUN_PREFIX"/lib/libkrun*.dylib >/dev/null 2>&1 || { echo "missing $KRUN_PR
 PLIST="$HERE/.build/Info.plist"
 mkdir -p "$HERE/.build"
 commit=$(git -C "$ROOT" rev-parse --short=10 HEAD 2>/dev/null || echo unknown)
-mvk_rev=$(sed -n 's/.*MVK_PATCH_REVISION (\([0-9a-f]\{8\}\).*/\1/p' "$KRUN_PREFIX/MOLTENVK.txt" 2>/dev/null | head -1)
+# MoltenVK's revision comes from its provenance file. It is absent when MoltenVK was not
+# rebuilt here (the dylib was seeded into work/out by another build or restored from a backup):
+# skip the Info.plist key rather than abort, as for KosmicKrisp below.
+if [[ ! -f "$KRUN_PREFIX/MOLTENVK.txt" ]]; then
+    echo "warning: $KRUN_PREFIX/MOLTENVK.txt missing (MoltenVK not built here?): SteamacMVKPatchRevision will be omitted" >&2
+fi
+# `|| true`: with `set -o pipefail` a missing file makes the sed fail the pipeline, which would abort.
+mvk_rev=$(sed -n 's/.*MVK_PATCH_REVISION (\([0-9a-f]\{8\}\).*/\1/p' "$KRUN_PREFIX/MOLTENVK.txt" 2>/dev/null | head -1 || true)
 kk_rev=
-if [[ -f "$KRUN_PREFIX/lib/libvulkan_kosmickrisp.dylib" ]]; then
-    kk_rev=$(sed -n 's/^patch revision: *\([0-9a-f]\{8\}\).*/\1/p' "$KRUN_PREFIX/KOSMICKRISP.txt" 2>/dev/null | head -1)
+if [[ -f "$KRUN_PREFIX/lib/libvulkan_kosmickrisp.dylib" && -f "$KRUN_PREFIX/KOSMICKRISP.txt" ]]; then
+    kk_rev=$(sed -n 's/^patch revision: *\([0-9a-f]\{8\}\).*/\1/p' "$KRUN_PREFIX/KOSMICKRISP.txt" 2>/dev/null | head -1 || true)
 fi
 cp "$HERE/Info.plist" "$PLIST.new"
 /usr/libexec/PlistBuddy -c "Add :SteamacGitCommit string $commit" "$PLIST.new"

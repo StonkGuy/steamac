@@ -362,6 +362,8 @@ private struct GeneralTab: View {
 private struct DisplayTab: View {
     @EnvironmentObject var settings: LauncherSettings
     static let refreshRates = [30, 48, 50, 60, 72, 75, 90, 100, 120, 144]
+    /// "Render scale" choices: 1 = off, the rest render fewer guest pixels for MetalFX to upscale.
+    static let renderScales: [Double] = [1.0, 0.85, 0.75, 0.66, 0.5]
     /// Largest window that fits the screen the VM window opens on (when the tab appears).
     @State private var fit = LauncherSettings.fitToScreenSize()
 
@@ -426,6 +428,21 @@ private struct DisplayTab: View {
                            detail: "Off: the guest keeps its resolution and the picture is scaled to the window.",
                            now: true)
                 }
+                Picker(selection: $settings.renderScale) {
+                    ForEach(DisplayTab.renderScales, id: \.self) { s in
+                        Text(s >= 1 ? "Off (1.0×)" : String(format: "%.2f×", s)).tag(s)
+                    }
+                } label: {
+                    Label2(title: "Render scale",
+                           detail: settings.renderScale < 1
+                               ? "The guest renders \(Int((settings.renderScale * 100).rounded()))% of the window's pixels and "
+                                   + "MetalFX super resolution upscales them to the window: much cheaper for the guest, "
+                                   + "sharper than plain scaling. UI stays at real-world size (the EDID DPI is kept)."
+                               : "Off: the guest renders at the window's pixel size. Below 1 the guest renders fewer pixels "
+                                   + "and MetalFX super resolution upscales them to the window (only with MetalFX).",
+                           now: false, key: .renderScale)
+                }
+                .disabled(!Renderer.superResolutionSupported && settings.renderScale >= 1)
                 Picker(selection: preset) {
                     ForEach(LauncherSettings.sizePresets) { Text(presetTitle($0)).tag($0.id) }
                     Divider()

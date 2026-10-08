@@ -36,7 +36,10 @@ enum EdidSize {
             return perPixel(Double(wmm), Double(hmm), "--display-mm")
         }
         if let dpi = o.dpi {
-            return perPixel(Double(w) * 25.4 / Double(dpi), Double(h) * 25.4 / Double(dpi), "--dpi \(dpi)")
+            // `perPixel` divides by guest pixels, so the numerator must be in guest pixels too
+            // (w points x pixelScale); using points doubled the DPI under Retina resolution.
+            let scale = o.pixelScale
+            return perPixel(Double(w) * scale * 25.4 / Double(dpi), Double(h) * scale * 25.4 / Double(dpi), "--dpi \(dpi)")
         }
         let at96 = (Double(w) * 25.4 / 96, Double(h) * 25.4 / 96)
         if o.headless {

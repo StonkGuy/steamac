@@ -156,6 +156,13 @@ enum Supervisor {
             let vmExit = spawnAndWait(exe, CommandLine.arguments, env)
             let status = vmExit.status
             childPid = 0
+            if status < 0 {
+                // spawnAndWait could not observe the VM's exit (waitpid failed): a supervisor-side
+                // error, not a VM crash — report it as such rather than as a crash signal.
+                log("error: waitpid failed; the VM process's exit status is unknown")
+                cleanup()
+                exit(1)
+            }
             if var t = savedTermios { tcsetattr(STDIN_FILENO, TCSANOW, &t) }
             remotePlay?.stop()
             remotePlay = nil
@@ -241,7 +248,12 @@ enum Supervisor {
         exit.peakFootprint = VMExit.footprint(pid: pid)?.peak
         var status: Int32 = 0
         while waitpid(pid, &status, 0) < 0 {
-            if errno != EINTR { return exit }
+            // A non-EINTR waitpid failure is a supervisor-side error (e.g. ECHILD), not the VM's
+            // exit status: mark it so the supervisor reports it instead of "VM crashed".
+            if errno != EINTR {
+                exit.status = -1
+                return exit
+            }
         }
         // WIFEXITED / WEXITSTATUS / WTERMSIG (macros are not imported into Swift).
         let low = status & 0x7f

@@ -344,6 +344,9 @@ final class NoPictureGuard {
     }
 
     private var gateOpen: Bool { ready && !gameFocused && !gamePaused && !asleep && !vmPaused }
+    /// Timer suspended while its gate is closed: no 4 Hz main-queue wakeups
+    /// during gameplay, sleep or a paused VM.
+    private var running = false
 
     func start() {
         guard timer == nil else { return }
@@ -352,6 +355,14 @@ final class NoPictureGuard {
         t.setEventHandler { [weak self] in self?.poll() }
         t.resume()
         timer = t
+        running = true
+        updateTimerState()
+    }
+
+    private func updateTimerState() {
+        guard let timer, gateOpen != running else { return }
+        running = gateOpen
+        if gateOpen { timer.resume() } else { timer.suspend() }
     }
 
     /// Guest heartbeat (`alive <uptime_ms> <loadavg1>`).
@@ -368,6 +379,7 @@ final class NoPictureGuard {
         seen = .max
         cpuSamples.removeAll()
         if !gateOpen { hide(closedBy) }
+        updateTimerState()
     }
 
     private func poll() {

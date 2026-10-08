@@ -2,6 +2,7 @@ import Combine
 import Darwin
 import Foundation
 import GameController
+import os
 
 /// The gamepad SteamOS sees, created by the guest's fx-pad service as a uinput device (PadPort):
 /// the identity and capabilities the real controller's kernel driver exposes, so SDL's GUID-based
@@ -81,7 +82,8 @@ enum GuestPad: Equatable {
 ///   guest → host  `hello` (the service started, without a pad), `caps hid` (it takes `hid-create`),
 ///                 `rumble <strong> <weak>` (0…65535), `hid-output <type> <report>`,
 ///                 `hid-get <id> <type> <rnum>`, `hid-set <id> <type> <report>`
-/// Reports are hex, report ID first. Main thread only.
+/// Reports are hex, report ID first. `send`/`sendLatest` may be called from any thread (the HID
+/// input path writes on `hidQueue`); everything else here is main thread only.
 final class PadPort {
     static let name = "fx.pad"
     /// Handed to libkrun: guest → host data is written here.
@@ -96,6 +98,11 @@ final class PadPort {
     private static let maxPending = 256 * 1024
     private var writable: DispatchSourceWrite?
     private var writableArmed = false
+    /// Guards `pending`, `writable`/`writableArmed` and their suspend/resume balance: HID input
+    /// reports call `sendLatest` on `hidQueue` while the main thread calls `send` (pad create /
+    /// remove, hid replies), so access is serialised — an unbalanced source or a torn `pending`
+    /// would abort the process (same class as StallMonitor's suspended cancel).
+    private var lock = os_unfair_lock()
 
     init() throws {
         var out: [Int32] = [0, 0], inp: [Int32] = [0, 0]
@@ -109,8 +116,11 @@ final class PadPort {
     }
 
     /// One host → guest line, after everything queued before it; false if it had to be dropped.
+    /// Any thread (main, `hidQueue`).
     @discardableResult
     func send(_ line: String) -> Bool {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
         let bytes = Array((line + "\n").utf8)
         if pending.count + bytes.count > PadPort.maxPending {
             pending.removeAll()
@@ -119,7 +129,7 @@ final class PadPort {
             pending.append(UInt8(ascii: "\n"))
         }
         pending += bytes
-        flush()
+        flushLocked()
         return true
     }
 
@@ -127,11 +137,14 @@ final class PadPort {
     /// only if nothing older still waits, so a slow guest gets fewer, current reports.
     @discardableResult
     func sendLatest(_ line: String) -> Bool {
-        guard pending.isEmpty else { return false }
-        return send(line)
+        os_unfair_lock_lock(&lock)
+        let empty = pending.isEmpty
+        os_unfair_lock_unlock(&lock)
+        return empty ? send(line) : false
     }
 
-    private func flush() {
+    /// Caller holds `lock`.
+    private func flushLocked() {
         while !pending.isEmpty {
             let n = pending.withUnsafeBytes { Darwin.write(writeFd, $0.baseAddress, $0.count) }
             if n > 0 {
@@ -148,7 +161,12 @@ final class PadPort {
     private func armWritable(_ on: Bool) {
         if writable == nil {
             let s = DispatchSource.makeWriteSource(fileDescriptor: writeFd, queue: .main)
-            s.setEventHandler { [weak self] in self?.flush() }
+            s.setEventHandler { [weak self] in
+                guard let self else { return }
+                os_unfair_lock_lock(&self.lock)
+                self.flushLocked()
+                os_unfair_lock_unlock(&self.lock)
+            }
             writable = s
         }
         guard on != writableArmed, let s = writable else { return }
@@ -208,6 +226,9 @@ final class GamepadBridge {
     private var paused = false
     private let rumble = Rumble()
     private let hid = HIDPassthrough()
+    /// HID input reports (hex + pipe write) are handled here, not on the main thread (which the
+    /// report callback runs on): report order is kept, one serial queue.
+    private let hidQueue = DispatchQueue(label: "steamac.pad.hid")
     /// Input reports sent to the guest since the passed-through device was created.
     private var hidInputs = 0
     private var observers: [NSObjectProtocol] = []
@@ -312,9 +333,19 @@ final class GamepadBridge {
 
     private func hidInput(_ report: UnsafeBufferPointer<UInt8>) {
         guard guestHID != nil, !paused else { return }
-        if port.sendLatest("hid-input " + HIDPassthrough.hex(report)) {
-            hidInputs += 1
-            if hidInputs == 1 { log("gamepad: first input report to SteamOS: id 0x\(String(report[0], radix: 16)), \(report.count) bytes") }
+        // Copy the report (the callback's buffer is reused) and encode + write on `hidQueue`, so
+        // this 250–1000 Hz path never runs the hex encoding or pipe write on the frame thread.
+        // `guestHID`/`paused` are read here on the main thread (never on `hidQueue`): a snapshot
+        // is all the queued write needs — the guest ignores a report for a pad it no longer has.
+        let bytes = Array(report)
+        hidQueue.async { [weak self] in
+            guard let self else { return }
+            if self.port.sendLatest("hid-input " + HIDPassthrough.hex(bytes)) {
+                self.hidInputs += 1
+                if self.hidInputs == 1 {
+                    log("gamepad: first input report to SteamOS: id 0x\(String(bytes[0], radix: 16)), \(bytes.count) bytes")
+                }
+            }
         }
     }
 

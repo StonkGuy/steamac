@@ -208,13 +208,18 @@ final class Scanout {
     static let darkLuma = 8
 
     /// Scanout state, plus the darkness of the latest frame if one newer than `seen` (a
-    /// `presented` value) arrived. The GPU thread never writes into the last presented frame.
+    /// `presented` value) arrived. The GPU thread never writes into the last presented frame, so
+    /// it is safe to sample it after the lock is dropped (the 2560 scattered reads must not hold
+    /// the lock the GPU present worker takes).
     func probe(sampleIfNewerThan seen: UInt64) -> Probe {
-        locked {
-            var p = Probe(enabled: enabled, hasPicture: lastPresented != nil, presented: presented, dark: nil)
-            if let i = lastPresented, presented != seen { p.dark = Scanout.darkFraction(buffers[i]) }
-            return p
+        let (p, sample) = locked { () -> (Probe, FrameBuffer?) in
+            let p = Probe(enabled: enabled, hasPicture: lastPresented != nil, presented: presented, dark: nil)
+            return (p, lastPresented.flatMap { presented != seen ? buffers[$0] : nil })
         }
+        guard let frame = sample else { return p }
+        var result = p
+        result.dark = Scanout.darkFraction(frame)
+        return result
     }
 
     /// Sparse black test: luma at a `sampleColumns`×`sampleRows` grid of pixel centres (2560 reads,
