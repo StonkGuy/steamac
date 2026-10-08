@@ -10,13 +10,15 @@ enum VMSizing {
     struct Host: Equatable {
         /// Physical RAM, bytes (hw.memsize).
         var memBytes: UInt64
-        /// Performance cores (hw.perflevel0.physicalcpu; nil when the sysctl is missing).
+        /// Cores that are not efficiency cores (every hw.perflevelN except the "Efficiency"
+        /// level: newer chips can have more than one fast level, STEAMAC-2K); nil when the
+        /// perflevel sysctls are missing.
         var perfCores: Int?
         /// All cores (activeProcessorCount).
         var cores: Int
 
         static let current = Host(memBytes: ProcessInfo.processInfo.physicalMemory,
-                                  perfCores: sysctlInt("hw.perflevel0.physicalcpu"),
+                                  perfCores: fastCoreCount(),
                                   cores: ProcessInfo.processInfo.activeProcessorCount)
 
         var memGiB: Int { Int((memBytes + (1 << 29)) >> 30) }
@@ -30,7 +32,8 @@ enum VMSizing {
     }
 
     static let minAutoMemMiB = 4096, maxAutoMemMiB = 16384
-    static let minAutoCPUs = 2, maxAutoCPUs = 8
+    /// Fewer than 4 vCPUs leave Steam's UI loading for minutes (STEAMAC-2K: 2 vCPUs on a 12-core Mac).
+    static let minAutoCPUs = 4, maxAutoCPUs = 8
     /// macOS, the launcher, driver-internal allocations and other apps need room besides
     /// guest RAM and Vulkan heaps. Keep at least 3 GiB, or a quarter of a larger Mac.
     static func hostReserveMiB(_ host: Host) -> Int {
@@ -61,7 +64,7 @@ enum VMSizing {
     /// Steam, Proton and FEX gain little, while the host's own frame-path threads (virglrenderer
     /// rings, MoltenVK pipeline compiles, the renderer) need cores too.
     static func autoCPUs(_ host: Host) -> Int {
-        min(maxAutoCPUs, max(minAutoCPUs, host.fastCores))
+        min(maxAutoCPUs, max(2, min(minAutoCPUs, host.cores), host.fastCores))
     }
 
     /// Settings > Advanced: why a custom memory size is risky on this Mac, or nil.
@@ -102,9 +105,10 @@ enum VMSizing {
         for (gb, want) in mem where autoMemMiB(host(gb, 4, 8)) != want {
             failures.append("sizing: \(gb) GB → \(autoMemMiB(host(gb, 4, 8))) MiB, want \(want)")
         }
-        // (P, all cores, want): M1 4+4, M4 4+6, M2 Pro 6+4, M1 Pro 8+2, M3 Max 12+4 (14-core: 10+4), 1 P, no perflevel sysctl.
-        let cpus: [(Int?, Int, Int)] = [(4, 8, 4), (4, 10, 4), (6, 10, 6), (8, 10, 8), (12, 16, 8), (10, 14, 8), (1, 4, 2),
-                                        (nil, 8, 8), (nil, 1, 2)]
+        // (P, all cores, want): M1 4+4, M4 4+6, M2 Pro 6+4, M1 Pro 8+2, M3 Max 12+4 (14-core: 10+4), 1 P,
+        // 2 fast of 12 (STEAMAC-2K), 2 cores, no perflevel sysctl.
+        let cpus: [(Int?, Int, Int)] = [(4, 8, 4), (4, 10, 4), (6, 10, 6), (8, 10, 8), (12, 16, 8), (10, 14, 8), (1, 4, 4),
+                                        (2, 12, 4), (1, 2, 2), (nil, 8, 8), (nil, 1, 2)]
         for (p, n, want) in cpus where autoCPUs(host(16, p, n)) != want {
             failures.append("sizing: \(p.map(String.init) ?? "-")P/\(n) cores → \(autoCPUs(host(16, p, n))) vCPUs, want \(want)")
         }
@@ -131,5 +135,27 @@ enum VMSizing {
         var value: Int32 = 0
         var size = MemoryLayout<Int32>.size
         return sysctlbyname(name, &value, &size, nil, 0) == 0 && value > 0 ? Int(value) : nil
+    }
+
+    /// Sum of the non-efficiency performance levels. Without level names, every level but the
+    /// last (the slowest) counts.
+    private static func fastCoreCount() -> Int? {
+        guard let levels = sysctlInt("hw.nperflevels"), levels > 0 else { return nil }
+        var fast = 0
+        for i in 0..<levels {
+            guard let cores = sysctlInt("hw.perflevel\(i).physicalcpu") else { return nil }
+            let name = sysctlString("hw.perflevel\(i).name")
+            let efficiency = name.map { $0 == "Efficiency" } ?? (levels > 1 && i == levels - 1)
+            if !efficiency { fast += cores }
+        }
+        return fast > 0 ? fast : nil
+    }
+
+    private static func sysctlString(_ name: String) -> String? {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buf = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &buf, &size, nil, 0) == 0 else { return nil }
+        return String(cString: buf)
     }
 }
