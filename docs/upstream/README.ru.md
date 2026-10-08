@@ -1,6 +1,6 @@
 # steamac — официальный ARM64 SteamOS (образ Steam Frame) в ВМ на Apple Silicon
 
-[English](README.md) · **Русский**
+[English](overview.md) · **Русский**
 
 На macOS 15 (Sequoia) настоящий SteamOS от Valve для Steam Frame запускается в лёгкой ВМ на
 Hypervisor.framework (libkrun) с GPU-ускорением через Venus.
@@ -577,7 +577,7 @@ Settings, сохраняется. virglrenderer открывает
 
 | Вариант | Что это | Плюсы и минусы |
 |---|---|---|
-| **KosmicKrisp** — Mesa на Metal 4 · macOS 26+ (`kosmickrisp`, по умолчанию, где есть) | `host/kosmickrisp/`: Mesa main + открытые MR (геометрические шейдеры !44786, transform feedback !44928, tiled-изображения в host-pointer памяти !44929, device-local тип памяти !44221, линейные цели рендера !44782/!44222) + патчи steamac (явный row pitch LINEAR, LINEAR как input attachment, `fillModeNonSolid`, без которого DXVK не запускается, 8 сэмплов как 4, выравнивание texel-буферов по одному текселю и пулы таймстампов на нескольких счётчиковых кучах Metal, нужные vkd3d-proton; occlusion-запросы сверх одного visibility-буфера на 32768 и пулы таймстампов на счётчиковых кучах, общих для всех гостевых устройств процесса (Metal разрешает 32 на процесс), так что пулы запросов Dota 2 / Counter-Strike 2 больше не перестают создаваться; sparse binding/residency на placement sparse-ресурсах Metal 4 и min/max-редукция сэмплера, эмулируемая в шейдерах до Apple10, — с ними vkd3d-proton даёт Tiled Resources Tier 2 и, значит, D3D12 feature level 12_0) | быстрее: Stellar Blade Demo ~29 FPS против ~18 на MoltenVK на M1 Max (видео на разделённом экране: `docs/media/stellar-blade-moltenvk-vs-kosmickrisp.mp4`); интерфейс Steam, DXVK-игры и Stellar Blade Demo (D3D12, vkd3d-proton) работают, первый запуск Stellar Blade — ~28 мин компиляции шейдеров на M1 Max. Только macOS 26+; собирается, только если сборка идёт на macOS 26+, иначе используется MoltenVK. Известные пробелы (repro на хосте): transform feedback со strip-геометрическими шейдерами и его счётчик при переполнении (черновой MR); в пределах одного render pass запись глубины в незамапленные тайлы остаётся в тайловой памяти, и следующие draw этого прохода сравнивают с ней (Tiled Resources Tier 2 такой кэш допускает; `test_sparse_depth_stencil_rendering` из vkd3d-proton ждёт, что запись отбросится); нет sparse 3D-текстур (3D-тайлы Metal не совпадают со стандартными 3D-блоками Vulkan), поэтому нет Tiled Resources Tier 3 |
+| **KosmicKrisp** — Mesa на Metal 4 · macOS 26+ (`kosmickrisp`, по умолчанию, где есть) | `host/kosmickrisp/`: Mesa main + открытые MR (геометрические шейдеры !44786, transform feedback !44928, tiled-изображения в host-pointer памяти !44929, device-local тип памяти !44221, линейные цели рендера !44782/!44222) + патчи steamac (явный row pitch LINEAR, LINEAR как input attachment, `fillModeNonSolid`, без которого DXVK не запускается, 8 сэмплов как 4, выравнивание texel-буферов по одному текселю и пулы таймстампов на нескольких счётчиковых кучах Metal, нужные vkd3d-proton; occlusion-запросы сверх одного visibility-буфера на 32768 и пулы таймстампов на счётчиковых кучах, общих для всех гостевых устройств процесса (Metal разрешает 32 на процесс), так что пулы запросов Dota 2 / Counter-Strike 2 больше не перестают создаваться; sparse binding/residency на placement sparse-ресурсах Metal 4 и min/max-редукция сэмплера, эмулируемая в шейдерах до Apple10, — с ними vkd3d-proton даёт Tiled Resources Tier 2 и, значит, D3D12 feature level 12_0) | быстрее: Stellar Blade Demo ~29 FPS против ~18 на MoltenVK на M1 Max (видео на разделённом экране: `../media/stellar-blade-moltenvk-vs-kosmickrisp.mp4`); интерфейс Steam, DXVK-игры и Stellar Blade Demo (D3D12, vkd3d-proton) работают, первый запуск Stellar Blade — ~28 мин компиляции шейдеров на M1 Max. Только macOS 26+; собирается, только если сборка идёт на macOS 26+, иначе используется MoltenVK. Известные пробелы (repro на хосте): transform feedback со strip-геометрическими шейдерами и его счётчик при переполнении (черновой MR); в пределах одного render pass запись глубины в незамапленные тайлы остаётся в тайловой памяти, и следующие draw этого прохода сравнивают с ней (Tiled Resources Tier 2 такой кэш допускает; `test_sparse_depth_stencil_rendering` из vkd3d-proton ждёт, что запись отбросится); нет sparse 3D-текстур (3D-тайлы Metal не совпадают со стандартными 3D-блоками Vulkan), поэтому нет Tiled Resources Tier 3 |
 | **MoltenVK** — Metal 3 · macOS 15+ (`moltenvk`) | `host/moltenvk/`: форк UTM + патчи steamac | любой поддерживаемый Mac; по умолчанию на macOS 15 и в сборках без KosmicKrisp (сборки из исходников на macOS 15; в DMG релиза KosmicKrisp есть с 1.7) |
 
 Смена драйвера меняет идентичность драйвера Venus (UUID кэша конвейеров): Steam и игры заново
@@ -637,7 +637,7 @@ host/launcher/dist.sh       # подпись, нотаризация, DMG
 Лицензии: `bundle.sh` кладёт в `Contents/Resources/licenses` все тексты лицензий сторонних
 компонентов бандла и индекс `THIRD-PARTY-NOTICES.txt` (компонент, версия, SPDX, где лежит в бандле,
 исходники; собирает `host/launcher/licenses.sh` в `work/out/licenses`, в том числе крейты libkrun и
-модули Go из gvproxy/desync), плюс `LICENSE` и `NOTICE` проекта в `licenses/steamac/`. `dist.sh`
+модули Go из gvproxy/desync), плюс `../../LICENSE` и `../../NOTICE` проекта в `licenses/steamac/`. `dist.sh`
 вызывает `scripts/gpl-sources.sh` и рядом с DMG кладёт
 `work/out/dist/FX-Steam-Launcher-<версия>-gpl-sources.tar` — полный исходный код GPL-компонентов
 (ядро с патчами и конфигом, busybox из Debian-снапшота, dosfstools, e2fsprogs, btrfs-progs, скрипты
@@ -898,11 +898,11 @@ libraries) больше не роняет ВМ при отправке кома�
 
 ## Лицензия (License)
 
-Код проекта — Apache License 2.0 (`LICENSE`), © 2026 FX GAMES FZ LLC. Исключения перечислены в
-`NOTICE`: патчи и конфигурация ядра Linux — GPL-2.0-only, патчи для virglrenderer и Mesa — MIT
+Код проекта — Apache License 2.0 (`../../LICENSE`), © 2026 FX GAMES FZ LLC. Исключения перечислены в
+`../../NOTICE`: патчи и конфигурация ядра Linux — GPL-2.0-only, патчи для virglrenderer и Mesa — MIT
 (как у этих проектов), пять файлов сессии gamescope, производные от пакета Valve
-`deckard-steamvr-session`, — MIT © Valve Corporation; сертификат CA Valve и скриншоты в `docs/media`
-лицензией проекта не покрываются. Тексты лицензий — в `LICENSES/`.
+`deckard-steamvr-session`, — MIT © Valve Corporation; сертификат CA Valve и скриншоты в `../media`
+лицензией проекта не покрываются. Тексты лицензий — в `../../LICENSES/`.
 
 SteamOS в проект не входит и с ним не распространяется: приложение скачивает подписанный образ
 с серверов Valve после того, как пользователь принял лицензию Valve (см. «Создание диска SteamOS

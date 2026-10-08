@@ -43,3 +43,20 @@ to that release on GitHub (FX-Steam-Launcher-<version>-gpl-sources.tar).
 Steam, the Steam logo, SteamOS, Steam Deck and Steam Frame are trademarks and/or registered
 trademarks of Valve Corporation in the U.S. and/or other countries. This project is not
 affiliated with, endorsed by or sponsored by Valve Corporation.
+
+Modifications in this fork
+Copyright 2026 the eac-arm64-emulation-poc contributors
+
+This is a modified version of steamac (github.com/fxgl/steamac). The files changed in this
+fork are listed in docs/fork.md. New files added by this fork:
+
+  fex-eac/                 scripts, Apache-2.0; fex-eac/patches/ are patches to FEX-Emu,
+                           MIT (the license of FEX)
+  docs/eac-*.md            fork documentation, Apache-2.0
+  docs/fork.md             fork documentation, Apache-2.0
+  docs/upstream/           upstream steamac's README text, reorganised into pages
+                           (upstream text, Apache-2.0, © 2026 FX GAMES FZ LLC)
+
+Downstream patches follow the license of the project they patch, matching the rule above:
+libkrun patches — Apache-2.0; KosmicKrisp and Mesa patches — MIT; virglrenderer patches —
+MIT.
