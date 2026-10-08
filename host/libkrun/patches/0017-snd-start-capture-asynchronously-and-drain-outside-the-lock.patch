@@ -1,0 +1,822 @@
+From steamac <steamac@local>
+Date: Thu, 8 Oct 2026 18:51:53 +0300
+Subject: [PATCH] virtio-snd: start capture asynchronously and drain playback outside the lock
+
+PCM_START for a capture stream ran stop/configure/initialize/start_unit on the
+control-queue thread while holding the shared `hosts` mutex, which the pump
+thread takes every iteration. Opening the microphone (permission prompt,
+device selection) can take over a second, and the guest's control-message
+timeout is 1 s, so the message timed out, PipeWire was SIGKILLed and games
+froze. START now replies immediately and a worker thread builds, configures and
+starts the input unit; no AudioUnit call runs under the `hosts` mutex (capture's
+stop_unit takes the unit out under the `capture` mutex, and the stop runs after
+that lock is released). A start also leaves the stop of an already-running unit
+to that worker (see `stop_pending`), so `AudioOutputUnitStop` cannot block under
+`hosts` either. Until the unit runs, capture I/O is completed with silence so
+the guest stream keeps flowing; a failed start logs once and keeps delivering
+silence. Playback behaviour is unchanged.
+
+release() also polled the playback drain (play_out) up to MAX_BUFFER_MS+100 ms
+while holding `hosts`. The wait is now bounded by the ring's consumed pointer
+and runs after the lock is released, so a slow drain cannot stall the pump
+thread and, with it, every other stream.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ .../virtio/snd/audio_backends/coreaudio.rs    | 594 +++++++++++++-------
+ 1 file changed, 384 insertions(+), 210 deletions(-)
+
+diff --git a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
+index 8279afb..b0a69cb 100644
+--- a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
++++ b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
+@@ -513,7 +513,10 @@ fn ticks_to_nanos(ticks: u64) -> u64 {
+     (ticks as u128 * numer / denom) as u64
+ }
+ 
+-/// State shared with a CoreAudio IO thread. Everything the callbacks touch is lock-free.
++/// State shared with a CoreAudio IO thread. Everything the callbacks touch is lock-free, except
++/// `capture`: the capture unit and its converter, touched by the pump thread and the capture
++/// start/stop worker behind the same mutex. No AudioUnit call runs while that mutex is held, so
++/// the pump never blocks on the microphone (which can take over a second).
+ struct Shared {
+     ring: Ring,
+     /// Playback only: copy of what the render callback hands to CoreAudio.
+@@ -547,16 +550,33 @@ struct Shared {
+     last_callback: AtomicU64,
+     /// Playback: silence bytes the callback filled in while running (priming, underruns).
+     silence_bytes: AtomicU64,
+-    /// Capture: the unit to pull the input from.
++    /// Capture: the running unit, its converter and the device IO rate, or `None` while the
++    /// unit is starting/stopped (capture I/O is then completed with silence).
++    capture: Mutex<Option<CaptureState>>,
++    /// Capture: the unit to pull the input from (raw, set before the unit starts).
+     unit: AtomicPtr<c_void>,
++    /// Capture: device the unit was last configured (or last attempted) for.
++    capture_device: AtomicU32,
++    /// Capture: a start worker is building/starting the unit; START replies before it is done.
++    starting: AtomicBool,
++    /// Capture: a stop is pending; the start worker tears its unit down instead of starting it.
++    /// Set while `capture` holds no unit.
++    stop_pending: AtomicBool,
+     /// Capture: AudioUnitRender target, touched only by the IO thread.
+     scratch: UnsafeCell<Box<[u8]>>,
+     wake: Arc<Semaphore>,
+ }
+ 
++/// Capture state shared between the pump thread and the start/stop worker: the unit and its
++/// converter. `Unit` and `Converter` are `Send`.
++struct CaptureState {
++    unit: Unit,
++    converter: Converter,
++}
++
+ // SAFETY: `scratch` is only accessed from the IO thread of the single unit using this
+-// `Shared`; the rings are SPSC with one producer and one consumer thread each; everything
+-// else is atomic.
++// `Shared`; `capture` (and its `Unit`/`Converter`) is only touched behind its own mutex; the
++// rings are SPSC with one producer and one consumer thread each; everything else is atomic.
+ unsafe impl Sync for Shared {}
+ unsafe impl Send for Shared {}
+ 
+@@ -584,7 +604,11 @@ impl Shared {
+             callbacks: AtomicU64::new(0),
+             last_callback: AtomicU64::new(0),
+             silence_bytes: AtomicU64::new(0),
++            capture: Mutex::new(None),
+             unit: AtomicPtr::new(ptr::null_mut()),
++            capture_device: AtomicU32::new(0),
++            starting: AtomicBool::new(false),
++            stop_pending: AtomicBool::new(false),
+             scratch: UnsafeCell::new(scratch),
+             wake,
+         }
+@@ -1162,6 +1186,149 @@ impl Drop for Unit {
+     }
+ }
+ 
++/// The current default input device, if there is one.
++fn input_device() -> Option<AudioObjectID> {
++    object_property(
++        kAudioObjectSystemObject,
++        kAudioHardwarePropertyDefaultInputDevice,
++        kAudioObjectPropertyScopeGlobal,
++    )
++    .filter(|d| *d != 0)
++}
++
++/// Wait until `ring` has been consumed up to `end` or a bounded deadline passes. Bounded by the
++/// guest's own buffer time (twice MAX_BUFFER_MS); callers must not hold the `hosts` mutex across
++/// this wait (see `CoreAudioBackend::release`).
++fn wait_played_out(ring: &Ring, end: u64) {
++    let deadline =
++        Instant::now() + Duration::from_millis(2 * SndControl::MAX_BUFFER_MS as u64 + 200);
++    while ring.consumed() < end && Instant::now() < deadline {
++        std::thread::sleep(Duration::from_millis(2));
++    }
++}
++
++/// A HAL input unit with the capture callback installed.
++fn create_input_unit(refcon: *mut c_void) -> Result<Unit> {
++    let unit = Unit::new(kAudioUnitSubType_HALOutput)?;
++    unit.set(
++        kAudioOutputUnitProperty_EnableIO,
++        kAudioUnitScope_Input,
++        1,
++        &1u32,
++        "EnableIO(input)",
++    )?;
++    unit.set(
++        kAudioOutputUnitProperty_EnableIO,
++        kAudioUnitScope_Output,
++        0,
++        &0u32,
++        "EnableIO(output)",
++    )?;
++    let cb = AURenderCallbackStruct {
++        inputProc: render_input,
++        inputProcRefCon: refcon,
++    };
++    unit.set(
++        kAudioOutputUnitProperty_SetInputCallback,
++        kAudioUnitScope_Global,
++        0,
++        &cb,
++        "SetInputCallback",
++    )?;
++    Ok(unit)
++}
++
++/// Capture start worker: build, configure and start the microphone for `fmt` on the current
++/// default input device. Runs off the control-queue thread (and off `hosts`), so the guest's
++/// PCM_START can be acknowledged immediately. On success the running unit is published in
++/// `shared.capture`; `shared.running` was already set by `CoreAudioBackend::start`. On failure
++/// it logs once, clears `running` and leaves `shared.capture` empty, so the pump completes
++/// capture I/O with silence until the next START.
++fn capture_start_worker(shared: Arc<Shared>, fmt: Format, id: usize) {
++    let result = (|| -> Result<()> {
++        // A stop that arrived before this worker started must take down a unit that was
++        // still running when it did, and must not build a new one.
++        let stop_requested = shared.stop_pending.swap(false, Ordering::AcqRel);
++        let previous = if stop_requested {
++            shared.capture.lock().unwrap().take()
++        } else {
++            None
++        };
++        if let Some(mut previous) = previous {
++            // The stop runs off `hosts`, on this worker thread.
++            previous.unit.stop();
++        }
++        if stop_requested {
++            return Ok(());
++        }
++        let device: AudioObjectID = input_device()
++            .ok_or_else(|| Error::UnexpectedAudioBackendError("no input device".into()))?;
++        let rate: f64 = object_property(
++            device,
++            kAudioDevicePropertyNominalSampleRate,
++            kAudioObjectPropertyScopeGlobal,
++        )
++        .unwrap_or(48000.0);
++        let unit = create_input_unit(Arc::as_ptr(&shared) as *mut c_void)?;
++        unit.set(
++            kAudioOutputUnitProperty_CurrentDevice,
++            kAudioUnitScope_Global,
++            0,
++            &device,
++            "CurrentDevice(input)",
++        )?;
++        // The HAL unit does not resample input: take Float32 at the device rate and convert in
++        // the pump thread.
++        let dev_fmt = float_asbd(rate, fmt.channels);
++        unit.set(
++            kAudioUnitProperty_StreamFormat,
++            kAudioUnitScope_Output,
++            1,
++            &dev_fmt,
++            "StreamFormat(input)",
++        )?;
++        let mut conv = ptr::null_mut();
++        // SAFETY: valid formats and out pointer.
++        check(
++            unsafe { AudioConverterNew(&dev_fmt, &fmt.asbd(), &mut conv) },
++            "AudioConverterNew",
++        )?;
++        let mut unit = unit;
++        unit.initialize()?;
++        // Publish under the capture lock: a stop on the control thread either takes the
++        // published unit or, finding none while `starting` is set, leaves `stop_pending` for
++        // us to see here. The input callback needs the unit pointer, so it is set before the
++        // unit starts, not after.
++        let mut slot = shared.capture.lock().unwrap();
++        if shared.stop_pending.swap(false, Ordering::AcqRel) {
++            drop(slot);
++            return Ok(());
++        }
++        shared.capture_device.store(device, Ordering::Release);
++        let mut state = CaptureState {
++            unit,
++            converter: Converter {
++                conv,
++                in_frame_bytes: dev_fmt.mBytesPerFrame as usize,
++                staging: Vec::new(),
++            },
++        };
++        shared.unit.store(state.unit.au, Ordering::Release);
++        if let Err(err) = state.unit.start() {
++            shared.unit.store(ptr::null_mut(), Ordering::Release);
++            return Err(err);
++        }
++        *slot = Some(state);
++        Ok(())
++    })();
++    if let Err(err) = result {
++        log::error!("snd: stream {id}: cannot start the microphone ({err}); delivering silence");
++        shared.unit.store(ptr::null_mut(), Ordering::Release);
++        shared.running.store(false, Ordering::Release);
++    }
++    shared.starting.store(false, Ordering::Release);
++}
++
+ /// Capture rate/format converter (device Float32 → guest format and rate).
+ struct Converter {
+     conv: AudioConverterRef,
+@@ -1281,10 +1448,9 @@ struct HostStream {
+     guest_buffer: Option<(u64, u64)>,
+     /// Guest format the unit is configured for.
+     format: Option<Format>,
+-    /// Device the unit was last seen on, and its nominal rate then.
++    /// Device the unit was last seen on, and its nominal rate then (playback latency).
+     device: AudioObjectID,
+     device_rate: f64,
+-    converter: Option<Converter>,
+     /// Playback messages fully copied into the ring, completed once the device has played up
+     /// to `fifo_bytes` before the stream offset they end at.
+     inflight: VecDeque<(u64, Buffer)>,
+@@ -1330,7 +1496,6 @@ impl HostStream {
+             format: None,
+             device: 0,
+             device_rate: 0.0,
+-            converter: None,
+             inflight: VecDeque::new(),
+             completed: 0,
+             fifo_bytes: 0,
+@@ -1442,10 +1607,14 @@ impl HostStream {
+ 
+     /// Stop the unit while the VM is paused and start it again on resume. The render
+     /// callback stops consuming the ring, so the guest's hw_ptr stops (after at most the host
+-    /// FIFO) and playback carries on from the same sample without an underrun.
++    /// FIFO) and playback carries on from the same sample without an underrun. Capture's state
++    /// lives in `shared.capture`, not `self.unit`.
+     fn follow_pause(&mut self) {
++        let capture_up = self.direction == Direction::Input
++            && (self.shared.starting.load(Ordering::Acquire)
++                || self.shared.capture.lock().unwrap().is_some());
+         if self.control.paused() {
+-            if self.unit.as_ref().is_some_and(|u| u.started) {
++            if capture_up || self.unit.as_ref().is_some_and(|u| u.started) {
+                 self.stop_unit();
+                 self.suspended = true;
+                 self.trace_state("suspended (VM paused)", None);
+@@ -1464,76 +1633,42 @@ impl HostStream {
+     }
+ 
+     fn create_unit(&mut self) -> Result<()> {
++        debug_assert_eq!(self.direction, Direction::Output);
+         if self.unit.is_some() {
+             return Ok(());
+         }
+-        let unit = match self.direction {
+-            Direction::Output => {
+-                // A selected device gets a HAL unit bound to it; otherwise the default-output
+-                // unit, which follows the system default device by itself.
+-                self.output_target = self
+-                    .control
+-                    .output_device()
+-                    .as_deref()
+-                    .and_then(resolve_output_device);
+-                let unit = match self.output_target {
+-                    Some(device) => {
+-                        let unit = Unit::new(kAudioUnitSubType_HALOutput)?;
+-                        unit.set(
+-                            kAudioOutputUnitProperty_CurrentDevice,
+-                            kAudioUnitScope_Global,
+-                            0,
+-                            &device,
+-                            "CurrentDevice(output)",
+-                        )?;
+-                        unit
+-                    }
+-                    None => Unit::new(kAudioUnitSubType_DefaultOutput)?,
+-                };
+-                let cb = AURenderCallbackStruct {
+-                    inputProc: render_output,
+-                    inputProcRefCon: self.refcon(),
+-                };
+-                unit.set(
+-                    kAudioUnitProperty_SetRenderCallback,
+-                    kAudioUnitScope_Input,
+-                    0,
+-                    &cb,
+-                    "SetRenderCallback",
+-                )?;
+-                unit
+-            }
+-            Direction::Input => {
++        // A selected device gets a HAL unit bound to it; otherwise the default-output
++        // unit, which follows the system default device by itself.
++        self.output_target = self
++            .control
++            .output_device()
++            .as_deref()
++            .and_then(resolve_output_device);
++        let unit = match self.output_target {
++            Some(device) => {
+                 let unit = Unit::new(kAudioUnitSubType_HALOutput)?;
+                 unit.set(
+-                    kAudioOutputUnitProperty_EnableIO,
+-                    kAudioUnitScope_Input,
+-                    1,
+-                    &1u32,
+-                    "EnableIO(input)",
+-                )?;
+-                unit.set(
+-                    kAudioOutputUnitProperty_EnableIO,
+-                    kAudioUnitScope_Output,
+-                    0,
+-                    &0u32,
+-                    "EnableIO(output)",
+-                )?;
+-                let cb = AURenderCallbackStruct {
+-                    inputProc: render_input,
+-                    inputProcRefCon: self.refcon(),
+-                };
+-                unit.set(
+-                    kAudioOutputUnitProperty_SetInputCallback,
++                    kAudioOutputUnitProperty_CurrentDevice,
+                     kAudioUnitScope_Global,
+                     0,
+-                    &cb,
+-                    "SetInputCallback",
++                    &device,
++                    "CurrentDevice(output)",
+                 )?;
+-                self.shared.unit.store(unit.au, Ordering::Release);
+                 unit
+             }
++            None => Unit::new(kAudioUnitSubType_DefaultOutput)?,
++        };
++        let cb = AURenderCallbackStruct {
++            inputProc: render_output,
++            inputProcRefCon: self.refcon(),
+         };
++        unit.set(
++            kAudioUnitProperty_SetRenderCallback,
++            kAudioUnitScope_Input,
++            0,
++            &cb,
++            "SetRenderCallback",
++        )?;
+         self.unit = Some(unit);
+         Ok(())
+     }
+@@ -1543,79 +1678,31 @@ impl HostStream {
+         self.create_unit()?;
+         let unit = self.unit.as_mut().unwrap();
+         unit.uninitialize();
+-        match self.direction {
+-            Direction::Output => {
+-                unit.set(
+-                    kAudioUnitProperty_StreamFormat,
+-                    kAudioUnitScope_Input,
+-                    0,
+-                    &fmt.asbd(),
+-                    "StreamFormat(output)",
+-                )?;
+-                self.shared
+-                    .frame_bytes
+-                    .store(fmt.frame_bytes(), Ordering::Relaxed);
+-                // fifo_bytes: update_latency() below, once the unit knows its device.
+-            }
+-            Direction::Input => {
+-                let device: AudioObjectID = object_property(
+-                    kAudioObjectSystemObject,
+-                    kAudioHardwarePropertyDefaultInputDevice,
+-                    kAudioObjectPropertyScopeGlobal,
+-                )
+-                .filter(|d| *d != 0)
+-                .ok_or_else(|| Error::UnexpectedAudioBackendError("no input device".into()))?;
+-                unit.set(
+-                    kAudioOutputUnitProperty_CurrentDevice,
+-                    kAudioUnitScope_Global,
+-                    0,
+-                    &device,
+-                    "CurrentDevice(input)",
+-                )?;
+-                // The HAL unit does not resample input: take Float32 at the device rate and
+-                // convert in the pump thread.
+-                let rate: f64 = object_property(
+-                    device,
+-                    kAudioDevicePropertyNominalSampleRate,
+-                    kAudioObjectPropertyScopeGlobal,
+-                )
+-                .unwrap_or(48000.0);
+-                let dev_fmt = float_asbd(rate, fmt.channels);
+-                unit.set(
+-                    kAudioUnitProperty_StreamFormat,
+-                    kAudioUnitScope_Output,
+-                    1,
+-                    &dev_fmt,
+-                    "StreamFormat(input)",
+-                )?;
+-                let mut conv = ptr::null_mut();
+-                // SAFETY: valid formats and out pointer.
+-                check(
+-                    unsafe { AudioConverterNew(&dev_fmt, &fmt.asbd(), &mut conv) },
+-                    "AudioConverterNew",
+-                )?;
+-                self.converter = Some(Converter {
+-                    conv,
+-                    in_frame_bytes: dev_fmt.mBytesPerFrame as usize,
+-                    staging: Vec::new(),
+-                });
+-                self.shared
+-                    .frame_bytes
+-                    .store(dev_fmt.mBytesPerFrame, Ordering::Relaxed);
+-            }
+-        }
++        unit.set(
++            kAudioUnitProperty_StreamFormat,
++            kAudioUnitScope_Input,
++            0,
++            &fmt.asbd(),
++            "StreamFormat(output)",
++        )?;
++        self.shared
++            .frame_bytes
++            .store(fmt.frame_bytes(), Ordering::Relaxed);
++        // fifo_bytes: update_latency() below, once the unit knows its device.
+         self.shared.channels.store(fmt.channels, Ordering::Relaxed);
+         self.shared.silence.store(fmt.silence(), Ordering::Relaxed);
+         unit.initialize()?;
+-        if self.direction == Direction::Output {
+-            unit.set_volume(self.control.volume());
+-        }
++        unit.set_volume(self.control.volume());
+         self.format = Some(fmt);
+         self.update_latency();
+         Ok(())
+     }
+ 
++    /// The playback unit, or the capture worker (`self.unit` is Output only).
+     fn start_unit(&mut self) -> Result<()> {
++        if self.direction == Direction::Input {
++            return self.start_capture();
++        }
+         match self.unit.as_mut() {
+             // Started by follow_pause() on resume.
+             Some(unit) if unit.initialized && self.control.paused() => {
+@@ -1631,18 +1718,82 @@ impl HostStream {
+ 
+     fn stop_unit(&mut self) {
+         self.suspended = false;
++        if self.direction == Direction::Input {
++            self.stop_capture();
++            return;
++        }
+         if let Some(unit) = self.unit.as_mut() {
+             unit.stop();
+         }
+     }
+ 
++    /// Capture: reply to START at once and configure/start the microphone on a worker.
++    /// Creating the input unit (and its permission prompt) can take over a second, which the
++    /// guest's 1 s control timeout does not allow; the pump completes capture I/O with silence
++    /// until the unit runs.
++    fn start_capture(&mut self) -> Result<()> {
++        let fmt = self
++            .guest_format
++            .ok_or(Error::UnexpectedAudioBackendConfiguration)?;
++        if self.control.paused() {
++            // Started by follow_pause() on resume.
++            self.suspended = true;
++            return Ok(());
++        }
++        self.stop_capture();
++        // `capture` already holds no unit, so capture I/O that arrives while the worker builds
++        // the new one is completed with silence.
++        self.shared.starting.store(true, Ordering::Release);
++        self.shared.stop_pending.store(false, Ordering::Release);
++        let shared = Arc::clone(&self.shared);
++        let id = self.id;
++        if let Err(err) = std::thread::Builder::new()
++            .name(format!("virtio-snd capture {id}"))
++            .spawn(move || capture_start_worker(shared, fmt, id))
++        {
++            log::error!("snd: stream {id}: cannot spawn the capture start worker: {err}");
++            self.shared.starting.store(false, Ordering::Release);
++        }
++        Ok(())
++    }
++
++    /// Capture: tear the unit down. Runs on the control or pump thread and never holds `hosts`
++    /// across the AudioUnit calls.
++    fn stop_capture(&mut self) {
++        self.suspended = false;
++        // The running unit lives in the per-stream `Shared`, not in `hosts`: taking it out of
++        // `capture` (and releasing that lock again) is enough; the stop then runs without the
++        // lock, so a start worker publishing a new unit is not held up by it.
++        let running = { self.shared.capture.lock().unwrap().take() };
++        if let Some(mut state) = running {
++            state.unit.stop();
++            // Dropped here, away from the IO thread.
++        }
++        if self.shared.starting.load(Ordering::Acquire) {
++            // The start worker owns the unit (even when it has not published it yet); have it
++            // stop a running one and skip starting. It re-checks `stop_pending` under the
++            // capture lock, so an AudioUnit call never runs under `hosts`.
++            self.shared.stop_pending.store(true, Ordering::Release);
++        }
++    }
++
+     /// Recompute the host FIFO (playback) and latency_bytes from the current device; logs
+     /// device and device rate changes.
+     fn update_latency(&mut self) {
+         let Some(fmt) = self.format else {
+             return;
+         };
+-        let device = self.unit.as_ref().map_or(0, |u| u.current_device());
++        let device = match self.direction {
++            Direction::Output => self.unit.as_ref().map_or(0, |u| u.current_device()),
++            Direction::Input => {
++                self.shared
++                    .capture
++                    .lock()
++                    .unwrap()
++                    .as_ref()
++                    .map_or(0, |s| s.unit.current_device())
++            }
++        };
+         let scope = match self.direction {
+             Direction::Output => kAudioObjectPropertyScopeOutput,
+             Direction::Input => kAudioObjectPropertyScopeInput,
+@@ -1714,46 +1865,27 @@ impl HostStream {
+     }
+ 
+     /// Capture: follow the default input device while recording (the HAL unit does not do it
+-    /// by itself; START always picks the current default).
++    /// by itself; START always picks the current default). The unit is checked through the
++    /// per-stream `Shared`, not `self.unit` (which is playback's).
+     fn follow_input_device(&mut self) {
+-        let (Some(unit), Some(fmt)) = (self.unit.as_ref(), self.format) else {
++        if !self.shared.starting.load(Ordering::Acquire)
++            && self.shared.capture.lock().unwrap().is_none()
++        {
+             return;
+-        };
+-        let default: AudioObjectID = object_property(
+-            kAudioObjectSystemObject,
+-            kAudioHardwarePropertyDefaultInputDevice,
+-            kAudioObjectPropertyScopeGlobal,
+-        )
+-        .unwrap_or(0);
+-        if !unit.started || default == 0 || default == unit.current_device() {
++        }
++        let default = input_device().unwrap_or(0);
++        if default == 0 || default == self.shared.capture_device.load(Ordering::Acquire) {
+             return;
+         }
++        // A device switch rebuilds the unit; start_capture drops the old one and lets the worker
++        // build the new one so no AudioUnit call blocks the pump thread.
+         self.stop_unit();
+         self.shared.ring.clear();
+-        if let Err(err) = self.configure(fmt).and_then(|()| self.start_unit()) {
++        if let Err(err) = self.start_unit() {
+             log::error!("snd: stream {}: switching input device: {err}", self.id);
+         }
+     }
+ 
+-    /// Playback: let the device play what the guest already saw completed (the host FIFO)
+-    /// before the unit stops, so a drained stream keeps its tail.
+-    fn play_out(&self) {
+-        if self.unit.as_ref().is_none_or(|u| !u.started) {
+-            return;
+-        }
+-        let ring = &self.shared.ring;
+-        let end = self
+-            .shared
+-            .limit
+-            .load(Ordering::Acquire)
+-            .min(ring.written());
+-        let deadline =
+-            Instant::now() + Duration::from_millis(SndControl::MAX_BUFFER_MS as u64 + 100);
+-        while ring.consumed() < end && Instant::now() < deadline {
+-            std::thread::sleep(Duration::from_millis(2));
+-        }
+-    }
+-
+     /// Complete everything the guest has queued on this stream and drop buffered audio.
+     /// The unit must be stopped.
+     fn flush(&mut self, guest: &mut Stream) {
+@@ -1774,7 +1906,12 @@ impl HostStream {
+     fn pump(&mut self, streams: &RwLock<Vec<Stream>>) {
+         match self.direction {
+             Direction::Output => self.pump_output(streams),
+-            Direction::Input => self.pump_input(streams),
++            Direction::Input => {
++                // A clone of the Arc so the guard below does not borrow `self`.
++                let shared = Arc::clone(&self.shared);
++                let mut capture = shared.capture.lock().unwrap();
++                self.pump_input(&mut capture, streams);
++            }
+         }
+         self.drain_dump();
+     }
+@@ -1877,51 +2014,66 @@ impl HostStream {
+         }
+     }
+ 
+-    fn pump_input(&mut self, streams: &RwLock<Vec<Stream>>) {
+-        let (Some(fmt), Some(conv)) = (self.format, self.converter.as_mut()) else {
++    /// Capture: convert the input ring into the guest's buffers, or deliver silence while the
++    /// unit is not running (START acknowledged before the microphone was ready, or a failed
++    /// start). `self.format` is always the guest format (set at PREPARE); the unit-configured
++    /// `format` stays `None` for capture.
++    fn pump_input(
++        &mut self,
++        state: &mut Option<CaptureState>,
++        streams: &RwLock<Vec<Stream>>,
++    ) {
++        let Some(fmt) = self.guest_format else {
+             return;
+         };
+-        if !self.shared.running.load(Ordering::Acquire) {
+-            return;
+-        }
+         let mut streams = streams.write().unwrap();
+         let guest = &mut streams[self.id];
+         let fb = fmt.frame_bytes() as usize;
++        let channels = fmt.channels;
+         let mut out = Vec::new();
+         while let Some(buf) = guest.buffers.front_mut() {
+             let space = (buf.desc_len() as usize).saturating_sub(buf.pos) / fb * fb;
+             if space > 0 {
+                 out.resize(space, 0);
+-                let mut packets = (space / fb) as u32;
+-                let mut abl = AudioBufferList {
+-                    mNumberBuffers: 1,
+-                    mBuffers: [AudioBuffer {
+-                        mNumberChannels: fmt.channels,
+-                        mDataByteSize: space as u32,
+-                        mData: out.as_mut_ptr() as *mut c_void,
+-                    }],
+-                };
+-                let mut input = ConverterInput {
+-                    ring: &self.shared.ring,
+-                    staging: &mut conv.staging,
+-                    frame_bytes: conv.in_frame_bytes,
+-                    channels: fmt.channels,
+-                };
+-                // SAFETY: abl describes `out`; `input` outlives the call.
+-                let status = unsafe {
+-                    AudioConverterFillComplexBuffer(
+-                        conv.conv,
+-                        converter_input,
+-                        &mut input as *mut ConverterInput as *mut c_void,
+-                        &mut packets,
+-                        &mut abl,
+-                        ptr::null_mut(),
+-                    )
++                let produced = match state.as_mut() {
++                    Some(state) => {
++                        // The converter's input is the ring; nothing outside the capture lock
++                        // touches the converter or the staging buffer.
++                        let mut packets = (space / fb) as u32;
++                        let mut abl = AudioBufferList {
++                            mNumberBuffers: 1,
++                            mBuffers: [AudioBuffer {
++                                mNumberChannels: channels,
++                                mDataByteSize: space as u32,
++                                mData: out.as_mut_ptr() as *mut c_void,
++                            }],
++                        };
++                        let mut input = ConverterInput {
++                            ring: &self.shared.ring,
++                            staging: &mut state.converter.staging,
++                            frame_bytes: state.converter.in_frame_bytes,
++                            channels,
++                        };
++                        // SAFETY: abl describes `out`; `input` outlives the call.
++                        let status = unsafe {
++                            AudioConverterFillComplexBuffer(
++                                state.converter.conv,
++                                converter_input,
++                                &mut input as *mut ConverterInput as *mut c_void,
++                                &mut packets,
++                                &mut abl,
++                                ptr::null_mut(),
++                            )
++                        };
++                        if status != 0 && status != NO_MORE_INPUT {
++                            log::error!("snd: stream {}: AudioConverter: {status}", self.id);
++                        }
++                        packets as usize * fb
++                    }
++                    // The microphone is not up: complete the guest's buffers with silence so
++                    // its capture stream keeps flowing instead of timing out.
++                    None => space,
+                 };
+-                if status != 0 && status != NO_MORE_INPUT {
+-                    log::error!("snd: stream {}: AudioConverter: {status}", self.id);
+-                }
+-                let produced = packets as usize * fb;
+                 if produced == 0 {
+                     break;
+                 }
+@@ -1939,7 +2091,7 @@ impl HostStream {
+             let buf = guest.buffers.pop_front().unwrap();
+             buf.message
+                 .latency_bytes
+-                .store(self.latency_bytes, Ordering::Relaxed);
++                .store(if state.is_some() { self.latency_bytes } else { 0 }, Ordering::Relaxed);
+         }
+     }
+ 
+@@ -1990,10 +2142,13 @@ impl HostStream {
+     }
+ 
+     fn housekeeping(&mut self, streams: &RwLock<Vec<Stream>>) {
++        let input_running = self.direction == Direction::Input
++            && (self.shared.starting.load(Ordering::Acquire)
++                || self.shared.capture.lock().unwrap().is_some());
+         if self.direction == Direction::Input {
+             self.follow_input_device();
+         }
+-        if self.unit.as_ref().is_some_and(|u| u.started) {
++        if self.unit.as_ref().is_some_and(|u| u.started) || input_running {
+             self.update_latency();
+         }
+         let xruns = self.shared.xruns.load(Ordering::Relaxed);
+@@ -2199,6 +2354,11 @@ impl AudioBackend for CoreAudioBackend {
+             // Run from PREPARE so START does not wait for the device; the callback plays
+             // silence until then.
+             host.start_unit()?;
++        } else {
++            // The capture unit is built by the START worker; remember the guest format so the
++            // pump can convert (and deliver silence) as soon as START arrives.
++            host.format = Some(fmt);
++            host.update_latency();
+         }
+         self.trace(host, "PREPARE done");
+         Ok(())
+@@ -2206,12 +2366,27 @@ impl AudioBackend for CoreAudioBackend {
+ 
+     fn release(&self, stream_id: u32) -> Result<()> {
+         self.transition(stream_id, "release", PCMState::Release, PCMState::release)?;
++        // Playback: note what to drain, but never hold `hosts` across the wait (the pump thread
++        // takes the same lock every iteration, and a stalled pump starves every other stream).
++        let drained = {
++            let mut hosts = self.inner.hosts.lock().unwrap();
++            let host = &mut hosts[stream_id as usize];
++            self.trace(host, "RELEASE");
++            (host.direction == Direction::Output && host.unit.as_ref().is_some_and(|u| u.started))
++                .then(|| {
++                    let end = host
++                        .shared
++                        .limit
++                        .load(Ordering::Acquire)
++                        .min(host.shared.ring.written());
++                    (Arc::clone(&host.shared), end)
++                })
++        };
++        if let Some((shared, end)) = drained {
++            wait_played_out(&shared.ring, end);
++        }
+         let mut hosts = self.inner.hosts.lock().unwrap();
+         let host = &mut hosts[stream_id as usize];
+-        self.trace(host, "RELEASE");
+-        if host.direction == Direction::Output {
+-            host.play_out();
+-        }
+         host.stop_unit();
+         host.flush(&mut self.inner.streams.write().unwrap()[stream_id as usize]);
+         self.trace(host, "RELEASE done");
+@@ -2230,13 +2405,12 @@ impl AudioBackend for CoreAudioBackend {
+             .store(unsafe { mach_absolute_time() }, Ordering::Relaxed);
+         if host.direction == Direction::Input {
+             // The microphone (and its permission prompt) is only touched while the guest
+-            // records: set the unit up for the current default input device now.
+-            let fmt = host
+-                .guest_format
+-                .ok_or(Error::UnexpectedAudioBackendConfiguration)?;
+-            host.stop_unit();
++            // records. Reply at once and let a worker configure/start the unit: opening the
++            // microphone can take over a second, and the guest's control timeout is 1 s.
++            // Capture I/O is completed with silence until the unit runs. A stop of a running
++            // unit is left to the worker too (see `stop_pending`): `AudioOutputUnitStop` can
++            // block while the IO thread is in a callback, which must not happen under `hosts`.
+             host.shared.ring.clear();
+-            host.configure(fmt)?;
+             host.shared.running.store(true, Ordering::Release);
+             if let Err(err) = host.start_unit() {
+                 host.shared.running.store(false, Ordering::Release);

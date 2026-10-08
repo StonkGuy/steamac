@@ -1,0 +1,586 @@
+From 0000000000000000000000000000000000000018 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Thu, 8 Oct 2026 19:51:57 +0300
+Subject: [PATCH 18/18] virtio-gpu: copy only the damage owed to each frame buffer
+
+RESOURCE_FLUSH copied the whole scanout (every row, full width) into the
+display frame, so a cursor-sized flush still memcpy'd the entire 4 MB
+surface, 60 times a second.
+
+The display backend rotates through several frame buffers, so copying only
+the current flush's damage rect would leave stale regions: the guest changed
+the resource over the flushed rect, and that change is in no buffer until one
+is written. Track the damage per frame buffer instead: a flush puts the
+flushed rect onto every buffer (the one it lands in included, since that one
+is stale over it too), and a buffer is written when it receives everything it
+owes, so only the union of the rects since it was last written is copied.
+Fall back to a full copy when the rect is unknown, when a buffer is written
+for the first time, and after a reconfigure or disable (the buffers are new,
+so nothing may be carried over). The table is keyed per scanout, because
+`frame_id` is (each scanout numbers its buffers from 0).
+copy_blob_rows now copies a rectangle at its own pixel offset rather than
+the whole scanout, and read_2d_resource transfers the same rectangle so
+both scanout kinds present only what changed.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/devices/src/virtio/gpu/virtio_gpu.rs | 430 +++++++++++++++++++++++++++--
+ 1 file changed, 402 insertions(+), 28 deletions(-)
+
+diff --git a/src/devices/src/virtio/gpu/virtio_gpu.rs b/src/devices/src/virtio/gpu/virtio_gpu.rs
+index ef9e9af..e7d74cc 100644
+--- a/src/devices/src/virtio/gpu/virtio_gpu.rs
++++ b/src/devices/src/virtio/gpu/virtio_gpu.rs
+@@ -181,26 +181,80 @@ pub struct VirtioGpuScanout {
+     blob: Option<BlobScanout>,
+ }
+ 
+-/// Copies `rows` rows of `dst.len() / rows` bytes, the first one at `offset` and
+-/// each next one `stride` bytes further, out of memory made of the host regions
+-/// `(address, length)` laid end to end. Returns false if the rows run past the
+-/// end of the regions.
++/// A half-open pixel rectangle `[x0, x1) x [y0, y1)`.
++#[derive(Copy, Clone, Debug, PartialEq, Eq)]
++struct DamageRect {
++    x0: u32,
++    y0: u32,
++    x1: u32,
++    y1: u32,
++}
++
++impl DamageRect {
++    fn from_rect(rect: Rect) -> Self {
++        Self {
++            x0: rect.x,
++            y0: rect.y,
++            x1: rect.x.saturating_add(rect.width),
++            y1: rect.y.saturating_add(rect.height),
++        }
++    }
++
++    fn union(self, other: Self) -> Self {
++        Self {
++            x0: self.x0.min(other.x0),
++            y0: self.y0.min(other.y0),
++            x1: self.x1.max(other.x1),
++            y1: self.y1.max(other.y1),
++        }
++    }
++
++    /// The intersection with `[0, width) x [0, height)`, or None if empty.
++    fn clamped(self, width: u32, height: u32) -> Option<Self> {
++        let r = Self {
++            x0: self.x0.min(width),
++            y0: self.y0.min(height),
++            x1: self.x1.min(width),
++            y1: self.y1.min(height),
++        };
++        (r.x1 > r.x0 && r.y1 > r.y0).then_some(r)
++    }
++}
++
++/// Copies the rectangle `damage` of a scanout (its first row at `base_offset`,
++/// rows `stride` bytes apart) out of memory made of the host regions
++/// `(address, length)` laid end to end, into the frame buffer `dst` (`dst_stride`
++/// bytes per row), at the same pixel offset. Returns false if the rows run past
++/// the end of the regions.
++///
++/// The display frame buffer always has the same geometry as the scanout, so the
++/// damaged rows land at the offset they are read from. Rows outside `damage` are
++/// left alone: a bare-metal-style 2D flip is not possible here, so they are
++/// refreshed from the region every buffer owes (see `FrameDamage`).
+ fn copy_blob_rows(
+     regions: &[(usize, usize)],
+-    offset: u64,
++    base_offset: u64,
+     stride: u64,
+-    rows: usize,
++    damage: DamageRect,
++    dst_stride: usize,
+     dst: &mut [u8],
+ ) -> bool {
++    let rows = (damage.y1 - damage.y0) as usize;
+     if rows == 0 {
+         return true;
+     }
+-    let row_len = dst.len() / rows;
++    let bpp = ResourceFormat::BYTES_PER_PIXEL as usize;
++    let dst_x = damage.x0 as usize * bpp;
++    let row_len = (damage.x1 - damage.x0) as usize * ResourceFormat::BYTES_PER_PIXEL;
+     // Rows only move forward, so the region search resumes where it stopped.
+     let mut idx = 0;
+     let mut region_start = 0u64;
+-    for (y, row) in dst.chunks_exact_mut(row_len).enumerate() {
+-        let mut src = offset + y as u64 * stride;
++    for y in 0..rows {
++        let dst_start = (damage.y0 as usize + y) * dst_stride + dst_x;
++        let Some(dst_row) = dst.get_mut(dst_start..).and_then(|s| s.get_mut(..row_len)) else {
++            return false;
++        };
++        let mut src = base_offset + (damage.y0 as u64 + y as u64) * stride + dst_x as u64;
+         let mut copied = 0;
+         while copied < row_len {
+             while idx < regions.len() && src >= region_start + regions[idx].1 as u64 {
+@@ -213,12 +267,12 @@ fn copy_blob_rows(
+             let in_region = (src - region_start) as usize;
+             let n = (len - in_region).min(row_len - copied);
+             // SAFETY: [base, base + len) is mapped host memory (guest RAM or a
+-            // blob mapping) for the lifetime of the resource, and `row` is a
++            // blob mapping) for the lifetime of the resource, and `dst_row` is a
+             // distinct VMM-owned buffer of at least `copied + n` bytes.
+             unsafe {
+                 std::ptr::copy_nonoverlapping(
+                     (base + in_region) as *const u8,
+-                    row.as_mut_ptr().add(copied),
++                    dst_row.as_mut_ptr().add(copied),
+                     n,
+                 )
+             };
+@@ -229,6 +283,87 @@ fn copy_blob_rows(
+     true
+ }
+ 
++/// The damage owed to the frame buffers of one scanout.
++///
++/// A buffer owes the whole region over which it still differs from the resource. A
++/// flush lands in one buffer, but by then the guest has already changed the resource
++/// over the flushed rect, and that change landed in no buffer at all — so *every*
++/// buffer is behind by that rect, the one being written included. The buffer written
++/// therefore owes the union of (what it was already behind by) and (the current
++/// rect), while each other buffer owes the union of (what it was behind by) and (the
++/// current rect); the damage a flush owes is to all the buffers. `alloc_frame`
++/// rotates through the backend's buffers, so a slot the launcher skipped carries the
++/// union of the rects flushed since it was last written, and copying only that union
++/// leaves nothing stale. A slot that was never written, and any slot after a
++/// reconfigure (`reset`), has unknown content and is filled whole. `frame_id` is per
++/// scanout, so the table is keyed per scanout as well.
++#[derive(Default)]
++struct FrameDamageScanout {
++    /// One entry per `alloc_frame` slot, indexed by the returned `frame_id`. `None`
++    /// is a buffer that is current (owes nothing); `Some` is the region it owes.
++    slots: Vec<Option<DamageRect>>,
++}
++
++#[derive(Default)]
++struct FrameDamage {
++    scanouts: [FrameDamageScanout; VIRTIO_GPU_MAX_SCANOUTS as usize],
++}
++
++impl FrameDamage {
++    /// The buffers behind `scanout_id` are new (resize, re-attach, format change or
++    /// disable), so nothing may be carried over from the old geometry or format.
++    fn reset(&mut self, scanout_id: u32) {
++        self.scanouts[scanout_id as usize].slots.clear();
++    }
++
++    /// The region to copy into `frame_id` for this flush, or None to copy the whole
++    /// scanout. `damage` is the flush rect (already clamped to the scanout) and is
++    /// None when the driver did not bound the flush. `whole` is the whole scanout,
++    /// used for the buffers that have not been written yet.
++    fn for_flush(
++        &mut self,
++        scanout_id: u32,
++        frame_id: u32,
++        damage: Option<DamageRect>,
++        whole: DamageRect,
++    ) -> Option<DamageRect> {
++        let scanout = &mut self.scanouts[scanout_id as usize];
++        let slot = frame_id as usize;
++        if slot >= scanout.slots.len() {
++            // A slot that has never been written is unknown everywhere: it needs the
++            // whole scanout, not just the current flush's rect.
++            scanout.slots.resize(slot + 1, Some(whole));
++        }
++        let Some(damage) = damage else {
++            // No rect to narrow the flush: the target is filled whole and is thus
++            // current everywhere; every other buffer is behind by the whole scanout.
++            scanout.slots.fill(Some(whole));
++            scanout.slots[slot] = None;
++            return None;
++        };
++        // What the buffer being written owes: the region it was already behind by (what
++        // the flushes into the other buffers since it was last written changed), plus the
++        // rect just changed now — it is stale over that too.
++        let owed = match scanout.slots[slot] {
++            Some(previous) => previous.union(damage),
++            None => damage,
++        };
++        for (i, owed_by) in scanout.slots.iter_mut().enumerate() {
++            if i == slot {
++                continue;
++            }
++            *owed_by = Some(match *owed_by {
++                Some(previous) => previous.union(damage),
++                None => damage,
++            });
++        }
++        // This buffer received everything it owed and the current rect, so it is now
++        // equal to the resource everywhere.
++        scanout.slots[slot] = None;
++        Some(owed)
++    }
++}
++
+ pub struct VirtioGpu {
+     rutabaga: Rutabaga,
+     resources: BTreeMap<u32, VirtioGpuResource>,
+@@ -236,6 +371,8 @@ pub struct VirtioGpu {
+     /// buffers, udmabuf), as host `(address, length)` regions.
+     blob_backing: BTreeMap<u32, Vec<(usize, usize)>>,
+     fence_state: Arc<Mutex<FenceState>>,
++    /// Per-frame-buffer damage, so a flush copies only what each buffer still owes.
++    frame_damage: FrameDamage,
+     #[cfg(target_os = "macos")]
+     map_sender: Sender<WorkerMessage>,
+     scanouts: [Option<VirtioGpuScanout>; VIRTIO_GPU_MAX_SCANOUTS as usize],
+@@ -462,6 +599,7 @@ impl VirtioGpu {
+             resources: Default::default(),
+             blob_backing: Default::default(),
+             fence_state,
++            frame_damage: Default::default(),
+             scanouts: Default::default(),
+             displays,
+             display_backend,
+@@ -684,6 +822,7 @@ impl VirtioGpu {
+         let Some(format) = format.filter(|_| resource_id != 0) else {
+             debug!("Disabling scanout {scanout_id:?}");
+             *scanout = None;
++            self.frame_damage.reset(scanout_id as u32);
+             self.display_backend.disable_scanout(scanout_id)?;
+             return Ok(OkNoData);
+         };
+@@ -708,6 +847,9 @@ impl VirtioGpu {
+                 height,
+                 format,
+             )?;
++            // New frame buffers behind the display: nothing may be carried over
++            // from the previous geometry or format.
++            self.frame_damage.reset(scanout_id as u32);
+         }
+ 
+         resource.scanouts.enable(scanout_id);
+@@ -727,14 +869,25 @@ impl VirtioGpu {
+         rutabaga: &mut Rutabaga,
+         resource: VirtioGpuResource,
+         scanout: &VirtioGpuScanout,
++        damage: Option<DamageRect>,
+         output: &mut [u8],
+     ) -> RutabagaResult<()> {
++        // The whole scanout when there is no damage to narrow it to.
++        let (x, y, w, h) = match damage {
++            Some(d) => (d.x0, d.y0, d.x1 - d.x0, d.y1 - d.y0),
++            None => (
++                0,
++                0,
++                scanout.width.min(resource.width),
++                scanout.height.min(resource.height),
++            ),
++        };
+         let transfer = Transfer3D {
+-            x: 0,
+-            y: 0,
++            x,
++            y,
+             z: 0,
+-            w: scanout.width.min(resource.width),
+-            h: scanout.height.min(resource.height),
++            w,
++            h,
+             d: 1,
+             level: 0,
+             stride: scanout.width * ResourceFormat::BYTES_PER_PIXEL as u32,
+@@ -787,6 +940,21 @@ impl VirtioGpu {
+             };
+ 
+             let (frame_id, buffer) = self.display_backend.alloc_frame(scanout_id)?;
++            let whole_scanout = DamageRect {
++                x0: 0,
++                y0: 0,
++                x1: scanout.width,
++                y1: scanout.height,
++            };
++            // What this frame buffer still owes: the region it has been behind by since
++            // it was last written (the union of the rects flushed in the meantime, the
++            // current one included), or the whole scanout when it was never written.
++            let damage = self.frame_damage.for_flush(
++                scanout_id as u32,
++                frame_id,
++                DamageRect::from_rect(rect).clamped(scanout.width, scanout.height),
++                whole_scanout,
++            );
+             let read = match scanout.blob {
+                 Some(blob) => {
+                     let regions: &[(usize, usize)] = match &host_region {
+@@ -796,14 +964,21 @@ impl VirtioGpu {
+                             .get(&resource_id)
+                             .map_or(&[], Vec::as_slice),
+                     };
+-                    let rows = scanout.height as usize;
+-                    let frame_len = scanout.width as usize * ResourceFormat::BYTES_PER_PIXEL * rows;
++                    let stride = scanout.width as usize * ResourceFormat::BYTES_PER_PIXEL;
++                    let frame_len = stride * scanout.height as usize;
+                     let buffer_len = buffer.len();
+                     match buffer.get_mut(..frame_len) {
+                         None => Err(format!("{buffer_len}-byte frame is too small")),
+                         Some(frame) => {
+-                            if copy_blob_rows(regions, blob.offset, blob.stride as u64, rows, frame)
+-                            {
++                            let region = damage.unwrap_or(whole_scanout);
++                            if copy_blob_rows(
++                                regions,
++                                blob.offset,
++                                blob.stride as u64,
++                                region,
++                                stride,
++                                frame,
++                            ) {
+                                 Ok(())
+                             } else {
+                                 Err("blob is shorter than the scanout".to_string())
+@@ -811,8 +986,10 @@ impl VirtioGpu {
+                         }
+                     }
+                 }
+-                None => Self::read_2d_resource(&mut self.rutabaga, resource, &scanout, buffer)
+-                    .map_err(|e| e.to_string()),
++                None => {
++                    Self::read_2d_resource(&mut self.rutabaga, resource, &scanout, damage, buffer)
++                        .map_err(|e| e.to_string())
++                }
+             };
+             // Present the frame even if the read failed: the display API has no
+             // way to release it, and a backend may not hand out another one.
+@@ -1565,16 +1742,30 @@ mod test {
+             blob: None,
+         };
+         let mut frame = [0u8; 2 * 2 * 4];
+-        VirtioGpu::read_2d_resource(&mut rutabaga, resource, &scanout, &mut frame).unwrap();
++        VirtioGpu::read_2d_resource(&mut rutabaga, resource, &scanout, None, &mut frame).unwrap();
+ 
+         let row = |y: usize| &guest[y * 4 * 4..][..2 * 4];
+         assert_eq!(frame[..2 * 4], *row(0));
+         assert_eq!(frame[2 * 4..], *row(1));
++
++        // With damage, only that rectangle is transferred, at its own offset.
++        let mut window = [0u8; 2 * 2 * 4];
++        let damage = super::DamageRect {
++            x0: 1,
++            y0: 1,
++            x1: 2,
++            y1: 2,
++        };
++        VirtioGpu::read_2d_resource(&mut rutabaga, resource, &scanout, Some(damage), &mut window)
++            .unwrap();
++        let dst = |y: usize, x: usize| &window[y * 8 + x * 4..][..4];
++        assert_eq!(dst(1, 1), &guest[4 * 4 + 4..4 * 4 + 8]);
++        assert_eq!(dst(0, 0), &[0u8; 4]);
+     }
+ 
+     #[test]
+     fn test_copy_blob_rows_across_regions() {
+-        use super::copy_blob_rows;
++        use super::{copy_blob_rows, DamageRect};
+ 
+         // A 3x3 image (4 bytes per pixel) with a 16-byte stride, split over
+         // three uneven regions, read from a 2x2 window at (1, 1).
+@@ -1584,12 +1775,195 @@ mod test {
+             (blob[7..].as_ptr() as usize, 20),
+             (blob[27..].as_ptr() as usize, 21),
+         ];
+-        let mut frame = [0u8; 2 * 2 * 4];
+-        assert!(copy_blob_rows(&regions, 16 + 4, 16, 2, &mut frame));
+-        assert_eq!(frame[..8], blob[20..28]);
+-        assert_eq!(frame[8..], blob[36..44]);
++        let window = |y0: u32, x0: u32| DamageRect {
++            x0,
++            y0,
++            x1: x0 + 2,
++            y1: y0 + 2,
++        };
++        let mut frame = [0u8; 3 * 3 * 4];
++        assert!(copy_blob_rows(&regions, 0, 16, window(1, 1), 3 * 4, &mut frame));
++        let dst = |y: usize, x: usize| &frame[y * 12 + x * 4..][..4];
++        assert_eq!(dst(1, 1), &blob[16 + 4..16 + 8]);
++        assert_eq!(dst(1, 2), &blob[16 + 8..16 + 12]);
++        assert_eq!(dst(2, 1), &blob[32 + 4..32 + 8]);
++        assert_eq!(dst(2, 2), &blob[32 + 8..32 + 12]);
++        // Pixels outside the window are untouched: row 0 and column 0 (the
++        // latter only where the copy did not land).
++        assert_eq!(dst(0, 1), &[0u8; 4]);
++        assert_eq!(dst(1, 0), &[0u8; 4]);
++        assert_eq!(dst(2, 0), &[0u8; 4]);
+ 
+         // A row past the end of the regions is refused.
+-        assert!(!copy_blob_rows(&regions, 32 + 4, 16, 2, &mut frame));
++        assert!(!copy_blob_rows(&regions, 0, 16, window(2, 1), 3 * 4, &mut frame));
++    }
++
++    #[test]
++    fn test_frame_damage_owes_every_buffer_the_flushed_rect() {
++        use super::{DamageRect, FrameDamage};
++
++        let rect = |x0: u32, y0: u32, x1: u32, y1: u32| DamageRect { x0, y0, x1, y1 };
++        let whole = rect(0, 0, 8, 8);
++
++        // The buffer a flush lands in is the backend's choice and rotates. The guest
++        // changed the resource over the flushed rect, and that change is in no buffer
++        // yet, so every buffer owes it; the one being written owes what it missed too.
++        let mut damage = FrameDamage::default();
++        // A slot never written is unknown everywhere: the whole scanout.
++        assert_eq!(damage.for_flush(0, 0, Some(rect(0, 0, 1, 1)), whole), Some(whole));
++        // The flush into buffer 1 leaves buffer 0 owing the rect it skipped.
++        assert_eq!(damage.for_flush(0, 1, Some(rect(4, 4, 6, 8)), whole), Some(whole));
++        // Buffer 0 is written now: it owes what it missed, plus its own rect.
++        assert_eq!(
++            damage.for_flush(0, 0, Some(rect(1, 1, 2, 2)), whole),
++            Some(rect(1, 1, 6, 8))
++        );
++        // Another fresh slot: the whole scanout again.
++        assert_eq!(damage.for_flush(0, 2, Some(rect(3, 3, 4, 4)), whole), Some(whole));
++        // It is current now, so it owes only its own rect.
++        assert_eq!(
++            damage.for_flush(0, 2, Some(rect(0, 0, 1, 1)), whole),
++            Some(rect(0, 0, 1, 1))
++        );
++
++        // An unchecked flush fills the target whole and leaves every other buffer
++        // owing the whole scanout (nothing can be narrowed to).
++        assert_eq!(damage.for_flush(0, 1, None, whole), None);
++        assert_eq!(damage.for_flush(0, 0, Some(rect(3, 3, 4, 4)), whole), Some(whole));
++
++        // A reconfigure discards the damage: the buffers are new.
++        damage.reset(0);
++        assert_eq!(damage.for_flush(0, 0, Some(rect(5, 5, 6, 6)), whole), Some(whole));
++
++        // The table is per scanout: another scanout's damage is not visible here.
++        let mut damage = FrameDamage::default();
++        assert_eq!(damage.for_flush(0, 0, Some(rect(2, 2, 3, 3)), whole), Some(whole));
++        assert_eq!(damage.for_flush(1, 0, Some(rect(0, 0, 1, 1)), whole), Some(whole));
++        assert_eq!(damage.for_flush(1, 1, Some(rect(4, 4, 5, 5)), whole), Some(whole));
++        // Verifier scenario: the first flush on a second scanout must not be reported as
++        // the first scanout's buffer. Scanout 1's slot 0 owes only its own scanout's
++        // skipped rect, never scanout 0's (2,2,3,3).
++        assert_eq!(
++            damage.for_flush(1, 0, Some(rect(6, 6, 7, 7)), whole),
++            Some(rect(4, 4, 7, 7))
++        );
++    }
++
++    /// The model test: random flush/skip sequences against a full-copy oracle.
++    ///
++    /// The guest updates the resource inside the rect it flushes (the virtio contract),
++    /// so everything that changed in a buffer since it was last written lies inside the
++    /// flush rects issued meanwhile. After each flush the buffer that was written must
++    /// therefore equal the resource *everywhere* — not just over the rect it was given.
++    /// The old rule (accumulate onto the target slot only) fails this: a slot the
++    /// rotation skipped keeps stale pixels.
++    #[test]
++    fn test_frame_damage_matches_a_full_copy_under_random_flushes() {
++        use super::{DamageRect, FrameDamage};
++
++        const W: u32 = 8;
++        const H: u32 = 8;
++        const BPP: usize = 4;
++        const SLOTS: usize = 3;
++        const ITERATIONS: u32 = 5000;
++
++        let stride = W as usize * BPP;
++        let whole = DamageRect { x0: 0, y0: 0, x1: W, y1: H };
++
++        // Deterministic xorshift64, so a failure is reproducible.
++        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
++        let mut rand = move |bound: u32| -> u32 {
++            rng ^= rng << 13;
++            rng ^= rng >> 7;
++            rng ^= rng << 17;
++            (rng % bound as u64) as u32
++        };
++
++        // Resource pixels, and what the launcher holds in each frame buffer. A buffer
++        // that is kept right is a byte-for-byte copy of the resource.
++        let mut resource: Vec<u8> = (0..H as usize * stride).map(|i| i as u8).collect();
++        let mut buffers = vec![vec![0u8; H as usize * stride]; SLOTS];
++        let mut damage = FrameDamage::default();
++
++        // Copy the rect from the resource into a buffer at the same offset.
++        let copy = |buf: &mut Vec<u8>, resource: &[u8], rect: DamageRect| {
++            for y in rect.y0..rect.y1 {
++                let start = y as usize * stride + rect.x0 as usize * BPP;
++                let end = y as usize * stride + rect.x1 as usize * BPP;
++                buf[start..end].copy_from_slice(&resource[start..end]);
++            }
++        };
++
++        for i in 0..ITERATIONS {
++            // The rotation skips some slots, as the launcher's alloc_frame does.
++            let slot = if i % 7 == 3 {
++                rand(SLOTS as u32) as usize
++            } else {
++                (i as usize + rand(2) as usize) % SLOTS
++            };
++            // A flush occasionally carries no usable rect (unknown/empty).
++            let damage_rect = if i % 23 == 5 {
++                None
++            } else {
++                let x0 = rand(W);
++                let y0 = rand(H);
++                Some(DamageRect {
++                    x0,
++                    y0,
++                    x1: x0 + 1 + rand(W - x0),
++                    y1: y0 + 1 + rand(H - y0),
++                })
++            };
++
++            // The guest rendered inside the flushed rect before flushing it.
++            if let Some(rect) = damage_rect {
++                for y in rect.y0..rect.y1 {
++                    for x in rect.x0..rect.x1 {
++                        resource[y as usize * stride + x as usize * BPP] = rand(256) as u8;
++                    }
++                }
++            }
++
++            let owed = damage.for_flush(0, slot as u32, damage_rect, whole);
++            match owed {
++                // Nothing owed: the buffer is current, so nothing is copied.
++                None => {}
++                Some(region) => copy(&mut buffers[slot], &resource, region),
++            }
++            if damage_rect.is_none() {
++                copy(&mut buffers[slot], &resource, whole);
++            }
++
++            // The buffer just written must now equal the resource everywhere.
++            assert_eq!(
++                buffers[slot], resource,
++                "flush {i} into slot {slot} (rect {damage_rect:?}) left stale pixels"
++            );
++
++            // Occasionally reconfigure the scanout: the buffers are new.
++            if i % 200 == 199 {
++                damage.reset(0);
++                for buffer in &mut buffers {
++                    buffer.iter_mut().for_each(|b| *b = 0);
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn test_damage_rect_clamps_to_the_scanout() {
++        use super::DamageRect;
++
++        let r = DamageRect::from_rect(krun_display::Rect {
++            x: 6,
++            y: 6,
++            width: 4,
++            height: 4,
++        });
++        assert_eq!(r.clamped(8, 8), Some(DamageRect { x0: 6, y0: 6, x1: 8, y1: 8 }));
++        // Fully outside.
++        assert_eq!(r.clamped(4, 4), None);
++        // A zero-sized rect (what a cursor flush may carry) has no damage.
++        assert_eq!(DamageRect::from_rect(krun_display::Rect { x: 0, y: 0, width: 0, height: 0 }).clamped(8, 8), None);
+     }
+ }
