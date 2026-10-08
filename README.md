@@ -4,7 +4,7 @@
 VRChat — on an Apple silicon Mac.**
 
 It does this by replacing the FEX inside Steam's own FEX compatibility tool (Steam app 3127680) with a patched FEX-2610
-build (patches 0001–0021), plus launcher, stability and performance fixes. The EAC client is the stock one from the Proton EasyAntiCheat
+build (patches 0001–0020), plus launcher, stability and performance fixes. The EAC client is the stock one from the Proton EasyAntiCheat
 Runtime; nothing fakes, replays or short-circuits its result. Valve's SteamOS rootfs is unmodified — everything lives in
 the guest's home directory.
 
