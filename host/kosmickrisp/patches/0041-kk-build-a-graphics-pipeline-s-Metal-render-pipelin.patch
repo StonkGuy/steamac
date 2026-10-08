@@ -1,0 +1,921 @@
+From 047d16607997830d43bc7a4d525c298b17e2f4c0 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Thu, 8 Oct 2026 12:00:00 +0300
+Subject: [PATCH] kk: build a graphics pipeline's Metal render pipeline state
+
+ on a worker thread
+
+MESA_KK_ASYNC_PIPELINES=1 or =2 (read once at device creation, unset or 0
+keeps the old behaviour) makes vkCreateGraphicsPipelines stop waiting for
+Metal. The NIR->MSL translation is still done at creation (it is CPU work
+and feeds the pipeline cache), but the expensive part - building the two
+MTLLibraries and the MTLRenderPipelineState - is handed to a small
+util_queue worker pool. Only the worker thread ever calls Metal for it; a
+recording or submission thread never does, in either mode.
+
+A pipeline whose render pipeline state is not ready cannot be bound, so a
+draw that would bind it cannot be recorded yet. The two modes differ in what
+happens to such a draw:
+
+  1  the draw is skipped and the command buffer is re-recorded at
+     submission, where the queue waits for the compile and records the
+     draw. Nothing is lost, but a 60 s compile still stalls the frame that
+     first submits a draw of that pipeline.
+
+  2  the draw is dropped and never waited for; the command buffer is not
+     re-recorded for it. The pipeline is used by later command buffers once
+     the state is published: the draws of the first frames that used it are
+     missing (pop-in), and the recording and submission threads run
+     unimpeded. Mode 2 is what to use when a stall is worse than a few
+     missing draws; it also drops the draw when Metal failed to build the
+     state (setting VK_ERROR_INVALID_SHADER_NV on that command buffer),
+     since it has no replay that could retry the compile.
+
+A dropped draw is decided before anything is flushed or encoded, so it
+leaves the encoder, the flushed dynamic state, the occlusion query results
+(BEGIN/END still brackets the dropped draws, so they count zero) and the
+transform feedback counters (dropped draws write none) exactly as if it had
+not been recorded.
+
+Programs with a sampler min/max emulating companion (info.minmax_sets) stay
+synchronous: one of their two programs is compiled on first use, so at
+creation there is no MSL to build a state from. Compute pipelines are
+untouched. A program that is already in the pipeline cache does not go
+through this path either (vk_pipeline_precompile_shader returns before
+ops->compile on a cache hit).
+
+The job owns copies of both stages' MSL and of the render pipeline
+descriptor's inputs, so the worker never reads the program: the MSL can be
+released at creation, and a program can be destroyed while its compile runs
+(kk_shader_destroy drops or waits for the job). The state is published with
+a compare-exchange and the status with a release store the fence is
+signalled after, so a draw that sees it ready observes the handle.
+
+MESA_KK_DEBUG=async logs queued compiles and dropped draws.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c |   2 +
+ src/kosmickrisp/vulkan/kk_cmd_buffer.h |   6 +
+ src/kosmickrisp/vulkan/kk_cmd_draw.c   |  42 ++-
+ src/kosmickrisp/vulkan/kk_debug.c      |   1 +
+ src/kosmickrisp/vulkan/kk_debug.h      |   4 +
+ src/kosmickrisp/vulkan/kk_device.c     |  30 ++
+ src/kosmickrisp/vulkan/kk_device.h     |  26 ++
+ src/kosmickrisp/vulkan/kk_queue.c      |   6 +-
+ src/kosmickrisp/vulkan/kk_shader.c     | 408 ++++++++++++++++++++-----
+ src/kosmickrisp/vulkan/kk_shader.h     |  85 ++++++
+ 10 files changed, 527 insertions(+), 83 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index f412d6b..f097d31 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -132,6 +132,7 @@ kk_create_cmd_buffer(struct vk_command_pool *vk_pool,
+    cmd->ts_stage_map = UTIL_DYNARRAY_INIT;
+    cmd->post_render_writes = UTIL_DYNARRAY_INIT;
+    cmd->minmax_uab_sets = UTIL_DYNARRAY_INIT;
++   cmd->async_skipped = false;
+ 
+    {
+       mtl_argument_table_descriptor *desc = mtl_new_argument_table_descriptor();
+@@ -218,6 +219,7 @@ kk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
+    cmd->one_time_submit =
+       pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    cmd->replay = false;
++   cmd->async_skipped = false;
+ 
+    /* vk_command_buffer_begin will reset the command buffer meaning the
+     * allocator may be returned to the pool. Request a new one. */
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index 6919023..558d1d3 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -310,6 +310,12 @@ struct kk_cmd_buffer {
+     * one of them holds a reduction sampler at submission, the command buffer
+     * is re-recorded. */
+    struct util_dynarray minmax_uab_sets;
++   /* MESA_KK_ASYNC_PIPELINES=1: a draw of the recorded commands was skipped
++    * because its pipeline's Metal render pipeline state was still being built
++    * (kk_shader_async_draw_ok), so the command buffer must be re-recorded
++    * before submission, when the state is ready. Mode 2 drops such draws
++    * instead and never sets this. */
++   bool async_skipped;
+ };
+ 
+ VK_DEFINE_HANDLE_CASTS(kk_cmd_buffer, vk.base, VkCommandBuffer,
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index f703a66..41dde3d 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -1029,7 +1029,20 @@ kk_flush_pipeline(struct kk_cmd_buffer *cmd)
+    }
+ 
+    if (IS_SHADER_DIRTY(VERTEX)) {
+-      mtl_render_set_pipeline_state(enc, gfx->pipe->gfx.render);
++      /* MESA_KK_ASYNC_PIPELINES: a draw is only recorded once
++       * kk_shader_async_draw_ok allowed it, which for an async program means the
++       * state is published; the mid-draw flushes below are of a draw that was
++       * already allowed. Read the handle once anyway: a worker publishes it
++       * while this runs. */
++      mtl_render_pipeline_state *render = p_atomic_read(&gfx->pipe->gfx.render);
++      if (unlikely(render == NULL)) {
++         /* Only an async program can be here without a state
++          * (kk_shader_async_pipeline), and a draw of one returns above unless
++          * kk_shader_async_draw_ok allowed it. */
++         assert(kk_shader_async_pipeline(gfx->pipe) != NULL);
++         return;
++      }
++      mtl_render_set_pipeline_state(enc, render);
+       if (gfx->depth_stencil_state)
+          mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
+    }
+@@ -2451,8 +2464,35 @@ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
+ static void
+ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+ {
++   struct kk_graphics_state *gfx = &cmd->state.gfx;
+    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+ 
++   /* MESA_KK_ASYNC_PIPELINES: decide before flushing anything, so that a draw
++    * that is not recorded leaves no flushed state and no touched encoder
++    * behind. cmd->state.shaders[MESA_SHADER_VERTEX] is the program this draw's
++    * pipeline uses when its Metal render pipeline state is being built
++    * asynchronously: such a program never has a min/max emulating companion
++    * (kk_compile_graphics_pipeline), which is the only case where
++    * kk_cmd_shader_pipeline returns a different program than the bound VS. */
++   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
++   if (unlikely(vs != NULL && vs->async != NULL)) {
++      bool not_ready = false;
++      const enum kk_async_action action =
++         kk_shader_async_draw_ok(cmd, vs, &not_ready);
++      /* Mode 2 (never wait): the state is not ready, so the draw is dropped for
++       * good. It is re-recorded or resubmitted by the application like any
++       * other draw, and recorded then if the state is published by then. */
++      if (action == KK_ASYNC_ACTION_DROP)
++         return;
++      /* Mode 1: the state is still being built. The command queue re-records
++       * this command buffer at submission, where it can wait for the compile
++       * and record this draw (kk_queue_submit). */
++      if (action == KK_ASYNC_ACTION_REPLAY) {
++         cmd->async_skipped = true;
++         return;
++      }
++   }
++
+    kk_flush_gfx_state(cmd);
+ 
+    data->restart = dyn->ia.primitive_restart_enable;
+diff --git a/src/kosmickrisp/vulkan/kk_debug.c b/src/kosmickrisp/vulkan/kk_debug.c
+index 59d6aef..8b0005a 100644
+--- a/src/kosmickrisp/vulkan/kk_debug.c
++++ b/src/kosmickrisp/vulkan/kk_debug.c
+@@ -13,6 +13,7 @@ const struct debug_named_value debug_flags[] = {
+    {"force_robustness", KK_DEBUG_FORCE_ROBUSTNESS},
+    {"minmax", KK_DEBUG_MINMAX},
+    {"commits", KK_DEBUG_COMMITS},
++   {"async", KK_DEBUG_ASYNC},
+    {NULL, 0},
+ };
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_debug.h b/src/kosmickrisp/vulkan/kk_debug.h
+index e0d8fe1..2b8d9c2 100644
+--- a/src/kosmickrisp/vulkan/kk_debug.h
++++ b/src/kosmickrisp/vulkan/kk_debug.h
+@@ -18,6 +18,10 @@ enum kk_debug {
+    /* Log command buffers that started late, ran long on the GPU or completed
+     * late, and device creations/destructions with their application */
+    KK_DEBUG_COMMITS = 1ull << 4,
++   /* Log the asynchronous graphics pipeline jobs of MESA_KK_ASYNC_PIPELINES:
++    * queued/finished compiles and the draws that were skipped and re-recorded
++    * while one was in flight (they overwrite whatever the skipped draw gave). */
++   KK_DEBUG_ASYNC = 1ull << 5,
+ };
+ 
+ extern enum kk_debug kk_mesa_debug_flags;
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index e1d81d0..ff91cc3 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -376,6 +376,23 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+    dev->vk.get_timestamp = kk_get_timestamp;
+    simple_mtx_init(&dev->lazy_pipeline_lock, mtx_plain);
+ 
++   /* MESA_KK_ASYNC_PIPELINES: read once, here, so the choice cannot change
++    * under a pipeline that was already built (kk_compile_graphics_pipeline).
++    * 1 makes a submission wait for a compile that a draw skipped over; 2 drops
++    * such a draw for good, so no thread ever waits for Metal. Four threads: the
++    * compiles are seconds long, and a device with no ready pipeline still
++    * stalls every draw of it. */
++   const int64_t async_mode =
++      debug_get_num_option("MESA_KK_ASYNC_PIPELINES", 0);
++   dev->async_pipelines = async_mode != 0;
++   dev->async_pipelines_never_wait = async_mode == 2;
++   if (dev->async_pipelines &&
++       !util_queue_init(&dev->pipeline_queue, "kk-pipe", 512, 4,
++                        UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY, dev)) {
++      dev->async_pipelines = false;
++      dev->async_pipelines_never_wait = false;
++   }
++
+    /* Create a new Metal pipeline compiler for the device */
+    dev->mtl_compiler_handle = kk_acquire_compiler(dev);
+    if (dev->mtl_compiler_handle == NULL)
+@@ -441,6 +458,8 @@ fail_vab_memory:
+ fail_compiler:
+    kk_release_compiler(dev);
+ fail_init:
++   if (dev->async_pipelines)
++      util_queue_destroy(&dev->pipeline_queue);
+    simple_mtx_destroy(&dev->lazy_pipeline_lock);
+    vk_device_finish(&dev->vk);
+ fail_alloc:
+@@ -487,11 +506,22 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+    kk_release_compiler(dev);
+    simple_mtx_destroy(&dev->lazy_pipeline_lock);
+ 
++   /* Every shader is destroyed before vk_device_finish releases the pipeline
++    * cache (and its objects), so no async pipeline job can be in flight. */
++   if (dev->async_pipelines)
++      util_queue_destroy(&dev->pipeline_queue);
++
+    vk_device_finish(&dev->vk);
+ 
+    vk_free(&dev->vk.alloc, dev);
+ }
+ 
++bool
++kk_device_async_pipelines(const struct kk_device *dev)
++{
++   return dev->async_pipelines;
++}
++
+ /* We need to implement this ourselves so we give the fake ones for vk_common_*
+  * to work when executing actual commands */
+ static PFN_vkVoidFunction
+diff --git a/src/kosmickrisp/vulkan/kk_device.h b/src/kosmickrisp/vulkan/kk_device.h
+index 27f6627..77f09cd 100644
+--- a/src/kosmickrisp/vulkan/kk_device.h
++++ b/src/kosmickrisp/vulkan/kk_device.h
+@@ -19,6 +19,7 @@
+ #include "libkk_shaders.h"
+ 
+ #include "util/u_dynarray.h"
++#include "util/u_queue.h"
+ 
+ #include "vk_device.h"
+ #include "vk_meta.h"
+@@ -113,6 +114,16 @@ struct kk_device {
+     * use (kk_cmd_shader_pipeline) */
+    simple_mtx_t lazy_pipeline_lock;
+ 
++   /* MESA_KK_ASYNC_PIPELINES: graphics render pipeline states are built by
++    * these worker threads (kk_async_pipeline_start). Other threads call
++    * util_queue_add_job on it while command buffers are being recorded. */
++   bool async_pipelines;
++   /* MESA_KK_ASYNC_PIPELINES=2: a draw whose state is not ready is dropped for
++    * good instead of making the submission wait for the compile
++    * (kk_async_pipelines_never_wait). */
++   bool async_pipelines_never_wait;
++   struct util_queue pipeline_queue;
++
+    /* os_time_get_nano() at creation (command queue error diagnostics) */
+    int64_t created_ns;
+ };
+@@ -167,4 +178,19 @@ VkResult kk_sampler_heap_add(struct kk_device *dev,
+                              struct kk_rc_sampler **out);
+ void kk_sampler_heap_remove(struct kk_device *dev, struct kk_rc_sampler *rc);
+ 
++/* MESA_KK_ASYNC_PIPELINES: graphics pipelines return before Metal builds their
++ * render pipeline state, and a draw of a pipeline whose state is not ready is
++ * skipped. Read at device creation. */
++bool kk_device_async_pipelines(const struct kk_device *dev);
++
++/* MESA_KK_ASYNC_PIPELINES=2: a draw skipped for a state that is not ready is
++ * dropped instead of being re-recorded at submission time, which would wait
++ * for the compile. The state is used by later command buffers once it is
++ * published. */
++static inline bool
++kk_async_pipelines_never_wait(const struct kk_device *dev)
++{
++   return dev->async_pipelines_never_wait;
++}
++
+ #endif // KK_DEVICE_H
+diff --git a/src/kosmickrisp/vulkan/kk_queue.c b/src/kosmickrisp/vulkan/kk_queue.c
+index fe53f6f..913f4a6 100644
+--- a/src/kosmickrisp/vulkan/kk_queue.c
++++ b/src/kosmickrisp/vulkan/kk_queue.c
+@@ -371,8 +371,12 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
+ 
+       /* Metal's command buffers are one time use, re-record multiple
+        * submissions, and command buffers whose sampler min/max emulation
+-       * changed after recording. */
++       * changed after recording or which skipped a draw while its pipeline's
++       * Metal render pipeline state was being built (mode 1 of
++       * MESA_KK_ASYNC_PIPELINES only: mode 2 never sets async_skipped, so no
++       * submit ever waits for a compile). */
+       if (cmd_buffer->submitted ||
++          cmd_buffer->async_skipped ||
+           kk_cmd_buffer_needs_minmax_replay(cmd_buffer)) {
+          VkResult result = rerecord_and_commit_cmd_buffer(queue, cmd_buffer);
+          if (result != VK_SUCCESS)
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 503184f..f1c46a3 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -844,6 +844,20 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
+ 
+ static const struct vk_shader_ops kk_shader_ops;
+ 
++static void kk_async_pipeline_free(struct kk_async_pipeline *async);
++
++/* Reads and clears the MSL of a stage of a program whose graphics pipeline was
++ * built: the caller must destroy the Metal handles first, since a worker
++ * building an async render pipeline state reads these copies. */
++static void
++kk_take_msl(struct msl_compile_data *data)
++{
++   ralloc_free((void *)data->entrypoint_name);
++   ralloc_free((void *)data->code);
++   data->entrypoint_name = NULL;
++   data->code = NULL;
++}
++
+ static void
+ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+                   const VkAllocationCallbacks *pAllocator)
+@@ -852,9 +866,27 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+ 
+    struct kk_pipeline_handles *pipe = &shader->pipeline;
+ 
++   /* MESA_KK_ASYNC_PIPELINES: this program's render pipeline state may still be
++    * being built by a worker. The worker owns a copy of the MSL and of the
++    * descriptor inputs, so nothing here can be freed under it; but the render
++    * pipeline handle is published in the program, so the worker has to be gone
++    * before this function finishes. */
++   struct kk_async_pipeline *async = shader->async;
++   if (async != NULL) {
++      /* Drops the job if no worker picked it up yet, waits for it otherwise;
++       * either way the worker is done with async->pipe after this. */
++      util_queue_drop_job(&dev->pipeline_queue, &async->fence);
++      shader->async = NULL;
++      /* Whichever handle the worker published is released here; a draw can no
++       * longer see this program (its pipeline is destroyed with it). */
++      mtl_release(p_atomic_read(&pipe->gfx.render));
++      pipe->gfx.render = NULL;
++   }
++
+    if (shader->info.stage == MESA_SHADER_COMPUTE) {
+       mtl_release(pipe->cs);
+       pipe->cs = NULL;
++      kk_take_msl(&shader->msl_data[MESA_SHADER_COMPUTE]);
+    } else if (shader->info.stage == MESA_SHADER_VERTEX) {
+       /* Pre-render compute pipelines. */
+       for (uint32_t i = 0u; i < pipe->gfx.pre_render_count; ++i) {
+@@ -868,34 +900,28 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+       if (pipe->gfx.pre_gs)
+          mtl_release(pipe->gfx.pre_gs);
+ 
+-      /* Graphics pipeline. */
+-      mtl_release(pipe->gfx.render);
++      /* Graphics pipeline: an async program's handle was released above. */
++      if (async == NULL)
++         mtl_release(pipe->gfx.render);
+       if (pipe->gfx.ds_handle)
+          mtl_release(pipe->gfx.ds_handle);
+       pipe->gfx.render = NULL;
+       pipe->gfx.ds_handle = NULL;
+ 
+-      for (uint32_t i = 0u; i < pipe->gfx.pre_render_count; ++i)
+-         mtl_release(pipe->gfx.pre_render[i]);
+-
+       /* Serialization data. */
+       u_foreach_bit(i, shader->info.vs.additional_stages_bits) {
+-         struct msl_compile_data *data = &shader->msl_data[i];
+-         ralloc_free((void *)data->entrypoint_name);
+-         ralloc_free((void *)data->code);
++         kk_take_msl(&shader->msl_data[i]);
+       }
+    }
+ 
+-   struct msl_compile_data *data = &shader->msl_data[shader->info.stage];
+-   ralloc_free((void *)data->entrypoint_name);
+-   ralloc_free((void *)data->code);
++   kk_take_msl(&shader->msl_data[shader->info.stage]);
++
++   kk_take_msl(&shader->gs_main);
++   kk_take_msl(&shader->gs_count);
++   kk_take_msl(&shader->pre_gs);
+ 
+-   ralloc_free((void *)shader->gs_main.entrypoint_name);
+-   ralloc_free((void *)shader->gs_main.code);
+-   ralloc_free((void *)shader->gs_count.entrypoint_name);
+-   ralloc_free((void *)shader->gs_count.code);
+-   ralloc_free((void *)shader->pre_gs.entrypoint_name);
+-   ralloc_free((void *)shader->pre_gs.code);
++   if (async != NULL)
++      kk_async_pipeline_free(async);
+ 
+    if (shader->minmax)
+       kk_shader_destroy(vk_dev, shader->minmax, pAllocator);
+@@ -1533,11 +1559,195 @@ gather_graphics_pipeline_create_info(
+       vk_primitive_topology_to_mtl_primitive_topology_class(topology);
+ }
+ 
++/* The Metal render pipeline state of a graphics program: the only expensive
++ * part of compiling one (the two MTLLibraries and the pipeline state). Reads
++ * the MSL it is given and releases everything it creates. */
++static mtl_render_pipeline_state *
++kk_new_render_pipeline(struct kk_device *device,
++                       struct kk_pipeline_handles *pipe,
++                       enum mtl_primitive_topology_class topology,
++                       const enum mtl_pixel_format *rt_formats,
++                       uint32_t view_mask, uint32_t sample_count, bool has_ms,
++                       const struct msl_compile_data *vs_data,
++                       const struct msl_compile_data *fs_data)
++{
++   const struct kk_physical_device *pdev = kk_device_physical(device);
++   /* Stays NULL if the fragment library cannot be built: that path jumps to
++    * destroy_vertex before any state exists, and returns here. */
++   mtl_render_pipeline_state *render = NULL;
++
++   mtl_library *vertex_library = mtl_new_library(
++      device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
++      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++   if (vertex_library == NULL)
++      return NULL;
++
++   mtl_function_descriptor *vertex_function =
++      mtl_new_library_function_descriptor(vertex_library,
++                                          vs_data->entrypoint_name);
++
++   mtl_library *fragment_library = mtl_new_library(
++      device->mtl_compiler_handle, fs_data->code, pdev->info.msl_version,
++      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
++   if (fragment_library == NULL)
++      goto destroy_vertex;
++
++   mtl_function_descriptor *fragment_function =
++      mtl_new_library_function_descriptor(fragment_library,
++                                          fs_data->entrypoint_name);
++
++   mtl_render_pipeline_descriptor *pipeline_descriptor =
++      mtl_new_render_pipeline_descriptor();
++   mtl_render_pipeline_descriptor_set_vertex_shader(pipeline_descriptor,
++                                                    vertex_function);
++   mtl_render_pipeline_descriptor_set_fragment_shader(pipeline_descriptor,
++                                                      fragment_function);
++
++   /* Layered rendering in Metal requires setting primitive topology class */
++   mtl_render_pipeline_descriptor_set_input_primitive_topology(
++      pipeline_descriptor, topology);
++
++   /* If color attachments are reordered there might be unused / invalid gaps
++    * in the array so need to check them all, not just first
++    * color_attachment_count entries.
++    */
++   for (uint8_t i = 0; i < MAX_DRAW_BUFFERS; ++i) {
++      if (rt_formats[i] != MTL_PIXEL_FORMAT_INVALID)
++         mtl_render_pipeline_descriptor_set_color_attachment_format(
++            pipeline_descriptor, i, rt_formats[i]);
++   }
++
++   if (view_mask) {
++      uint32_t max_amplification = util_bitcount(view_mask);
++      mtl_render_pipeline_descriptor_set_max_vertex_amplification_count(
++         pipeline_descriptor, max_amplification);
++   }
++
++   if (has_ms)
++      mtl_render_pipeline_descriptor_set_raster_sample_count(
++         pipeline_descriptor, sample_count);
++
++   render = mtl_new_render_pipeline(device->mtl_compiler_handle,
++                                    pipeline_descriptor);
++
++   mtl_release(pipeline_descriptor);
++   mtl_release(fragment_function);
++   mtl_release(fragment_library);
++destroy_vertex:
++   mtl_release(vertex_function);
++   mtl_release(vertex_library);
++
++   return render;
++}
++
++/* MESA_KK_ASYNC_PIPELINES: one job per program. The job owns the copies of the
++ * MSL and the descriptor inputs, so it neither reads nor holds the program: the
++ * program can be created, used (draws skip it while this runs) and even be
++ * destroyed while the job runs, as long as something waits for it
++ * (kk_shader_destroy). */
++struct kk_async_job {
++   struct kk_device *dev;
++   struct kk_async_pipeline *async;
++};
++
++static void
++kk_async_pipeline_free(struct kk_async_pipeline *async)
++{
++   /* The MSL copies are ralloc children of the pipeline */
++   ralloc_free(async->vs_msl.code);
++   ralloc_free(async->vs_msl.entrypoint_name);
++   ralloc_free(async->fs_msl.code);
++   ralloc_free(async->fs_msl.entrypoint_name);
++   ralloc_free(async);
++}
++
++/* Builds the render pipeline state. Only a worker thread runs this, so no
++ * recording or submission thread ever waits for Metal. Reads the MSL copy the
++ * state owns and publishes the handle through pipe->gfx.render. */
++static bool
++kk_async_pipeline_build(struct kk_device *dev, struct kk_async_pipeline *async)
++{
++   struct kk_pipeline_handles *pipe = async->pipe;
++   mtl_render_pipeline_state *render = kk_new_render_pipeline(
++      dev, pipe, async->topology, async->rt_formats, async->view_mask,
++      async->sample_count, async->has_ms, &async->vs_msl, &async->fs_msl);
++
++   if (render == NULL)
++      return false;
++
++   /* Publish once: a draw may already have taken the state for ready and there
++    * must be no second handle left behind. */
++   if (p_atomic_cmpxchg_ptr(&pipe->gfx.render, NULL, render) != NULL) {
++      mtl_release(render);
++      return true;
++   }
++   return true;
++}
++
++static void
++kk_async_pipeline_worker(void *job_data, void *gdata, int thread_index)
++{
++   struct kk_async_job *job = job_data;
++   struct kk_async_pipeline *async = job->async;
++
++   const bool built = kk_async_pipeline_build(job->dev, async);
++   p_atomic_set(&async->status,
++                built ? (unsigned)KK_ASYNC_READY : (unsigned)KK_ASYNC_FAILED);
++}
++
++/* Called by util_queue when the job is dropped instead of run: the queue is
++ * being destroyed with it still queued, so no worker will run it. The job is
++ * left failed: only the worker builds the state, and a device that is shutting
++ * down has no draw left that could care. It is also called by the worker right
++ * after the job ran, where the status check returns immediately.
++ *
++ * This is the job's only owner after util_queue_add_job: the queue stores the
++ * job pointer, not a copy (u_queue.c), so the allocation has to outlive the
++ * queue's reference to it and is freed here, on either of the two paths above
++ * (the worker runs this after signalling the fence; a drop calls it). */
++static void
++kk_async_pipeline_cleanup(void *job_data, void *gdata, int thread_index)
++{
++   struct kk_async_job *job = job_data;
++   struct kk_async_pipeline *async = job->async;
++
++   if (p_atomic_read(&async->status) == KK_ASYNC_PENDING)
++      p_atomic_set(&async->status, (unsigned)KK_ASYNC_FAILED);
++
++   vk_free(&job->dev->vk.alloc, job);
++}
++
++/* Queues the state's compilation. The job only carries the pointer to the
++ * state and is owned by the queue from util_queue_add_job on: it is released by
++ * kk_async_pipeline_cleanup once the worker ran it, or in util_queue_drop_job
++ * (kk_shader_destroy, device teardown). The fence is only signalled after the
++ * state is published and before the job is freed. */
++static void
++kk_async_pipeline_start(struct kk_device *dev, struct kk_async_pipeline *async)
++{
++   struct kk_async_job *job = vk_alloc(&dev->vk.alloc, sizeof(*job), 8,
++                                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++   if (unlikely(job == NULL)) {
++      /* Nothing to queue the job with: leave the state failed rather than build
++       * it here, so that even this thread never waits for Metal. */
++      p_atomic_set(&async->status, (unsigned)KK_ASYNC_FAILED);
++      return;
++   }
++
++   job->dev = dev;
++   job->async = async;
++
++   util_queue_add_job(&dev->pipeline_queue, job, &async->fence,
++                      kk_async_pipeline_worker, kk_async_pipeline_cleanup,
++                      sizeof(*job));
++
++   if (KK_DEBUG(ASYNC))
++      mesa_logi("kk: async render pipeline state queued");
++}
++
+ static VkResult
+ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+ {
+-   struct kk_physical_device *pdev = kk_device_physical(device);
+-
+    VkResult result = VK_SUCCESS;
+    struct kk_pipeline_handles *pipe = &vs->pipeline;
+    mesa_shader_stage vs_stage = MESA_SHADER_VERTEX;
+@@ -1586,78 +1796,52 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+       }
+    }
+ 
+-   const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
+-   mtl_library *vertex_library = mtl_new_library(
+-      device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
+-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+-   if (vertex_library == NULL)
+-      return VK_ERROR_INVALID_SHADER_NV;
+-
+-   mtl_function_descriptor *vertex_function =
+-      mtl_new_library_function_descriptor(vertex_library,
+-                                          vs_data->entrypoint_name);
+-
+-   const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
+-   mtl_library *fragment_library = mtl_new_library(
+-      device->mtl_compiler_handle, fs_data->code, pdev->info.msl_version,
+-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+-   if (fragment_library == NULL) {
+-      result = VK_ERROR_INVALID_SHADER_NV;
+-      goto destroy_vertex;
+-   }
+-   mtl_function_descriptor *fragment_function =
+-      mtl_new_library_function_descriptor(fragment_library,
+-                                          fs_data->entrypoint_name);
+-
+-   mtl_render_pipeline_descriptor *pipeline_descriptor =
+-      mtl_new_render_pipeline_descriptor();
+-   mtl_render_pipeline_descriptor_set_vertex_shader(pipeline_descriptor,
+-                                                    vertex_function);
+-   mtl_render_pipeline_descriptor_set_fragment_shader(pipeline_descriptor,
+-                                                      fragment_function);
+-
+-   /* Layered rendering in Metal requires setting primitive topology class */
+-   mtl_render_pipeline_descriptor_set_input_primitive_topology(
+-      pipeline_descriptor, vs->info.vs.topology);
+-
+-   /* If color attachments are reordered there might be unused / invalid gaps
+-    * in the array so need to check them all, not just first
+-    * color_attachment_count entries.
+-    */
+-   for (uint8_t i = 0; i < MAX_DRAW_BUFFERS; ++i) {
+-      if (vs->info.vs.rt_formats[i] != MTL_PIXEL_FORMAT_INVALID)
+-         mtl_render_pipeline_descriptor_set_color_attachment_format(
+-            pipeline_descriptor, i, vs->info.vs.rt_formats[i]);
+-   }
+-
+    /* A pipeline whose minmax program was compiled first has it already */
+    if (vs->info.vs.has_ds && pipe->gfx.ds_handle == NULL) {
+       pipe->gfx.ds_handle = kk_compile_ds_state(device, &vs->info);
+    }
+ 
+-   if (vs->info.vs.view_mask) {
+-      uint32_t max_amplification = util_bitcount(vs->info.vs.view_mask);
+-      mtl_render_pipeline_descriptor_set_max_vertex_amplification_count(
+-         pipeline_descriptor, max_amplification);
+-   }
+-
+-   if (vs->info.vs.has_ms) {
+-      mtl_render_pipeline_descriptor_set_raster_sample_count(
+-         pipeline_descriptor, vs->info.vs.sample_count);
++   /* MESA_KK_ASYNC_PIPELINES (kk_async_pipeline): Metal builds the render
++    * pipeline state of a pipeline that missed its cache on a worker thread, and
++    * a draw of this program is skipped until it is ready. Not for a program
++    * that needs the min/max emulating companion (info.minmax_sets): one of the
++    * two programs is compiled on first use there, so at creation there is no
++    * MSL to build a render pipeline state from. Static min/max emulation is
++    * inside this program's own MSL, so it does not matter here. */
++   const bool async_ok = kk_device_async_pipelines(device) &&
++                         vs->info.minmax_sets == 0u;
++   if (unlikely(async_ok)) {
++      struct kk_async_pipeline *async =
++         rzalloc(NULL, struct kk_async_pipeline);
++      if (likely(async != NULL)) {
++         async->pipe = pipe;
++         async->topology = vs->info.vs.topology;
++         memcpy(async->rt_formats, vs->info.vs.rt_formats,
++                sizeof(async->rt_formats));
++         async->view_mask = vs->info.vs.view_mask;
++         async->sample_count = vs->info.vs.sample_count;
++         async->has_ms = vs->info.vs.has_ms;
++         kk_msl_copy(&async->vs_msl, &vs->msl_data[vs_stage]);
++         kk_msl_copy(&async->fs_msl, &vs->msl_data[MESA_SHADER_FRAGMENT]);
++         if (likely(async->vs_msl.code != NULL && async->fs_msl.code != NULL)) {
++            util_queue_fence_init(&async->fence);
++            p_atomic_set(&async->status, (unsigned)KK_ASYNC_PENDING);
++            /* Visible to the draw path before the job can run */
++            vs->async = async;
++            kk_async_pipeline_start(device, async);
++            return VK_SUCCESS;
++         }
++         kk_async_pipeline_free(async);
++      }
+    }
+ 
+-   pipe->gfx.render =
+-      mtl_new_render_pipeline(device->mtl_compiler_handle, pipeline_descriptor);
++   pipe->gfx.render = kk_new_render_pipeline(
++      device, pipe, vs->info.vs.topology, vs->info.vs.rt_formats,
++      vs->info.vs.view_mask, vs->info.vs.sample_count, vs->info.vs.has_ms,
++      &vs->msl_data[vs_stage], &vs->msl_data[MESA_SHADER_FRAGMENT]);
+    if (pipe->gfx.render == NULL)
+       result = VK_ERROR_INVALID_SHADER_NV;
+ 
+-   mtl_release(pipeline_descriptor);
+-   mtl_release(fragment_function);
+-   mtl_release(fragment_library);
+-destroy_vertex:
+-   mtl_release(vertex_function);
+-   mtl_release(vertex_library);
+-
+    return result;
+ }
+ 
+@@ -2415,6 +2599,68 @@ kk_cmd_shader_pipeline(struct kk_cmd_buffer *cmd, struct kk_shader *shader,
+    return &program->pipeline;
+ }
+ 
++enum kk_async_action
++kk_shader_async_draw_ok(struct kk_cmd_buffer *cmd, struct kk_shader *program,
++                        bool *not_ready)
++{
++   struct kk_async_pipeline *async = program->async;
++   struct kk_device *dev = kk_cmd_buffer_device(cmd);
++
++   /* MESA_KK_ASYNC_PIPELINES=2: never wait for the compile, anywhere. A draw it
++    * is not ready for is dropped here and on every replay; the state is used by
++    * command buffers recorded after it is published. */
++   if (unlikely(kk_async_pipelines_never_wait(dev))) {
++      if (async == NULL || p_atomic_read(&async->status) == KK_ASYNC_READY)
++         return KK_ASYNC_ACTION_RECORD;
++      if (p_atomic_read(&async->status) == KK_ASYNC_FAILED) {
++         /* Metal could not build the state. Unlike mode 1 there is no replay
++          * that could retry it, and the program is unusable for the rest of the
++          * device's life, so say so on this command buffer instead of rendering
++          * nothing silently. Nothing has been recorded for the draw yet. */
++         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_INVALID_SHADER_NV);
++         return KK_ASYNC_ACTION_DROP;
++      }
++      /* Still compiling: drop the draw; no thread waits for Metal. A command
++       * buffer recorded or submitted after the state is published records it. */
++      if (KK_DEBUG(ASYNC) && !*not_ready) {
++         mesa_logi("kk: draw dropped: its pipeline's render pipeline state is "
++                   "still being built (MESA_KK_ASYNC_PIPELINES=2 never waits)");
++         *not_ready = true;
++      }
++      return KK_ASYNC_ACTION_DROP;
++   }
++
++   if (async == NULL || p_atomic_read(&async->status) != KK_ASYNC_PENDING)
++      return KK_ASYNC_ACTION_RECORD;
++
++   /* The command queue's replay must not drop the draw a second time, and it
++    * can wait: the compile was already paid for by the first recording of this
++    * command buffer. */
++   if (!cmd->replay) {
++      if (KK_DEBUG(ASYNC) && !*not_ready)
++         mesa_logi("kk: draw skipped: its pipeline's render pipeline state is "
++                   "still being built");
++      *not_ready = true;
++      return KK_ASYNC_ACTION_REPLAY;
++   }
++
++   /* The worker signals the fence after publishing the status (through
++    * p_atomic_set, a release store), so a status other than pending here means
++    * pipe->gfx.render is visible to this thread. The job also runs on the
++    * thread that drops it at device teardown, where the fence is signalled just
++    * the same. */
++   util_queue_fence_wait(&async->fence);
++
++   if (unlikely(p_atomic_read(&async->status) != KK_ASYNC_READY)) {
++      /* Metal could not build the state (it reports out of memory by returning
++       * nil) or the queue was gone before a worker could run the job. Nothing
++       * more can be done for this draw. */
++      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_INVALID_SHADER_NV);
++      return KK_ASYNC_ACTION_DROP;
++   }
++   return KK_ASYNC_ACTION_RECORD;
++}
++
+ static void
+ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
+                             const mesa_shader_stage stage,
+diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
+index 2ee4ed5..88e5556 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.h
++++ b/src/kosmickrisp/vulkan/kk_shader.h
+@@ -15,6 +15,9 @@
+ 
+ #include "poly/nir/poly_nir.h"
+ 
++#include "util/u_atomic.h"
++#include "util/u_queue.h"
++
+ #include "vk_pipeline_cache.h"
+ 
+ #include "vk_shader.h"
+@@ -150,6 +153,51 @@ struct msl_compile_data {
+    char *entrypoint_name;
+ };
+ 
++/* MESA_KK_ASYNC_PIPELINES: the Metal render pipeline state (the expensive part
++ * of a graphics pipeline) is built by a worker thread through the same
++ * synchronous Metal call the default path uses, so this changes only when it
++ * happens, never how. The other handles of kk_pipeline_handles.gfx (pre-render
++ * compute, GS, depth/stencil) are still built at creation: they are cheap next
++ * to the render pipeline.
++ *
++ * One instance per program (its VS), stored in kk_shader.async. Created by the
++ * pipeline creation thread before the program is visible to any other thread,
++ * waited for by kk_shader_destroy before the program releases (and thus before
++ * anything the worker writes is freed). No other thread takes a reference: a
++ * draw either finds the state ready, or skips the draw (kk_cmd_shader_pipeline)
++ * without touching this. */
++struct kk_async_pipeline {
++   /* Where the worker publishes the state: the program's handles. */
++   struct kk_pipeline_handles *pipe;
++
++   /* The render pipeline descriptor's inputs and the two stages' MSL, copied
++    * so the worker never reads the program (its MSL may be freed while the job
++    * runs). */
++   enum mtl_primitive_topology_class topology;
++   enum mtl_pixel_format rt_formats[MAX_DRAW_BUFFERS];
++   uint32_t view_mask;
++   uint32_t sample_count;
++   bool has_ms;
++   struct msl_compile_data vs_msl;
++   struct msl_compile_data fs_msl;
++
++   /* Signalled by the worker after pipe->gfx.render is set, or by the queue
++    * when the job is dropped without running (device teardown). Only a
++    * submission that already re-recorded a command buffer (mode 1) and the
++    * program's own destruction wait on it; a draw never does. */
++   struct util_queue_fence fence;
++   /* KK_ASYNC_PENDING, KK_ASYNC_READY or KK_ASYNC_FAILED; read by every draw
++    * without waiting (kk_shader_async_draw_ok). */
++   unsigned status;
++};
++
++enum kk_async_status {
++   /* Still compiling: pipe->gfx.render is not usable yet */
++   KK_ASYNC_PENDING = 0,
++   KK_ASYNC_READY,
++   KK_ASYNC_FAILED,
++};
++
+ struct kk_shader {
+    struct vk_shader vk;
+ 
+@@ -169,6 +217,11 @@ struct kk_shader {
+    /* Metal pipelines created, when minmax isn't NULL (one of the two
+     * programs is compiled on first use) */
+    bool pipeline_ready;
++
++   /* MESA_KK_ASYNC_PIPELINES: the Metal render pipeline state of
++    * pipeline.gfx.render is built asynchronously and stored here. NULL
++    * otherwise (the default). */
++   struct kk_async_pipeline *async;
+ };
+ 
+ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
+@@ -228,4 +281,36 @@ const struct kk_pipeline_handles *
+ kk_cmd_shader_pipeline(struct kk_cmd_buffer *cmd, struct kk_shader *shader,
+                        const struct kk_descriptor_state *desc);
+ 
++/* The async state of the program a kk_pipeline_handles.gfx set belongs to, or
++ * NULL when that program's state is complete (also for a program that was never
++ * async, and for a compute program's handles). */
++static inline struct kk_async_pipeline *
++kk_shader_async_pipeline(const struct kk_pipeline_handles *pipe)
++{
++   return container_of(pipe, struct kk_shader, pipeline)->async;
++}
++
++/* MESA_KK_ASYNC_PIPELINES: what a draw bound to `program` (the program
++ * kk_cmd_shader_pipeline returned, which has no min/max companion when it is
++ * async) has to do with the Metal render pipeline state that is being built.
++ * Never waits for Metal, in either mode; the caller only drops the draw or
++ * marks the command buffer for the queue's replay. */
++enum kk_async_action {
++   /* Record the draw: pipe->gfx.render is usable. */
++   KK_ASYNC_ACTION_RECORD = 0,
++   /* The state is still being built. The draw is skipped for now and the
++    * command buffer is re-recorded at submission, where the queue waits for the
++    * compile and records the draw (MESA_KK_ASYNC_PIPELINES=1). */
++   KK_ASYNC_ACTION_REPLAY,
++   /* The state is still being built (or failed, or the queue was gone) and
++    * waiting is not allowed (MESA_KK_ASYNC_PIPELINES=2): the draw is dropped. A
++    * later recording or resubmission of the command buffer picks it up once the
++    * state is published. */
++   KK_ASYNC_ACTION_DROP,
++};
++
++enum kk_async_action kk_shader_async_draw_ok(struct kk_cmd_buffer *cmd,
++                                             struct kk_shader *program,
++                                             bool *not_ready);
++
+ #endif /* KK_SHADER_H */
+-- 
+2.39.5 (Apple Git-154)
+

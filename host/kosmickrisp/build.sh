@@ -125,6 +125,30 @@
 #              imports) or the bound view; KosmicKrisp only added heaps and buffers, and Metal API validation reported
 #              every render pass (9033 times in one Steam boot). STEAMAC-G: M3+ timeouts follow Steam's first MSAA
 #              targets/window images and window resizes. Repro: host/moltenvk/repro residency.c.
+#   0041       steamac: MESA_KK_ASYNC_PIPELINES=1|2 (unset or 0: unchanged) builds a graphics pipeline's Metal
+#              render pipeline state (the two MTLLibraries and the state; the NIR->MSL translation still happens
+#              at creation) on a util_queue worker pool, so vkCreateGraphicsPipelines returns without waiting for
+#              Metal and no recording or submission thread ever calls Metal for it. =1: a draw of a state that is
+#              not ready is skipped and the command buffer is re-recorded at submission, where the queue waits for
+#              the compile (no draw is lost, but the first submission of such a draw waits). =2 never waits: such a
+#              draw is dropped and the pipeline is used once the state is published (missing draws instead of a
+#              stall; a draw Metal cannot build sets VK_ERROR_INVALID_SHADER_NV on its command buffer). A dropped
+#              draw is decided before anything is flushed, so the encoder, dynamic state, occlusion queries and
+#              transform feedback are untouched. Pipelines with a min/max emulating companion, compute pipelines
+#              and pipeline cache hits keep the synchronous path. The job owns copies of the MSL and the descriptor
+#              inputs, so the program may be destroyed while its compile runs. MESA_KK_DEBUG=async logs compiles
+#              and dropped draws.
+#   0042       steamac: four robustness fixes from an audit of 0001-0041. kk_cmd_draw.c (0010): kk_begin_end_xfb
+#              indexed libkk_xfb_counter_copy's fixed src[4]/dest[4] with first_counter + i, unbounded, so a guest
+#              firstCounterRange past POLY_MAX_SO_BUFFERS wrote past the host stack. nir_to_msl.c (0027): the
+#              assert guarding container_of(src, nir_alu_src, src) is compiled out with -Db_ndebug=true, so a
+#              non-ALU user of a sparse fetch's def produced a bogus nir_alu_src and out-of-bounds swizzle writes.
+#              kk_shader.c (0036): the reduce-sampler scan broke as soon as a set needed minmax, so update-after-bind
+#              sets scanned later were never recorded and a reduction sampler they got after recording went
+#              unnoticed (stale plain-program results). kk_image.c (0019): pPlaneLayouts[0] was dereferenced before
+#              the check that drmFormatModifierPlaneCount is 1, so a guest explicit create info with no plane
+#              layouts read through NULL. kk_sparse.c (0031): page_count - first_page underflowed for a buffer view
+#              offset past the buffer, mapping texels beyond it.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -166,7 +190,49 @@ fi
 [ "$(uname -m)" = arm64 ] || { echo "KosmicKrisp needs Apple silicon" >&2; exit 1; }
 macos=$(sw_vers -productVersion | cut -d. -f1)
 [ "$macos" -ge 26 ] || { echo "KosmicKrisp needs macOS 26 or newer (Metal 4); this is macOS $macos" >&2; exit 1; }
-xcrun --find metal > /dev/null
+# KK_SKIP_HOST_TESTS=1 skips the Metal compiler check and the probe/repro step below. KosmicKrisp
+# compiles its MSL at runtime through the Metal API (no .metal sources or metallib in the meson
+# files), so the driver builds with the Command Line Tools alone; only the probe/repro tests need
+# Xcode (xcrun clang) and a MoltenVK build tree. Default behaviour is unchanged.
+[ "${KK_SKIP_HOST_TESTS:-0}" = 1 ] || xcrun --find metal > /dev/null
+
+# The driver includes <Metal/MTL4CommandQueue.h> and friends, so it needs an SDK with Metal 4
+# (macOS 26+). A CLT install can lag the OS (its default SDK may still be 15.x), and the CLT
+# compilers of that older SDK then reject the newer SDK's linker stubs. KK_SDKROOT picks an SDK
+# explicitly (with the toolchain it ships next to, e.g. an SDK unpacked from a newer CLT); otherwise
+# the newest SDK on the machine with the Metal 4 headers is used. The driver build takes it through
+# SDKROOT + PATH below; the CLC-only first stage keeps the default tools.
+default_sdk=$(xcrun --show-sdk-path 2> /dev/null || true)
+sdk=${KK_SDKROOT:-}
+if [ -z "$sdk" ]; then
+	sdk_candidates="$default_sdk /Library/Developer/CommandLineTools/SDKs/MacOSX*.sdk \
+/Applications/Xcode*.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk"
+	for s in $sdk_candidates; do
+		[ -f "$s/System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h" ] || continue
+		if [ -z "$sdk" ] || [ "$s" -nt "$sdk" ]; then sdk=$s; fi
+	done
+fi
+[ -n "$sdk" ] || { echo "no macOS SDK with the Metal 4 headers (<Metal/MTL4CommandQueue.h>)." >&2
+	echo "Install Xcode or a current Command Line Tools (macOS 26+), or set KK_SDKROOT to such an SDK." >&2
+	exit 1; }
+[ -f "$sdk/System/Library/Frameworks/Metal.framework/Headers/MTL4CommandQueue.h" ] ||
+	{ echo "KK_SDKROOT=$sdk has no Metal 4 headers (<Metal/MTL4CommandQueue.h>)" >&2; exit 1; }
+toolchain=${KK_TOOLCHAIN:-}
+if [ -z "$toolchain" ] && [ "$sdk" != "$default_sdk" ]; then
+	# The toolchain that ships with that SDK (e.g. a newer CLT): its clang matches the SDK's stubs
+	# and its ld reads them. Same layout as the active developer dir, wherever it lives.
+	candidate=$(cd "$sdk/../../.." && pwd)
+	[ -x "$candidate/usr/bin/clang" ] && toolchain=$candidate
+fi
+if [ -n "$toolchain" ]; then
+	[ -x "$toolchain/usr/bin/clang" ] || { echo "KK_TOOLCHAIN=$toolchain has no usr/bin/clang" >&2; exit 1; }
+elif [ "$sdk" != "$default_sdk" ]; then
+	# An SDK unpacked apart from its compilers (KK_SDKROOT into a pkg image, KK_TOOLCHAIN unset):
+	# the default compiler then has to understand the SDK's stubs; set KK_TOOLCHAIN to the matching
+	# clang/ld if it does not. A normal CLT/Xcode install keeps both together, so this is not hit.
+	echo "warning: no clang next to $sdk; set KK_TOOLCHAIN if the default compiler rejects its stubs" >&2
+fi
+echo ">> Metal 4 SDK: $sdk${toolchain:+ (toolchain: $toolchain/usr/bin)}"
 
 for dep in $BREW_DEPS; do
 	brew list --versions "$dep" > /dev/null 2>&1 || brew install "$dep"
@@ -217,14 +283,19 @@ PATH="$work/venv/bin:$PATH:$(brew --prefix llvm)/bin" meson setup "$work/build-c
 PATH="$work/venv/bin:$PATH:$(brew --prefix llvm)/bin" ninja -C "$work/build-clc" install > /dev/null
 
 # --- (2) the driver
+# SDKROOT selects the Metal 4 SDK and PATH puts the matching clang/ld ahead of the default ones
+# (only when that toolchain is not the active developer dir). Both reach the meson compiler probes
+# and ninja; env restores PATH after the venv’s own prefix for the build-time python.
+driver_path="$clc/bin:$work/venv/bin:$PATH"
+[ -n "$toolchain" ] && driver_path="$toolchain/usr/bin:$driver_path"
 rm -rf "$work/build"
-PATH="$clc/bin:$work/venv/bin:$PATH" MACOSX_DEPLOYMENT_TARGET=26.0 meson setup "$work/build" "$src" \
+env PATH="$driver_path" SDKROOT="$sdk" MACOSX_DEPLOYMENT_TARGET=26.0 meson setup "$work/build" "$src" \
 	--buildtype=release -Db_ndebug=true \
 	-Dplatforms=macos -Dvulkan-drivers=kosmickrisp -Dgallium-drivers= -Dopengl=false \
 	-Dglx=disabled -Degl=disabled -Dgbm=disabled -Dzstd=disabled -Dexpat=disabled \
 	-Dllvm=disabled -Dspirv-tools=disabled -Dmesa-clc=system -Dprecomp-compiler=enabled \
 	--prefer-static
-PATH="$clc/bin:$work/venv/bin:$PATH" MACOSX_DEPLOYMENT_TARGET=26.0 ninja -C "$work/build"
+env PATH="$driver_path" SDKROOT="$sdk" MACOSX_DEPLOYMENT_TARGET=26.0 ninja -C "$work/build"
 built=$work/build/src/kosmickrisp/vulkan/libvulkan_kosmickrisp.dylib
 
 # --- stage
@@ -243,6 +314,9 @@ nm -gU "$staged" | grep -q ' _vk_icdGetInstanceProcAddr$'
 codesign --force -s - "$staged"
 
 # --- probe + repros on the staged dylib (Khronos loader, test only)
+if [ "${KK_SKIP_HOST_TESTS:-0}" = 1 ]; then
+	echo ">> host tests (probe + repro) skipped: KK_SKIP_HOST_TESTS=1"
+else
 icd=$work/stage/kosmickrisp_icd.json
 printf '{"file_format_version": "1.0.1", "ICD": {"library_path": "%s", "api_version": "1.4.0"}}\n' \
 	"$staged" > "$icd"
@@ -257,6 +331,7 @@ repro_log=$work/repro.log
 REPRO_DRIVER=kosmickrisp "$root/host/moltenvk/repro/run.sh" "$staged" > "$repro_log" 2>&1 ||
 	{ cat "$repro_log"; exit 1; }
 grep -v '^	' "$repro_log" | grep -v 'Metal API Validation Enabled'
+fi
 
 # --- install (temp + rename, never rewrite a mapped dylib in place)
 mkdir -p "$out/lib"
@@ -271,8 +346,8 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "source:          $MESA_REPO"
 	echo "commit:          $MESA_COMMIT (main, 2026-10-05)"
 	echo "patch revision:  $patch_rev (sha256 of host/kosmickrisp/patches/*.patch)"
-	echo "driver:          $(VK_DRIVER_FILES=$icd "$probe" 2> /dev/null | sed -n 's/^driver: *//p')"
-	echo "Xcode:           $(xcodebuild -version | tr '\n' ' ')"
+	echo "driver:          $([ "${KK_SKIP_HOST_TESTS:-0}" = 1 ] || VK_DRIVER_FILES=$icd "$probe" 2> /dev/null | sed -n 's/^driver: *//p')"
+	echo "Xcode:           $(xcodebuild -version 2> /dev/null | tr '\n' ' ')"
 	echo "built:           $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	echo
 	echo "Patches (host/kosmickrisp/patches):"
@@ -303,6 +378,8 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0038 = steamac: command queue errors name the GPU time and still unsignalled semaphore waits"
 	echo "  0039 = steamac: command queue errors name the device, timing and os_log GPU error; queue teardown waits for handlers"
 	echo "  0040 = steamac: base textures of image planes, subresource and texel buffer view textures in the residency set"
+	echo "  0041 = steamac: MESA_KK_ASYNC_PIPELINES builds a graphics pipeline's Metal render pipeline state on workers"
+	echo "  0042 = steamac: robustness fixes (XFB counter bounds, sparse container_of, minmax update-after-bind scan, sparse view underflow)"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."

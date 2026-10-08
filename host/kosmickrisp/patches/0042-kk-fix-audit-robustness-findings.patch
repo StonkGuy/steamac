@@ -1,0 +1,159 @@
+From 2b85b0b269bad6ae8f98e4059a72aba4f00c9f6c Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Thu, 8 Oct 2026 20:08:21 +0300
+Subject: [PATCH] kk: fix audit robustness findings (XFB bounds, sparse
+ container_of, minmax UAB scan, sparse view offset)
+
+Five confirmed audit findings in the KosmicKrisp patches:
+
+- kk_cmd_draw.c (0010): kk_begin_end_xfb indexed params.src[idx] with
+  idx = first_counter + i, unbounded, into libkk_xfb_counter_copy's fixed
+  src[4]/dest[4]; a guest firstCounterRange past POLY_MAX_SO_BUFFERS wrote
+  past the host stack. Skip such indices.
+- nir_to_msl.c (0027): the assert guarding container_of(src, nir_alu_src,
+  src) is compiled out with -Db_ndebug=true, so a non-ALU user of a sparse
+  fetch's def produced a bogus nir_alu_src and out-of-bounds swizzle
+  writes. Skip non-ALU users instead.
+- kk_shader.c (0036): the reduce-sampler scan broke out as soon as any set
+  needed minmax, so update-after-bind sets scanned later were never
+  recorded in minmax_uab_sets; a reduction sampler they got after
+  recording went unnoticed and stale plain-program results were drawn.
+  Scan every such set (a one-time-submit command buffer still uses the
+  minmax program right away).
+- kk_image.c (0019): pPlaneLayouts[0] was dereferenced before the check
+  that drmFormatModifierPlaneCount is 1, so a guest explicit create info
+  with no plane layouts read through a NULL pointer. Check the count and
+  the pointer first.
+- kk_sparse.c (0031): page_count - first_page underflowed when a buffer
+  view's offset was past the buffer, and MIN2 kept the view's own size,
+  mapping texels beyond the buffer. Clamp to zero pages.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/compiler/nir_to_msl.c |  8 +++++++-
+ src/kosmickrisp/vulkan/kk_cmd_draw.c  |  8 ++++++++
+ src/kosmickrisp/vulkan/kk_image.c     | 12 +++++++++---
+ src/kosmickrisp/vulkan/kk_shader.c    | 16 ++++++++++++----
+ src/kosmickrisp/vulkan/kk_sparse.c    | 10 ++++++++--
+ 5 files changed, 44 insertions(+), 10 deletions(-)
+
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+index cc99c3e..875fdf9 100644
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -2640,7 +2640,13 @@ msl_split_sparse_fetch(nir_builder *b, nir_instr *instr, void *data)
+       nir_instr *user = nir_src_use_instr(src);
+       if (user == nir_def_instr(code))
+          continue;
+-      assert(!nir_src_is_if(src) && user->type == nir_instr_type_alu);
++      /* -Db_ndebug=true drops the assert, so a non-ALU user (a surviving
++       * phi, a tex/intrinsic, an if-condition) would make container_of()
++       * yield a bogus nir_alu_src and the swizzle writes below corrupt
++       * memory. Such a user never reads the residency code the way an ALU
++       * swizzle does, so leave it (and its def) alone. */
++      if (nir_src_is_if(src) || user->type != nir_instr_type_alu)
++         continue;
+       nir_alu_instr *alu = nir_instr_as_alu(user);
+       nir_alu_src *alu_src = container_of(src, nir_alu_src, src);
+       const unsigned srcn = alu_src - alu->src;
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 41dde3d..aa7bee0 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -2906,6 +2906,14 @@ kk_begin_end_xfb(struct kk_cmd_buffer *cmd, uint32_t first_counter,
+          continue;
+ 
+       uint32_t idx = first_counter + i;
++      /* params is libkk_xfb_counter_copy with fixed src[4]/dest[4] and the
++       * copy kernel indexes both by the same slot, so an index past the
++       * last stream buffer would write out of bounds (the host stack
++       * here). Only POLY_MAX_SO_BUFFERS streams exist, so ignore a
++       * firstCounterRange past them (invalid per the spec's counterRange
++       * bound). */
++      if (idx >= POLY_MAX_SO_BUFFERS)
++         continue;
+       if (begin) {
+          params.src[idx] = addr;
+       } else {
+diff --git a/src/kosmickrisp/vulkan/kk_image.c b/src/kosmickrisp/vulkan/kk_image.c
+index 74c7c0c..4a5af56 100644
+--- a/src/kosmickrisp/vulkan/kk_image.c
++++ b/src/kosmickrisp/vulkan/kk_image.c
+@@ -621,12 +621,18 @@ kk_image_init(struct kk_device *dev, struct kk_image *image,
+                            IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT);
+    if (explicit_info && pCreateInfo->tiling == VK_IMAGE_TILING_LINEAR) {
+       struct kk_image_layout *layout = &image->planes[0].layout;
+-      const VkSubresourceLayout *plane_layout = &explicit_info->pPlaneLayouts[0];
+       const uint64_t row_B =
+          util_format_get_stride(layout->format.pipe, layout->width_px);
+-      if (image->plane_count != 1 ||
++      /* pPlaneLayouts is dereferenced below: reject a guest-supplied
++       * explicit create info with no plane layouts (or a plane count this
++       * path does not support) first, instead of reading pPlaneLayouts[0]
++       * of a NULL array. */
++      if (!explicit_info->pPlaneLayouts ||
+           explicit_info->drmFormatModifierPlaneCount != 1 ||
+-          plane_layout->offset != 0 || plane_layout->rowPitch < row_B ||
++          image->plane_count != 1)
++         return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
++      const VkSubresourceLayout *plane_layout = &explicit_info->pPlaneLayouts[0];
++      if (plane_layout->offset != 0 || plane_layout->rowPitch < row_B ||
+           plane_layout->rowPitch > UINT32_MAX ||
+           plane_layout->rowPitch % layout->align_B)
+          return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 1a7f502..a482be9 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -2543,17 +2543,25 @@ kk_cmd_shader_pipeline(struct kk_cmd_buffer *cmd, struct kk_shader *shader,
+    u_foreach_bit(s, shader->info.minmax_sets & BITFIELD_MASK(KK_MAX_SETS)) {
+       const struct kk_descriptor_set *set = desc->sets[s];
+       if (set == NULL) {
+-         minmax = desc->push[s] != NULL && desc->push[s]->reduction_samplers;
++         if (desc->push[s] != NULL && desc->push[s]->reduction_samplers)
++            minmax = true;
+       } else if (p_atomic_read(&set->reduction_samplers)) {
+          minmax = true;
+       } else if (!cmd->replay &&
+                  (set->layout->flags &
+                   VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT)) {
+-         minmax = cmd->one_time_submit;
++         /* Every update-after-bind set of the shader must be recorded, not
++          * only the ones before the first set that needs minmax: a set
++          * scanned here after the loop had already chosen the minmax
++          * program used to be skipped, so a reduction sampler it got after
++          * recording was never noticed (kk_cmd_buffer_needs_minmax_replay)
++          * and stale plain-program results were drawn. One-time-submit
++          * command buffers have no queue to replay from, so they use the
++          * minmax program right away. */
+          uab_sets |= BITFIELD_BIT(s);
++         if (cmd->one_time_submit)
++            minmax = true;
+       }
+-      if (minmax)
+-         break;
+    }
+ 
+    if (!minmax) {
+diff --git a/src/kosmickrisp/vulkan/kk_sparse.c b/src/kosmickrisp/vulkan/kk_sparse.c
+index 54fed37..b148505 100644
+--- a/src/kosmickrisp/vulkan/kk_sparse.c
++++ b/src/kosmickrisp/vulkan/kk_sparse.c
+@@ -467,9 +467,15 @@ kk_buffer_view_sparse_init(struct kk_device *dev, struct kk_buffer_view *view,
+                                              view->mtl_texel_buffer_handle);
+ 
+    view->sparse_first_page = first_page;
++   /* first_page comes from the view's offset; an offset past the buffer's
++    * last page would underflow page_count - first_page to ~2^64 and MIN2
++    * then kept the view's own size, mapping texels beyond the buffer
++    * (kk_buffer_view.c bounds the offset, this keeps it safe regardless). */
+    view->sparse_page_count =
+-      MIN2(DIV_ROUND_UP(layout->width_px * texel_B, KK_SPARSE_PAGE_SIZE_B),
+-           sparse->page_count - first_page);
++      first_page < sparse->page_count
++         ? MIN2(DIV_ROUND_UP(layout->width_px * texel_B, KK_SPARSE_PAGE_SIZE_B),
++                sparse->page_count - first_page)
++         : 0u;
+    if (sparse->residency) {
+       /* Views of sparse buffers keep texels within pages (kk_buffer_view.c):
+        * Metal's texture buffer formats are 1 to 16 bytes, powers of two. */
