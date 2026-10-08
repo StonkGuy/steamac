@@ -1,0 +1,214 @@
+From e1aaec81cfad1267d96e686c66e6d3e9f48dbcbb Mon Sep 17 00:00:00 2001
+From: build <build@invalid>
+Date: Thu, 8 Oct 2026 20:37:02 +0300
+Subject: [PATCH 13/15] proc: report the emulated Seccomp: and TracerPid: in
+ /proc/<pid>/status
+
+A real kernel's /proc/<pid>/status describes that process: Seccomp: is its own
+seccomp mode (0 disabled / 1 strict / 2 filter, fs/proc/array.c task_state) and
+TracerPid: is the pid of its own ptracer, 0 when it is not traced.
+
+FEX had no /proc/self/status creator, so opens fell through to the host file: the
+guest read FEX's own seccomp mode and tracer, not its own.
+
+Add a creator that rewrites only those two lines. Seccomp: comes from
+ThreadStateObject::SeccompMode; TracerPid: is passed through unchanged when the
+emulated process really is traced by an in-guest tracer (PtraceEmu::IsAttached)
+and is 0 otherwise, which is what an untraced process reports. Every other line
+is the host file's, unchanged - nothing else is fabricated. A host tracer that
+exists only outside the emulated world is not an emulated-process fact, so it is
+not exposed to the guest.
+
+Base: FEX-2610 14c92681 + patches 0001-0010.
+---
+ .../Tools/FEXInterpreter/FEXInterpreter.cpp   |  6 +-
+ .../EmulatedFiles/EmulatedFiles.cpp           | 69 +++++++++++++++++++
+ .../EmulatedFiles/EmulatedFiles.h             |  1 +
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  2 +
+ .../LinuxSyscalls/ThreadManager.cpp           | 13 ++++
+ .../LinuxSyscalls/ThreadManager.h             |  5 ++
+ 6 files changed, 94 insertions(+), 2 deletions(-)
+
+diff --git a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+index 52bdba1e6..20564c37a 100644
+--- a/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
++++ b/Source/Tools/FEXInterpreter/FEXInterpreter.cpp
+@@ -595,8 +595,10 @@ int main(int argc, char** argv, char** const envp) {
+   // Create a thread without a RIP or stack pointer setup initially.
+   auto ParentThread = SyscallHandler->TM.CreateThread();
+   SyscallHandler->TM.TrackThread(ParentThread);
+-  SignalDelegation->RegisterTLSState(ParentThread);
+-  ThunkHandler->RegisterTLSState(ParentThread);
++  // Register through the SyscallHandler, not the signal delegator and thunk handler directly: the wrapper
++  // also records the thread as ThreadManager's current thread, which the synthesized /proc/<pid>/status
++  // reads to report the process's own Seccomp: line.
++  SyscallHandler->RegisterTLSState(ParentThread);
+ 
+   SyscallHandler->DeserializeSeccompFD(ParentThread, FEXSeccompFD);
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/EmulatedFiles/EmulatedFiles.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/EmulatedFiles/EmulatedFiles.cpp
+index 4fec3bf97..e5267e863 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/EmulatedFiles/EmulatedFiles.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/EmulatedFiles/EmulatedFiles.cpp
+@@ -10,6 +10,7 @@ $end_info$
+ 
+ #include "Common/CPUInfo.h"
+ #include "Common/FDUtils.h"
++#include "LinuxSyscalls/PtraceEmu.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/EmulatedFiles/EmulatedFiles.h"
+ 
+@@ -591,6 +592,14 @@ EmulatedFDManager::EmulatedFDManager(FEXCore::Context::Context* ctx)
+   FDReadCreators[procAuxv] = &EmulatedFDManager::ProcAuxv;
+   FDReadCreators["/proc/self/auxv"] = &EmulatedFDManager::ProcAuxv;
+ 
++  // /proc/<pid>/status: on a real kernel this reports the process's own state, so the two debugger-facing lines
++  // must not be the host FEX process's values. Our host state is FEX's, not the emulated process's, so rewrite
++  // Seccomp: to the emulated seccomp mode (ThreadStateObject::SeccompMode) and TracerPid: to the emulated
++  // tracer state. Every other line is passed through from the host file unchanged: nothing else is fabricated.
++  fextl::string procStatus = fextl::fmt::format("/proc/{}/status", getpid());
++  FDReadCreators[procStatus] = &EmulatedFDManager::ProcStatus;
++  FDReadCreators["/proc/self/status"] = &EmulatedFDManager::ProcStatus;
++
+   if (ThreadsConfig > 1) {
+     cpus_online = fextl::fmt::format("0-{}", ThreadsConfig - 1);
+   } else {
+@@ -613,6 +622,66 @@ int32_t EmulatedFDManager::Open(const char* pathname, int flags, uint32_t mode)
+   return Creator->second(CTX, AT_FDCWD, pathname, flags, mode);
+ }
+ 
++int32_t EmulatedFDManager::ProcStatus(FEXCore::Context::Context* ctx, int32_t fd, const char* pathname, int32_t flags, mode_t mode) {
++  char Buf[8192];
++  ssize_t Len = 0;
++  {
++    // Read the host's own status (this FEX process), then patch the two lines that describe the emulated process.
++    int HostFD = ::open("/proc/self/status", O_RDONLY | O_CLOEXEC);
++    if (HostFD >= 0) {
++      Len = ::read(HostFD, Buf, sizeof(Buf) - 1);
++      ::close(HostFD);
++    }
++  }
++  if (Len < 0) {
++    Len = 0;
++  }
++  Buf[Len] = '\0';
++
++  // Emulated seccomp mode (SECCOMP_MODE_DISABLED/STRICT/FILTER), matching seccomp(2)/prctl(PR_GET_SECCOMP).
++  uint32_t SeccompMode = SECCOMP_MODE_DISABLED;
++  if (auto* Thread = FEX::HLE::ThreadManager::GetCurrentThreadObject()) {
++    SeccompMode = Thread->SeccompMode;
++  }
++
++  fextl::string Out;
++  Out.reserve(Len + 64);
++  const char* Cursor = Buf;
++  while (*Cursor) {
++    const char* Eol = strchr(Cursor, '\n');
++    const size_t LineLen = Eol ? static_cast<size_t>(Eol - Cursor) + 1 : strlen(Cursor);
++    if (strncmp(Cursor, "Seccomp:", 8) == 0) {
++      Out += fextl::fmt::format("Seccomp:\t{}\n", SeccompMode);
++    } else if (strncmp(Cursor, "TracerPid:", 10) == 0) {
++      // Linux reports the pid of the process's *ptracer* (fs/proc/array.c task_state -> ptrace_parent). If the
++      // emulated process is traced by an in-guest tracer (PtraceEmu emulates PTRACE_TRACEME/SYSCALL), the host
++      // TracerPid is that tracer, so it is passed through unchanged. Otherwise the emulated process genuinely
++      // has no tracer - the host value, if any, belongs to a debugger outside the emulated world that the
++      // emulated process cannot see - so a real kernel would report 0. Nothing is hidden either way.
++      if (FEX::HLE::PtraceEmu::IsAttached()) {
++        Out.append(Cursor, LineLen);
++      } else {
++        Out += "TracerPid:\t0\n";
++      }
++    } else {
++      Out.append(Cursor, LineLen);
++      if (!Eol) {
++        break;
++      }
++    }
++    if (!Eol) {
++      break;
++    }
++    Cursor = Eol + 1;
++  }
++
++  int NewFD = GenTmpFD(pathname, flags);
++  write(NewFD, Out.data(), Out.size());
++  lseek(NewFD, 0, SEEK_SET);
++  SealTmpFD(NewFD);
++  return NewFD;
++}
++
+ int32_t EmulatedFDManager::ProcAuxv(FEXCore::Context::Context* ctx, int32_t fd, const char* pathname, int32_t flags, mode_t mode) {
+   const auto [auxvBase, auxvSize] = FEX::HLE::_SyscallHandler->GetCodeLoader()->GetAuxv();
+   if (auxvBase == 0) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/EmulatedFiles/EmulatedFiles.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/EmulatedFiles/EmulatedFiles.h
+index 854232341..fca0ff259 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/EmulatedFiles/EmulatedFiles.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/EmulatedFiles/EmulatedFiles.h
+@@ -34,6 +34,7 @@ private:
+   fextl::unordered_map<fextl::string, FDReadStringFunc> FDReadCreators;
+ 
+   static int32_t ProcAuxv(FEXCore::Context::Context* ctx, int32_t fd, const char* pathname, int32_t flags, mode_t mode);
++  static int32_t ProcStatus(FEXCore::Context::Context* ctx, int32_t fd, const char* pathname, int32_t flags, mode_t mode);
+   const uint32_t ThreadsConfig;
+ };
+ } // namespace FEX::EmulatedFile
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
+index 356ace239..ac8cc16ad 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
+@@ -1037,10 +1037,12 @@ void SyscallHandler::UnlockAfterFork(FEXCore::Core::InternalThreadState* LiveThr
+ void SyscallHandler::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
+   SignalDelegation->RegisterTLSState(Thread);
+   ThunkHandler->RegisterTLSState(Thread);
++  FEX::HLE::ThreadManager::SetCurrentThreadObject(Thread);
+ }
+ 
+ void SyscallHandler::UninstallTLSState(FEX::HLE::ThreadStateObject* Thread) {
+   SignalDelegation->UninstallTLSState(Thread);
++  FEX::HLE::ThreadManager::SetCurrentThreadObject(nullptr);
+ }
+ 
+ static bool isHEX(char c) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+index de69906db..5c581c66f 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+@@ -159,6 +159,19 @@ void ThreadManager::StatAlloc::UnlockAfterFork(FEXCore::Core::InternalThreadStat
+   ThreadObject->Thread->ThreadStats = AllocateSlot(ThreadObject->ThreadInfo.TID);
+ }
+ 
++// The ThreadStateObject of the calling thread. Set in SyscallHandler::RegisterTLSState, cleared on thread exit.
++// A frontend must register a thread through SyscallHandler::RegisterTLSState, not the signal delegator or
++// thunk handler directly, or this stays unset for that thread.
++static thread_local FEX::HLE::ThreadStateObject* CurrentThreadObject {};
++
++FEX::HLE::ThreadStateObject* ThreadManager::GetCurrentThreadObject() {
++  return CurrentThreadObject;
++}
++
++void ThreadManager::SetCurrentThreadObject(FEX::HLE::ThreadStateObject* Thread) {
++  CurrentThreadObject = Thread;
++}
++
+ uint64_t ThreadManager::SetSignalMask(uint64_t Mask) {
+   ::syscall(SYSCALL_DEF(rt_sigprocmask), SIG_SETMASK, &Mask, &Mask, 8);
+   return Mask;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+index 075336dda..ad4aa7854 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+@@ -195,6 +195,11 @@ public:
+     return static_cast<FEX::HLE::ThreadStateObject*>(Thread->FrontendPtr);
+   }
+ 
++  ///< The ThreadStateObject of the calling thread (null before the frontend registers it). Lets code without a
++  ///< CpuStateFrame - e.g. the synthesized /proc/<pid>/status - read the calling thread's emulated state.
++  static FEX::HLE::ThreadStateObject* GetCurrentThreadObject();
++  static void SetCurrentThreadObject(FEX::HLE::ThreadStateObject* Thread);
++
+   FEX_CONFIG_OPT(EnableCPUIDFaulting, ENABLECPUIDFAULTING);
+ 
+   FEX::HLE::ThreadStateObject* CreateThread(const FEXCore::Core::CPUState* NewThreadState = nullptr, uint64_t ParentTID = 0,
+-- 
+2.44.0
+

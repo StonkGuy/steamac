@@ -1,0 +1,104 @@
+From 9b517607dd22351d4a8abdc7011ef6e66e5a26c1 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 02:09:04 +0300
+Subject: [PATCH 3/9] Stats: account guest code-range invalidations
+
+Every guest mmap/munmap/mprotect (and ptrace poke) ends in TM.InvalidateGuestCodeRange, which takes the thread-creation
+and code-invalidation locks, walks every thread's lookup cache and drops the call-return shadow stack of each thread
+that had cached code in the range. In a process with ~200 threads that is a lot of work per call and it was not visible
+anywhere.
+
+Add per-thread live stats (FEX_PROFILESTATS): number of invalidations and cycles spent in them (including the wait for
+the locks), and the number of call-return shadow stacks that were dropped. The stats slot grows from 112 to 128 bytes;
+the header carries the slot size, readers keep working.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ FEXCore/Source/Interface/Core/Core.cpp         |  1 +
+ FEXCore/include/FEXCore/Utils/SHMStats.h       |  7 ++++++-
+ .../LinuxSyscalls/ThreadManager.h              | 18 ++++++++++++++++++
+ 3 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 7b2ec3d52..d0a4a5fca 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -1070,6 +1070,7 @@ void ContextImpl::InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadS
+ 
+   if (Thread->LookupCache->InvalidateCacheRange(Start, Length)) {
+     FEXCORE_PROFILE_SCOPED("InvalidateCallRet");
++    FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedCallRetFlushCount, 1);
+ 
+     // This may cause access violations in the thread on Windows as zeroing is not atomic, this is handled by the frontend
+     Allocator::VirtualDontNeed(Thread->CallRetStackBase, FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE);
+diff --git a/FEXCore/include/FEXCore/Utils/SHMStats.h b/FEXCore/include/FEXCore/Utils/SHMStats.h
+index c5844fe10..6530f4b77 100644
+--- a/FEXCore/include/FEXCore/Utils/SHMStats.h
++++ b/FEXCore/include/FEXCore/Utils/SHMStats.h
+@@ -74,7 +74,12 @@ struct ThreadStats {
+   uint64_t AccumulatedDiskCacheHitCount;
+   uint64_t AccumulatedDiskCacheMissCount;
+   uint64_t AccumulatedDiskCacheLookupTime;
+-  uint64_t Padding;
++
++  // Guest code-range invalidations (mmap/munmap/mprotect/ptrace pokes ...): calls, cycles spent in them (including the
++  // wait for the invalidation lock), and call-return shadow stacks that had to be dropped because of them.
++  uint64_t AccumulatedInvalidationCount;
++  uint64_t AccumulatedInvalidationTime;
++  uint64_t AccumulatedCallRetFlushCount;
+ };
+ 
+ // Ensure 16-byte alignment to take advantage of ARM single-copy atomicity.
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+index dfcd4b0eb..2d9c27a60 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+@@ -15,6 +15,7 @@ $end_info$
+ 
+ #include <FEXCore/Config/Config.h>
+ #include <FEXCore/Core/Context.h>
++#include <FEXCore/Debug/InternalThreadState.h>
+ #include <FEXCore/fextl/vector.h>
+ #include <FEXCore/Utils/InterruptableConditionVariable.h>
+ #include <FEXCore/Utils/Profiler.h>
+@@ -216,6 +217,7 @@ public:
+   }
+ 
+   void InvalidateGuestCodeRange(FEXCore::Core::InternalThreadState* CallingThread, uint64_t Start, uint64_t Length) {
++    InvalidationStats Stats(CallingThread);
+     std::lock_guard lk(ThreadCreationMutex);
+ 
+     // Potential deferred since Thread might not be valid.
+@@ -230,6 +232,7 @@ public:
+ 
+   void InvalidateGuestCodeRange(FEXCore::Core::InternalThreadState* CallingThread, uint64_t Start, uint64_t Length,
+                                 FEXCore::Context::CodeRangeInvalidationFn after_callback) {
++    InvalidationStats Stats(CallingThread);
+     std::lock_guard lk(ThreadCreationMutex);
+ 
+     // Potential deferred since Thread might not be valid.
+@@ -250,6 +253,21 @@ public:
+   }
+ 
+ private:
++  // Accounts one code-range invalidation (count and cycles) to the calling thread's live stats.
++  struct InvalidationStats {
++    explicit InvalidationStats(FEXCore::Core::InternalThreadState* Thread)
++      : Thread {Thread}
++      , Begin {Thread && Thread->ThreadStats ? FEXCore::SHMStats::GetCycleCounter() : 0} {}
++    ~InvalidationStats() {
++      if (Thread && Thread->ThreadStats) {
++        Thread->ThreadStats->AccumulatedInvalidationCount += 1;
++        Thread->ThreadStats->AccumulatedInvalidationTime += FEXCore::SHMStats::GetCycleCounter() - Begin;
++      }
++    }
++    FEXCore::Core::InternalThreadState* Thread;
++    uint64_t Begin;
++  };
++
+   StatAlloc Stat;
+   FEXCore::Context::Context* CTX;
+   FEX::HLE::SignalDelegator* SignalDelegation;
+-- 
+2.55.0
+

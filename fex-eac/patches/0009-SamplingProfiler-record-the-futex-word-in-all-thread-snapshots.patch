@@ -1,0 +1,72 @@
+From cb5019409ab901f5f1ec9d93f2000bd7a9a088d8 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:04:36 +0300
+Subject: [PATCH 9/9] SamplingProfiler: record the futex word in all-thread
+ snapshots
+
+The snapshot record grows to 160 words: the Spare slot becomes the
+futex word/expected/address for threads blocked in futex/futex_waitv,
+so a parked thread can be told apart as nobody-woke-it (word still
+equals the expected value) vs lost-wake-up (word changed, still
+asleep). Stack[] grows 60->138 to match. resolve_snap.py already
+accepts both the 640-byte (80-word) and 1280-byte (160-word) records.
+---
+ .../LinuxSyscalls/SamplingProfiler.cpp        | 34 ++++++++++++++++---
+ 1 file changed, 30 insertions(+), 4 deletions(-)
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp
+index 5bd0f830f..e7542eecc 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp
+@@ -39,11 +39,13 @@ namespace {
+     uint64_t Tid;
+     uint64_t HostPC;
+     uint64_t Rip;
+-    uint64_t Spare;
+-    uint64_t Gregs[16]; ///< x86 order: rax rcx rdx rbx rsp rbp rsi rdi r8-r15
+-    uint64_t Stack[60]; ///< guest stack at rsp
++    uint64_t FutexWord;     ///< bit 63 set when the thread is blocked in futex/futex_waitv; low 32 bits: the futex word at snapshot time
++    uint64_t FutexExpected; ///< the value the wait was started with
++    uint64_t FutexAddr;     ///< futex address (futex_waitv: of the first waiter)
++    uint64_t Gregs[16];     ///< x86 order: rax rcx rdx rbx rsp rbp rsi rdi r8-r15
++    uint64_t Stack[138];    ///< guest stack at rsp
+   };
+-  static_assert(sizeof(SnapRecord) == 80 * 8);
++  static_assert(sizeof(SnapRecord) == 160 * 8);
+   constexpr size_t MaxSnaps = 1024;
+   SnapRecord* Snaps = nullptr;
+   std::atomic<uint32_t> SnapCount {0};
+@@ -195,6 +197,30 @@ void StartSamplingProfiler(FEX::HLE::SignalDelegator* Signals, uint32_t Hz, bool
+             iovec Local {R.Stack, sizeof(R.Stack)};
+             iovec Remote {reinterpret_cast<void*>(St.gregs[FEXCore::X86State::REG_RSP]), sizeof(R.Stack)};
+             process_vm_readv(getpid(), &Local, 1, &Remote, 1, 0);
++
++            // A thread asleep in a futex wait: record the futex word, to tell "nobody woke it" (word still equals the expected
++            // value) from "the wake-up was lost" (the word changed but the thread still sleeps).
++            const uint64_t Nr = St.gregs[FEXCore::X86State::REG_RAX];
++            if (Nr == 202 || Nr == 449) {
++              uint64_t Addr = St.gregs[FEXCore::X86State::REG_RDI];
++              uint64_t Expected = St.gregs[FEXCore::X86State::REG_RDX];
++              if (Nr == 449) {
++                // futex_waitv(struct futex_waitv* waiters, ...): first waiter is {u64 val; u64 uaddr; u32 flags; u32 pad}
++                uint64_t Waiter[3] {};
++                iovec WL {Waiter, sizeof(Waiter)};
++                iovec WR {reinterpret_cast<void*>(Addr), sizeof(Waiter)};
++                Addr = process_vm_readv(getpid(), &WL, 1, &WR, 1, 0) == static_cast<ssize_t>(sizeof(Waiter)) ? Waiter[1] : 0;
++                Expected = Waiter[0];
++              }
++              uint32_t Word = 0;
++              iovec FL {&Word, sizeof(Word)};
++              iovec FR {reinterpret_cast<void*>(Addr), sizeof(Word)};
++              if (Addr && process_vm_readv(getpid(), &FL, 1, &FR, 1, 0) == static_cast<ssize_t>(sizeof(Word))) {
++                R.FutexWord = (1ULL << 63) | Word;
++                R.FutexExpected = Expected;
++                R.FutexAddr = Addr;
++              }
++            }
+           }
+         }
+         return true;
+-- 
+2.55.0
+

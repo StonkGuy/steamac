@@ -1,0 +1,97 @@
+From 39070db535b8239ef2d9a644f68dfc605da9f8d2 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 12:00:27 +0300
+Subject: [PATCH 8/9] Signals: do not leave InSyscallInfo set for a guest
+ handler entered from a syscall handler
+
+HandleDispatcherGuestSignal cleared Frame->InSyscallInfo only when the signal interrupted JIT code. When it interrupted the
+C++ half of a syscall handler (a thread blocked in or finishing a syscall, tgkill/kill/tkill to self), the JIT's Syscall op had
+already set InSyscallInfo to 0xFFFF ("every register is spilled") and the guest handler started with that value, which it kept
+until its own first syscall completed.
+
+The SMC write-fault handler (SpillSRA(..., InSyscallInfo & 0xFFFF)) and any nested signal that arrives in translated code in
+that window then skip spilling every register, and the redispatch reloads the registers from the frame: whatever the handler
+had put into registers since it was entered is replaced by the interrupted code's values.
+
+Clear it for the handler and put it back at rt_sigreturn (the interrupted syscall handler continues and a signal can still arrive
+while the Syscall op refills the registers). The backup keeps it in a separate field so the "guest changed RIP" return path,
+which abandons the interrupted code, keeps its old behaviour.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../Tools/LinuxEmulation/ArchHelpers/MContext.h  |  3 +++
+ .../LinuxSyscalls/SignalDelegator.cpp            | 16 ++++++++++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
+index e2ed6b4dc..4bc889ed7 100644
+--- a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
++++ b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
+@@ -20,6 +20,7 @@ namespace FEX::ArchHelpers::Context {
+ 
+ enum ContextFlags : uint32_t {
+   CONTEXT_FLAG_INJIT = (1U << 0),
++  CONTEXT_FLAG_SYSCALLINFO_CLEARED = (1U << 1), ///< the guest handler was entered from the C++ half of a syscall: ClearedSyscallInfo is its InSyscallInfo
+ };
+ 
+ #if defined(ASSERTIONS_ENABLED) && ASSERTIONS_ENABLED
+@@ -40,6 +41,7 @@ struct X86ContextBackup {
+   FEXCore::x86_64::_libc_fpstate FPRState;
+   uint64_t sa_mask;
+   uint16_t InSyscallInfo;
++  uint16_t ClearedSyscallInfo;
+   bool FaultToTopAndGeneratedException;
+   uint64_t GuestSignalMask; ///< guest-visible signal mask at the time the guest handler was entered (restored at rt_sigreturn)
+ 
+@@ -68,6 +70,7 @@ struct ArmContextBackup {
+   __uint128_t FPRs[32];
+   uint64_t sa_mask;
+   uint16_t InSyscallInfo;
++  uint16_t ClearedSyscallInfo;
+   bool FaultToTopAndGeneratedException;
+   uint64_t GuestSignalMask; ///< guest-visible signal mask at the time the guest handler was entered (restored at rt_sigreturn)
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+index 9a0104d84..21d5e16f9 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -173,6 +173,7 @@ ArchHelpers::Context::ContextBackup* SignalDelegator::StoreThreadState(FEXCore::
+   Context->UContextLocation = 0;
+   Context->SigInfoLocation = 0;
+   Context->InSyscallInfo = 0;
++  Context->ClearedSyscallInfo = 0;
+   Context->GuestSignalMask = 0;
+ 
+   // Store fault to top status and then reset it
+@@ -261,6 +262,10 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+ 
+   // Restore host state
+   ArchHelpers::Context::RestoreContext(ucontext, Context);
++  if (Context->Flags & ArchHelpers::Context::ContextFlags::CONTEXT_FLAG_SYSCALLINFO_CLEARED) {
++    // Back in the syscall handler the guest signal interrupted.
++    Thread->CurrentFrame->InSyscallInfo = Context->ClearedSyscallInfo;
++  }
+ 
+   {
+     auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread);
+@@ -340,6 +345,17 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+     ContextBackup->InSyscallInfo = Thread->CurrentFrame->InSyscallInfo;
+     Thread->CurrentFrame->InSyscallInfo = 0;
+   } else {
++    // Interrupted outside of JIT code, typically in the C++ half of a syscall handler, where InSyscallInfo still says that all
++    // registers are spilled. The guest handler is going to run JIT code with live registers, so it must not inherit that: an SMC
++    // fault or a nested signal before the handler's own first syscall would skip spilling every register (the spill mask is
++    // InSyscallInfo & 0xFFFF) and the redispatch would reload stale values from the frame. rt_sigreturn puts it back, because the
++    // interrupted syscall handler continues and a signal can still arrive while the syscall op refills the registers.
++    if (Thread->CurrentFrame->InSyscallInfo != 0) {
++      ContextBackup->ClearedSyscallInfo = Thread->CurrentFrame->InSyscallInfo;
++      ContextBackup->Flags |= ArchHelpers::Context::ContextFlags::CONTEXT_FLAG_SYSCALLINFO_CLEARED;
++      Thread->CurrentFrame->InSyscallInfo = 0;
++    }
++
+     if (!IsAddressInDispatcher(OldPC)) {
+       // This is likely to cause issues but in some cases it isn't fatal
+       // This can also happen if we have put a signal on hold, then we just reenabled the signal
+-- 
+2.55.0
+

@@ -1,0 +1,70 @@
+From ee6d1e134fc3b1e8f0506ed321056f11fbfd4284 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 01:13:02 +0300
+Subject: [PATCH] JIT: do not commit the RSP increment when `pop r/m`
+ faults
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+x86 requires the stack pointer to be unchanged when an instruction faults.
+`pop r/m` (opcode 0x8F) was dispatched through the fused IR `Pop`, which the
+AArch64 JIT emits as a single post-indexed load (`ldr<IndexType::POST>`): the
+RSP increment is committed by the same operation that loads the value, before
+the store to the destination. If the destination is unmapped, the store faults
+after RSP has already been advanced, so the signal frame handed to a guest
+handler carried the already-incremented stack pointer.
+
+That is the Wine ntdll:exception `segfault_code` sequence — `xor eax,eax ;
+popq (%rax) ; ret` with the handler resuming at `context->Rip += 2`. The handler
+read the wrong RSP, the resume re-faulted, and the test died before producing any
+output.
+
+For a memory destination, split the sequence: load the value from [RSP] without
+the increment, store it (the only faultable step), and update the stack pointer
+only afterwards, so a fault leaves RSP untouched. Register destinations cannot
+fault, so they keep the cheaper fused path.
+
+tests: `tests/pop-fault` (differential against `mov %eax,(%rax)`; PASS after,
+FAIL before).
+---
+ .../Interface/Core/OpcodeDispatcher.cpp       | 25 ++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 0f7a00eee..80d308312 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -396,8 +396,31 @@ void OpDispatchBuilder::PUSHSegmentOp(OpcodeArgs, uint32_t SegmentReg) {
+ }
+ 
+ void OpDispatchBuilder::POPOp(OpcodeArgs) {
+-  Ref Value = Pop(OpSizeFromSrc(Op));
++  const auto Size = OpSizeFromSrc(Op);
++
++  if (Op->Dest.IsGPR()) {
++    // Register destination: the store cannot fault, so the fused post-index
++    // `_Pop` (which updates RSP in the same operation) is safe and cheapest.
++    Ref Value = Pop(Size);
++    StoreResultGPR(Op, Value);
++    return;
++  }
++
++  // Memory destination. x86 leaves RSP unchanged if an instruction faults, and
++  // the store to memory is the only faultable part of `pop r/m`. The stack
++  // pointer increment must therefore be committed *after* the store, not folded
++  // into the address RMW.
++  Ref SP = LoadGPRRegister(X86State::REG_RSP);
++
++  // Load the value from [RSP] without advancing the stack pointer. The address
++  // is scratch, so the load leaves State.rip/RSP untouched if it faults.
++  auto Value = _LoadMem(RegClass::GPR, Size, SP, Invalid(), OpSize::i8Bit, MemOffsetType::SXTX, 1);
++
++  // Faultable store of the popped value to the destination.
+   StoreResultGPR(Op, Value);
++
++  // Only now commit the stack pointer increment.
++  StoreGPRRegister(X86State::REG_RSP, Add(OpSize::i64Bit, SP, IR::OpSizeToSize(Size)));
+ }
+ 
+ void OpDispatchBuilder::POPAOp(OpcodeArgs) {

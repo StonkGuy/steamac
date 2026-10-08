@@ -1,0 +1,73 @@
+From 3b45ae9ad7eb23689e5c3ab95933cef03694bd25 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 22:37:55 +0300
+Subject: [PATCH] Signals: write the interrupted mask into the frame's
+ uc_sigmask
+
+Linux x64_setup_rt_frame stores sigmask_to_save() in frame->uc.uc_sigmask (signal_64.c:166,190), and rt_sigreturn
+reads that sigset_t back and installs it with set_current_blocked (signal_64.c:256). FEX never wrote the guest
+frame field, so a handler -- glibc, an unwinder, Wine -- that inspects ucontext.uc_sigmask saw whatever the zeroed
+guest stack held, and a handler that rewrote the field had that rewrite discarded.
+
+SetupFrame_x64 now stores ContextBackup->GuestSignalMask (the guest-visible mask saved on handler entry, before it
+is widened for the handler: exactly sigmask_to_save()) in uc_sigmask.val[0] and zeroes the rest, so no
+uninitialised guest stack is exposed. RestoreThreadState installs guest_uctx->uc_sigmask.val[0] instead of the
+saved value, so sigreturn honours the field the way the kernel does; an untouched frame still restores the
+interrupted mask.
+
+tests/signal-frame covers the field on delivery and both sigreturn paths (restore the interrupted mask; install a
+handler rewrite).
+---
+ .../LinuxSyscalls/SignalDelegator.cpp             | 15 ++++++++++++---
+ .../SignalDelegator/GuestFramesManagement.cpp     |  9 +++++++++
+ 2 files changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+index 77e9baf94..960d3e6bd 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -273,9 +273,18 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+     SigTrace::Log(ThreadObject->ThreadInfo.TID, SigTrace::SigReturn, 0, Thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RSP],
+                   Context->GuestSignalMask);
+     if (Type != RestoreType::TYPE_PAUSE && SignalMaskFix()) {
+-      // The guest handler is done: the guest-visible mask goes back to what the interrupted code had, and anything that became
+-      // unmasked and was only recorded as pending is raised again.
+-      ThreadObject->SignalInfo.CurrentSignalMask.Val = Context->GuestSignalMask;
++      // The guest handler is done: the guest-visible mask goes back to what the handler left in the frame's uc_sigmask,
++      // which is what Linux installs (signal_64.c rt_sigreturn reads frame->uc.uc_sigmask and calls set_current_blocked
++      // before restoring the context). For an untouched frame that is the interrupted mask sigmask_to_save() wrote on
++      // delivery, i.e. Context->GuestSignalMask; a handler that saved or rewrote uc_sigmask gets its value honoured.
++      // The ia32 frames use a different layout, so only the 64-bit path takes the field; anything that became unmasked
++      // and was only recorded as pending is raised again either way.
++      uint64_t NewGuestMask = Context->GuestSignalMask;
++      if (Is64BitMode && Context->UContextLocation) {
++        auto* GuestUContext = reinterpret_cast<FEXCore::x86_64::ucontext_t*>(Context->UContextLocation);
++        NewGuestMask = GuestUContext->uc_sigmask.val[0];
++      }
++      ThreadObject->SignalInfo.CurrentSignalMask.Val = NewGuestMask;
+       CheckForPendingSignals(ThreadObject);
+     }
+   }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+index 444530e0a..8073da305 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+@@ -594,6 +594,15 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
+   guest_uctx->uc_stack.ss_sp = GuestStack->ss_sp;
+   guest_uctx->uc_stack.ss_size = GuestStack->ss_size;
+ 
++  // Linux's setup_rt_frame stores sigmask_to_save() in frame->uc.uc_sigmask (signal_64.c:166,190), and whichever sigset_t
++  // the handler leaves there is what rt_sigreturn installs (signal_64.c:256 -> set_current_blocked). ContextBackup holds
++  // the guest-visible mask of the interrupted code, saved on handler entry before it was widened for the handler: this is
++  // exactly sigmask_to_save(). FEX previously left this field as whatever the zeroed stack happened to contain, so a
++  // handler (glibc, an unwinder, Wine) reading uc_sigmask saw an empty mask. The kernel only ever writes the low 64 bits;
++  // zero the rest so no uninitialised guest stack is exposed.
++  memset(guest_uctx->uc_sigmask.val, 0, sizeof(guest_uctx->uc_sigmask.val));
++  guest_uctx->uc_sigmask.val[0] = ContextBackup->GuestSignalMask;
++
+   // Apparently RAX is always set to zero in case of badly misbehaving C applications and variadics.
+   Frame->State.gregs[FEXCore::X86State::REG_RAX] = 0;
+   Frame->State.gregs[FEXCore::X86State::REG_RDI] = Signal;
+-- 
+2.44.0
+

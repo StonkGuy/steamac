@@ -1,0 +1,103 @@
+From a560919110ad274750fe5e2e91812ceb3eb53491 Mon Sep 17 00:00:00 2001
+From: build <build@invalid>
+Date: Thu, 8 Oct 2026 20:37:07 +0300
+Subject: [PATCH 14/15] ptrace: answer unknown GETREGSET/SETREGSET types with
+ -EINVAL, and serve NT_X86_XSTATE
+
+kernel/ptrace.c ptrace_regset() looks the requested regset type up in the
+target's regset view and returns -EINVAL for a type that is not there; it never
+returns -EPERM. NT_X86_XSTATE (0x202) is a known x86-64 regset (the xsave area)
+and succeeds.
+
+FEX emulated only NT_PRSTATUS and NT_PRFPREG and turned every other type into
+-EPERM, so Wine's unwind code, which reads NT_X86_XSTATE, got a bogus error.
+
+Return -EINVAL for an unknown type and add a shadow round-trip for NT_X86_XSTATE.
+FEX does not model the xsave vector state, so the shadow stays zero-filled - the
+emulated process's extended state is empty - rather than synthesising a fake
+xstate_bv. NT_ARM_* types remain -EINVAL: they do not exist in an x86-64 view.
+
+Base: FEX-2610 14c92681 + patches 0001-0010.
+---
+ .../LinuxSyscalls/PtraceEmu.cpp               | 44 ++++++++++++++++++-
+ 1 file changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
+index 1e23ab8d0..db5103cae 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
+@@ -32,6 +32,11 @@ $end_info$
+ 
+ namespace FEX::HLE::PtraceEmu {
+ namespace {
++  // x86-64 regset type for the extended (xsave) state. The host headers are aarch64 and do not define it.
++#ifndef NT_X86_XSTATE
++  constexpr uintptr_t NT_X86_XSTATE = 0x202;
++#endif
++
+   // Layout of the x86-64 `struct user_regs_struct` (slot indices).
+   enum UserReg : unsigned {
+     R15, R14, R13, R12, Rbp, Rbx, R11, R10, R9, R8, Rax, Rcx, Rdx, Rsi, Rdi, OrigRax, Rip, Cs, Eflags, Rsp, Ss, FsBase, GsBase, Ds, Es, Fs, Gs,
+@@ -315,6 +320,10 @@ namespace {
+     uintptr_t StaticAddr = 0;   // otherwise: address of the tracee image's static SharedState
+     std::array<uint8_t, 512> FpRegs {}; // shadow of the tracee's x87/SSE state for NT_PRFPREG round trips
+     bool FpValid = false;
++    std::array<uint8_t, 4096> XState {}; // shadow of the tracee's extended state for NT_X86_XSTATE round trips
++    // FEX does not model the xsave vector state, so this stays zero-filled (the emulated process has no
++    // extended state); it exists so a tracer gets data instead of the -EPERM an unknown regset used to give.
++    bool XStateValid = false;
+   };
+   std::mutex RemotesLock;
+   std::unordered_map<pid_t, Remote> Remotes;
+@@ -500,6 +509,15 @@ namespace {
+     return WriteWord(Pid, offsetof(SharedState, DebugRegs) + 7 * sizeof(uint64_t), Value) ? 0 : -ESRCH;
+   }
+ 
++  Remote* XStateState(pid_t Pid) {
++    std::lock_guard lk(RemotesLock);
++    Remote* R = Lookup(Pid);
++    if (R && !R->XStateValid) {
++      R->XStateValid = true;
++    }
++    return R;
++  }
++
+   Remote* FpState(pid_t Pid) {
+     std::lock_guard lk(RemotesLock);
+     Remote* R = Lookup(Pid);
+@@ -873,7 +891,31 @@ bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Res
+       *Result = 0;
+       return true;
+     }
+-    return false;
++
++    if (NtType == NT_X86_XSTATE) {
++      // Known x86-64 regset: Linux returns the xstate data (or -EINVAL if iov_len is not a multiple of the
++      // regset size). FEX does not track the vector state, so the shadow is zero-filled, but the request
++      // succeeds with data instead of returning -EPERM for an unknown type.
++      Remote* R = XStateState(Pid);
++      if (!R) {
++        *Result = static_cast<uint64_t>(-ESRCH);
++        return true;
++      }
++      const size_t Len = std::min(Iov->iov_len, R->XState.size());
++      if (Get) {
++        std::memcpy(Iov->iov_base, R->XState.data(), Len);
++      } else {
++        std::memcpy(R->XState.data(), Iov->iov_base, Len);
++      }
++      Iov->iov_len = Len;
++      *Result = 0;
++      return true;
++    }
++
++    // Any other regset (e.g. the NT_ARM_* sets, which do not exist in the x86-64 view) is unknown to this
++    // emulated kernel: ptrace_regset() returns -EINVAL for !regset, never -EPERM (kernel/ptrace.c).
++    *Result = static_cast<uint64_t>(-EINVAL);
++    return true;
+   }
+ 
+   default: return false;
+-- 
+2.44.0
+

@@ -1,0 +1,184 @@
+From a2385c46a75a1cb7a757d7afe95d7ca5e5cfe39b Mon Sep 17 00:00:00 2001
+From: build <build@invalid>
+Date: Thu, 8 Oct 2026 20:36:49 +0300
+Subject: [PATCH 11/15] arch_prctl: honour ARCH_SET_CPUID/ARCH_GET_CPUID
+
+Real Linux on a CPU with X86_FEATURE_CPUID_FAULT: arch_prctl(ARCH_SET_CPUID, 0)
+returns 0, CPUID from that thread then raises #GP, and a user-mode #GP is
+delivered as SIGSEGV with si_code SI_KERNEL (arch/x86/kernel/process.c
+set_cpuid_mode / get_cpuid_mode; arch/x86/kernel/traps.c gp_user_force_sig_segv).
+Without the feature, ARCH_SET_CPUID returns -ENODEV.
+
+FEX returned a hardcoded 1 from ARCH_GET_CPUID and -ENODEV from ARCH_SET_CPUID,
+and CPUID always executed transparently - the equivalent of a pre-2013 CPU.
+
+Add an off-by-default EnableCPUIDFaulting option. When a thread calls
+ARCH_SET_CPUID(0), CpuStateFrame::CPUIDFault is set and OpDispatchBuilder::CPUIDOp
+emits SIGSEGV/SI_KERNEL at the CPUID instruction instead of executing it;
+ARCH_GET_CPUID reports the live state. The default (option off) is unchanged, so
+a guest that never asks for faulting sees the same behaviour as before.
+
+Base: FEX-2610 14c92681 + patches 0001-0010.
+---
+ .../Source/Interface/Config/Config.json.in    | 10 ++++++
+ FEXCore/Source/Interface/Context/Context.h    |  1 +
+ .../Interface/Core/OpcodeDispatcher.cpp       | 32 +++++++++++++++++++
+ FEXCore/include/FEXCore/Core/CoreState.h      |  8 +++++
+ .../LinuxSyscalls/Syscalls/Thread.cpp         | 16 +++++++---
+ .../LinuxSyscalls/ThreadManager.cpp           |  4 +++
+ .../LinuxSyscalls/ThreadManager.h             |  2 ++
+ 7 files changed, 68 insertions(+), 5 deletions(-)
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index c5daac14d..85dec666e 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -707,6 +707,16 @@
+           "Should only be used for applications that have issues with this set."
+         ]
+       },
++      "EnableCPUIDFaulting": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "Honour ARCH_SET_CPUID. When a guest thread calls arch_prctl(ARCH_SET_CPUID, 0), CPUID from that",
++          "thread raises a #GP (SIGSEGV, si_code SI_KERNEL) like Linux with a CPUID-faulting CPU, instead of",
++          "executing transparently. Off by default, so a guest that never asks for it is unaffected."
++        ]
++      },
+       "StartupSleep": {
+         "Type": "uint32",
+         "Default": "0",
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index 925b35956..1e6aae7c5 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -358,6 +358,7 @@ public:
+     FEX_CONFIG_OPT(SingleStepConfig, SINGLESTEP);
+     FEX_CONFIG_OPT(GdbServer, GDBSERVER);
+     FEX_CONFIG_OPT(Is64BitMode, IS64BIT_MODE);
++    FEX_CONFIG_OPT(EnableCPUIDFaulting, ENABLECPUIDFAULTING);
+     FEX_CONFIG_OPT(TSOEnabled, TSOENABLED);
+     FEX_CONFIG_OPT(VectorTSOEnabled, VECTORTSOENABLED);
+     FEX_CONFIG_OPT(MemcpySetTSOEnabled, MEMCPYSETTSOENABLED);
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 8dc605ca7..0f7a00eee 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -1367,6 +1367,38 @@ void OpDispatchBuilder::CPUIDOp(OpcodeArgs) {
+   Ref Src = LoadGPRRegister(X86State::REG_RAX);
+   Ref Leaf = LoadGPRRegister(X86State::REG_RCX);
+ 
++  // ARCH_SET_CPUID(0) makes a real kernel (with CPUID faulting) raise #GP on CPUID from this thread; #GP in
++  // user mode is delivered as SIGSEGV with si_code SI_KERNEL (arch/x86/kernel/traps.c, force_sig). Emit that
++  // fault in the frontend when the per-thread flag is set, instead of executing CPUID transparently.
++  if (CTX->Config.EnableCPUIDFaulting()) {
++    auto FaultBlock = CreateNewCodeBlockAfter(GetCurrentBlock());
++    auto ContinueBlock = CreateNewCodeBlockAfter(FaultBlock);
++
++    auto Fault = _LoadContextGPR(OpSize::i32Bit, offsetof(FEXCore::Core::CpuStateFrame, CPUIDFault));
++    // Fault == 0 (CPUID enabled): fall through to the normal CPUID. Non-zero: take the #GP block.
++    auto CondJump_ = CondJump(Fault, CondClass::EQ);
++    SetTrueJumpTarget(CondJump_, ContinueBlock);
++    SetFalseJumpTarget(CondJump_, FaultBlock);
++
++    SetCurrentCodeBlock(FaultBlock);
++    StartNewBlock();
++
++    // The #GP is a fault, so RIP points at the CPUID instruction itself.
++    auto NewRIP = GetRelocatedPC(Op, -Op->InstSize);
++    _StoreContextGPR(GetGPROpSize(), NewRIP, offsetof(FEXCore::Core::CPUState, rip));
++
++    IR::BreakDefinition Reason {};
++    Reason.ErrorRegister = 0;
++    Reason.Signal = Core::FAULT_SIGSEGV;
++    Reason.TrapNumber = X86State::X86_TRAPNO_GP;
++    Reason.si_code = 0x80; // SI_KERNEL
++    BlockSetRIP = true;
++    Break(Reason);
++
++    SetCurrentCodeBlock(ContinueBlock);
++    StartNewBlock();
++  }
++
+   Ref RAX = _AllocateGPR(false);
+   Ref RBX = _AllocateGPR(false);
+   Ref RCX = _AllocateGPR(false);
+diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
+index 80514bfdc..349355d34 100644
+--- a/FEXCore/include/FEXCore/Core/CoreState.h
++++ b/FEXCore/include/FEXCore/Core/CoreState.h
+@@ -419,6 +419,14 @@ struct CpuStateFrame {
+ 
+   uint32_t SignalHandlerRefCounter {};
+ 
++  /**
++   * @brief Non-zero while a #GP on CPUID should be raised (arch_prctl ARCH_SET_CPUID(0)).
++   *
++   * Linux implements this by turning on CPUID faulting in the CPU, after which a user CPUID raises #GP;
++   * the kernel then delivers SIGSEGV with si_code SI_KERNEL. FEX has to emit the fault itself.
++   */
++  uint32_t CPUIDFault {};
++
+   struct alignas(8) SynchronousFaultDataStruct {
+     bool FaultToTopAndGeneratedException {};
+     uint8_t Signal;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
+index 0a51b98a3..c6a48e762 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Thread.cpp
+@@ -546,11 +546,17 @@ void RegisterThread(FEX::HLE::SyscallHandler* Handler) {
+       Result = -EINVAL; // We don't support CET, return EINVAL
+       break;
+     case 0x1011: // ARCH_GET_CPUID
+-      return 1;
+-      break;
+-    case 0x1012:      // ARCH_SET_CPUID
+-      return -ENODEV; // Claim we don't support faulting on CPUID
+-      break;
++      // Linux returns !TIF_NOCPUID (arch/x86/kernel/process.c get_cpuid_mode): the live faulting state.
++      // Without the config option FEX behaves like a CPU without CPUID faulting (always enabled).
++      return FEX::HLE::_SyscallHandler->TM.EnableCPUIDFaulting() ? (Frame->CPUIDFault == 0) : 1;
++    case 0x1012: // ARCH_SET_CPUID
++      if (!FEX::HLE::_SyscallHandler->TM.EnableCPUIDFaulting()) {
++        // No CPUID-faulting support: a real kernel returns -ENODEV here.
++        return -ENODEV;
++      }
++      // cpuid_enabled != 0 enables CPUID, 0 disables it (which makes CPUID raise #GP; see CPUIDOp).
++      Frame->CPUIDFault = addr ? 0 : 1;
++      return 0;
+     default:
+       LogMan::Msg::EFmt("Unknown prctl: 0x{:x}", code);
+       Result = -EINVAL;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+index ae0bc9704..de69906db 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+@@ -253,6 +253,10 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+   if (InheritThread) {
+     FEX::HLE::_SyscallHandler->SeccompEmulator.InheritSeccompFilters(InheritThread, ThreadStateObject);
+     ThreadStateObject->persona = InheritThread->persona;
++    // arch_prctl(ARCH_SET_CPUID, 0) is a per-thread flag; a real kernel inherits it across fork and clone
++    // (TIF_NOCPUID survives arch_dup_task_struct/copy_thread). A clone'd thread must not silently re-enable
++    // CPUID when its parent disabled it.
++    Frame->CPUIDFault = InheritThread->Thread->CurrentFrame->CPUIDFault;
+   } else {
+     ThreadStateObject->persona = ::personality(0xffffffff);
+   }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+index 86de8da99..075336dda 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+@@ -195,6 +195,8 @@ public:
+     return static_cast<FEX::HLE::ThreadStateObject*>(Thread->FrontendPtr);
+   }
+ 
++  FEX_CONFIG_OPT(EnableCPUIDFaulting, ENABLECPUIDFAULTING);
++
+   FEX::HLE::ThreadStateObject* CreateThread(const FEXCore::Core::CPUState* NewThreadState = nullptr, uint64_t ParentTID = 0,
+                                             FEX::HLE::ThreadStateObject* InheritThread = nullptr);
+   void TrackThread(FEX::HLE::ThreadStateObject* Thread) {
+-- 
+2.44.0
+

@@ -1,0 +1,77 @@
+From be9a051b80a56a12e655345b7393ae01f4c43c20 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 22:07:41 +0300
+Subject: [PATCH] Signals: emit an XSAVE fpstate with the FP_XSTATE_MAGIC1/2
+ trailer on x86-64
+
+arch/x86/kernel/fpu/signal.c writes FP_XSTATE_MAGIC1 into sw_reserved and FP_XSTATE_MAGIC2 immediately after the
+user state, with sw_reserved.xstate_size = user_size and extended_size = user_size + 4. FEX only wrote the magic
+fields when AVX was enabled, and used sizeof(xstate) -- which carries a trailing magic2 member -- so a handler
+following xstate_size to find the trailer read past it.
+
+user_size is the legacy FXSAVE area, the xsave header and (with AVX) the ymmh region: offsetof(xstate, ymmh)
+plus ymmh when AVX is on. The ia32 compat frame keeps its own layout.
+---
+ .../SignalDelegator/GuestFramesManagement.cpp | 32 +++++++++++++++----
+ 1 file changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+index e4053cdd8..8fb800215 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+@@ -19,6 +19,7 @@ $end_info$
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstring>
++#include <type_traits>
+ 
+ namespace FEX::HLE {
+ constexpr uint32_t X86_SA_RESTORER = 0x04000000;
+@@ -106,19 +107,38 @@ template<typename T>
+ static void SetXStateInfo(T* xstate, bool is_avx_enabled) {
+   auto* fpstate = &xstate->fpstate;
+ 
+-  fpstate->sw_reserved.magic1 = is_avx_enabled ? FEXCore::x86_64::fpx_sw_bytes::FP_XSTATE_MAGIC_1 : 0;
+-  fpstate->sw_reserved.extended_size = is_avx_enabled ? sizeof(T) : 0;
++  // The fpstate is an XSAVE area whenever the guest CPU advertises XSAVE, which is the same condition that makes FEX
++  // hand the guest a 64-byte xsave header. The kernel keys this off use_xsave() (X86_FEATURE_XSAVE), not off AVX: a
++  // CPU with only x87/SSE enabled (XCR0 = 0x3) still gets an xstate frame with these magic fields.
++  fpstate->sw_reserved.magic1 = FEXCore::x86_64::fpx_sw_bytes::FP_XSTATE_MAGIC_1;
+ 
+   fpstate->sw_reserved.xfeatures |= FEXCore::x86_64::fpx_sw_bytes::FEATURE_FP | FEXCore::x86_64::fpx_sw_bytes::FEATURE_SSE;
+   if (is_avx_enabled) {
+     fpstate->sw_reserved.xfeatures |= FEXCore::x86_64::fpx_sw_bytes::FEATURE_YMM;
+   }
+ 
+-  fpstate->sw_reserved.xstate_size = fpstate->sw_reserved.extended_size;
++  if constexpr (std::is_same_v<T, FEXCore::x86_64::xstate>) {
++    // user_size is the state the kernel actually saves: the legacy FXSAVE area, the xsave header, and -- only when
++    // AVX is enabled -- the ymmh region. It is deliberately NOT sizeof(T): FEX's struct has a trailing magic2 member
++    // that is not part of the user state, so sizeof(T) would put the trailer 8 bytes late.
++    const uint32_t UserSize = offsetof(FEXCore::x86_64::xstate, ymmh) + (is_avx_enabled ? sizeof(FEXCore::x86_64::ymmh_state) : 0);
++    fpstate->sw_reserved.xstate_size = UserSize;
++    fpstate->sw_reserved.extended_size = UserSize + sizeof(uint32_t); // + FP_XSTATE_MAGIC2_SIZE
+ 
+-  if (is_avx_enabled) {
+-    xstate->xstate_hdr.xfeatures = 0;
+-    xstate->magic2.magic = FEXCore::x86_64::fpx_sw_bytes::FP_XSTATE_MAGIC_2;
++    // The xsave header's xfeatures carries the same mask (the kernel ORs the legacy FP/SSE bits in before writing).
++    xstate->xstate_hdr.xfeatures = fpstate->sw_reserved.xfeatures;
++
++    // FP_XSTATE_MAGIC2 sits immediately after the user state, i.e. at fpstate + user_size.
++    *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(fpstate) + UserSize) =
++      FEXCore::x86_64::fpx_sw_bytes::FP_XSTATE_MAGIC_2;
++  } else {
++    // ia32 compat frame: keep the existing layout.
++    fpstate->sw_reserved.extended_size = is_avx_enabled ? sizeof(T) : 0;
++    fpstate->sw_reserved.xstate_size = fpstate->sw_reserved.extended_size;
++    if (is_avx_enabled) {
++      xstate->xstate_hdr.xfeatures = 0;
++      xstate->magic2.magic = FEXCore::x86_64::fpx_sw_bytes::FP_XSTATE_MAGIC_2;
++    }
+   }
+ }
+ 
+-- 
+2.44.0
+

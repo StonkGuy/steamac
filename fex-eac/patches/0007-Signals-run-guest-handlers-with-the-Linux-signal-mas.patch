@@ -1,0 +1,473 @@
+From 7c4a6902214ddedcb4a861002db0938149869677 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 10:54:18 +0300
+Subject: [PATCH 7/9] Signals: run guest handlers with the Linux signal mask;
+ optional signal trace
+
+While a guest signal handler runs, Linux blocks (interrupted mask | sa_mask | the signal unless SA_NODEFER) and rt_sigreturn
+puts the interrupted mask back. FEX blocked only (sa_mask | signal) at the host and never touched its own guest-visible mask
+(CurrentSignalMask, what rt_sigprocmask reads) on handler entry or return. A handler that saves "the old mask", blocks a set
+around a server call and restores what it saved, as Wine's server_enter/leave_uninterrupted_section does inside its SIGUSR1
+(thread suspend) handler, therefore unblocked the signal it was running for and let it nest, which Wine's per-thread wait
+stack and wake-up reply protocol are not written for. With Wine's fsync a thread blocked in futex_waitv can only be suspended
+by that signal, and a Windows program that suspends and resumes threads (a garbage collector's world stop) wedges threads
+blocked in socket/pipe reads: a reader stops waking although data arrives.
+
+FEX_SIGNALMASKFIX=1 (SignalMaskFix) saves the interrupted guest mask in the context backup on handler entry, sets the guest
+mask and the host mask to interrupted | sa_mask | signal (minus the signals FEX needs unblocked), restores the saved mask at
+rt_sigreturn and re-raises signals that were recorded as pending and became unmasked.
+
+FEX_SIGNALTRACE=1 (SignalTrace) logs host signal arrival, masking decisions, deferrals, delivery, rt_sigreturn, rt_sigprocmask
+made inside a handler and kill/tkill/tgkill into a lock-free ring in /dev/shm/fex-<pid>-sigtrace (async-signal-safe), to follow
+a signal from sender to handler.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../Source/Interface/Config/Config.json.in    | 19 ++++++
+ .../LinuxEmulation/ArchHelpers/MContext.h     |  2 +
+ Source/Tools/LinuxEmulation/CMakeLists.txt    |  1 +
+ .../LinuxSyscalls/SignalDelegator.cpp         | 50 +++++++++++++++
+ .../LinuxSyscalls/SignalDelegator.h           |  2 +
+ .../LinuxSyscalls/SignalTrace.cpp             | 32 ++++++++++
+ .../LinuxSyscalls/SignalTrace.h               | 63 +++++++++++++++++++
+ .../LinuxSyscalls/Syscalls/Passthrough.cpp    | 43 +++++++++++--
+ .../LinuxSyscalls/x64/EPoll.cpp               |  5 ++
+ 9 files changed, 212 insertions(+), 5 deletions(-)
+ create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.cpp
+ create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.h
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index 5e94fdf39..c5daac14d 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -591,6 +591,25 @@
+           "ProfileSampleHz samples every guest thread instead of only the main one."
+         ]
+       },
++      "SignalTrace": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "false",
++        "Desc": [
++          "Records guest signal handling events (host signal arrival, masking decisions, delivery, rt_sigreturn, sigprocmask, kill/tgkill)",
++          "into a ring buffer in /dev/shm/fex-<pid>-sigtrace. For diagnosing lost signals; decode with tools/harness/sigtrace.py."
++        ]
++      },
++      "SignalMaskFix": {
++        "Type": "bool",
++        "Default": "true",
++        "AffectsCodeGen": "false",
++        "Desc": [
++          "Run guest signal handlers with the signal mask Linux gives them (the interrupted mask plus sa_mask and the signal)",
++          "and restore the interrupted mask at rt_sigreturn. With false FEX blocks only sa_mask and the signal during the handler and keeps",
++          "a stale view of the mask afterwards, so a signal handler that restores its saved mask can unblock the signal it is running for."
++        ]
++      },
+       "SMCHotPageFaults": {
+         "Type": "uint32",
+         "Default": "32",
+diff --git a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
+index 02bb6bfef..e2ed6b4dc 100644
+--- a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
++++ b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
+@@ -41,6 +41,7 @@ struct X86ContextBackup {
+   uint64_t sa_mask;
+   uint16_t InSyscallInfo;
+   bool FaultToTopAndGeneratedException;
++  uint64_t GuestSignalMask; ///< guest-visible signal mask at the time the guest handler was entered (restored at rt_sigreturn)
+ 
+   // Guest state
+   int Signal;
+@@ -68,6 +69,7 @@ struct ArmContextBackup {
+   uint64_t sa_mask;
+   uint16_t InSyscallInfo;
+   bool FaultToTopAndGeneratedException;
++  uint64_t GuestSignalMask; ///< guest-visible signal mask at the time the guest handler was entered (restored at rt_sigreturn)
+ 
+   // Guest state
+   int Signal;
+diff --git a/Source/Tools/LinuxEmulation/CMakeLists.txt b/Source/Tools/LinuxEmulation/CMakeLists.txt
+index 500e00158..3f02104ea 100644
+--- a/Source/Tools/LinuxEmulation/CMakeLists.txt
++++ b/Source/Tools/LinuxEmulation/CMakeLists.txt
+@@ -12,6 +12,7 @@ add_library(LinuxEmulation STATIC
+   LinuxSyscalls/FileManagement.cpp
+   LinuxSyscalls/PtraceEmu.cpp
+   LinuxSyscalls/SamplingProfiler.cpp
++  LinuxSyscalls/SignalTrace.cpp
+   LinuxSyscalls/LinuxAllocator.cpp
+   LinuxSyscalls/Seccomp/SeccompEmulator.cpp
+   LinuxSyscalls/Seccomp/BPFEmitter.cpp
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+index ffc178e5a..9a0104d84 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -9,6 +9,7 @@ $end_info$
+ #include "LinuxSyscalls/SignalDelegator.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/PtraceEmu.h"
++#include "LinuxSyscalls/SignalTrace.h"
+ 
+ #include <FEXCore/Core/Context.h>
+ #include <FEXCore/Core/CoreState.h>
+@@ -172,6 +173,7 @@ ArchHelpers::Context::ContextBackup* SignalDelegator::StoreThreadState(FEXCore::
+   Context->UContextLocation = 0;
+   Context->SigInfoLocation = 0;
+   Context->InSyscallInfo = 0;
++  Context->GuestSignalMask = 0;
+ 
+   // Store fault to top status and then reset it
+   Context->FaultToTopAndGeneratedException = Thread->CurrentFrame->SynchronousFaultData.FaultToTopAndGeneratedException;
+@@ -180,6 +182,8 @@ ArchHelpers::Context::ContextBackup* SignalDelegator::StoreThreadState(FEXCore::
+   return Context;
+ }
+ 
++static void CheckForPendingSignals(const FEX::HLE::ThreadStateObject* Thread);
++
+ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thread, void* ucontext, RestoreType Type) {
+   uint64_t OldSP {};
+   if (Type == RestoreType::TYPE_PAUSE) [[unlikely]] {
+@@ -258,6 +262,18 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+   // Restore host state
+   ArchHelpers::Context::RestoreContext(ucontext, Context);
+ 
++  {
++    auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread);
++    SigTrace::Log(ThreadObject->ThreadInfo.TID, SigTrace::SigReturn, 0, Thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RSP],
++                  Context->GuestSignalMask);
++    if (Type != RestoreType::TYPE_PAUSE && SignalMaskFix()) {
++      // The guest handler is done: the guest-visible mask goes back to what the interrupted code had, and anything that became
++      // unmasked and was only recorded as pending is raised again.
++      ThreadObject->SignalInfo.CurrentSignalMask.Val = Context->GuestSignalMask;
++      CheckForPendingSignals(ThreadObject);
++    }
++  }
++
+   // Reset the guest state
+   memcpy(&Thread->CurrentFrame->State, &Context->GuestState, sizeof(FEXCore::Core::CPUState));
+ 
+@@ -285,6 +301,8 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadState* Thread, int Signal, void* info, void* ucontext,
+                                                   GuestSigAction* GuestAction, stack_t* GuestStack) {
+   auto ContextBackup = StoreThreadState(Thread, Signal, ucontext);
++  // Remember the guest-visible mask of the interrupted code: rt_sigreturn puts it back (SignalMaskFix).
++  ContextBackup->GuestSignalMask = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread)->SignalInfo.CurrentSignalMask.Val;
+ 
+   auto Frame = Thread->CurrentFrame;
+ 
+@@ -607,6 +625,8 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+   auto SigInfo = *static_cast<siginfo_t*>(Info);
+ 
+   auto MustDeferSignal = (Thread->CurrentFrame->State.DeferredSignalRefCount.Load() != 0);
++  SigTrace::Log(ThreadObject->ThreadInfo.TID, SigTrace::HostArrive, Signal, ThreadObject->SignalInfo.CurrentSignalMask.Val,
++                (static_cast<uint64_t>(MustDeferSignal) << 32) | static_cast<uint32_t>(SigInfo.si_code));
+   if (Signal == SIGSEGV && SigInfo.si_code == SEGV_ACCERR && SigInfo.si_addr == reinterpret_cast<void*>(&Thread->InterruptFaultPage)) {
+     if (!MustDeferSignal) {
+       // We just reached the end of the outermost signal-deferring section and faulted to check for pending signals.
+@@ -670,6 +690,8 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+     // This allows us to maintain the expected signal mask through the guest signal handling and then all the way back again
+     sigmask_val[0] = GetNewSigMask(Signal);
+ 
++    SigTrace::Log(ThreadObject->ThreadInfo.TID, SigTrace::Deferred, Signal, 0, 0);
++
+     // Now update the faulting page permissions so it will fault on write.
+     mprotect(reinterpret_cast<void*>(&Thread->InterruptFaultPage), sizeof(Thread->InterruptFaultPage), PROT_NONE);
+ 
+@@ -682,6 +704,7 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+     // This signal is masked, must defer until the guest updates the signal mask.
+     // Add it to the pending signal list
+     ThreadObject->SignalInfo.PendingSignals |= 1ULL << (Signal - 1);
++    SigTrace::Log(ThreadObject->ThreadInfo.TID, SigTrace::Masked, Signal, ThreadObject->SignalInfo.CurrentSignalMask.Val, ThreadObject->SignalInfo.PendingSignals);
+     return;
+   }
+ 
+@@ -703,6 +726,23 @@ void SignalDelegator::HandleGuestSignal(FEX::HLE::ThreadStateObject* ThreadObjec
+     if (Handler.GuestHandler &&
+         Handler.GuestHandler(Thread, Signal, &SigInfo, UContext, &Handler.GuestAction, &ThreadObject->SignalInfo.GuestAltStack)) {
+       uint64_t NewMask = GetNewSigMask(Signal);
++      if (SignalMaskFix()) {
++        // Linux blocks (interrupted mask | sa_mask | the signal itself unless SA_NODEFER) while the handler runs, and the guest sees
++        // exactly that when it reads or restores the mask; rt_sigreturn puts the interrupted mask back (RestoreThreadState).
++        uint64_t GuestNew = ThreadObject->SignalInfo.CurrentSignalMask.Val | Handler.GuestAction.sa_mask.Val;
++        if (!(Handler.GuestAction.sa_flags & SA_NODEFER)) {
++          GuestNew |= 1ULL << (Signal - 1);
++        }
++        GuestNew &= ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
++        ThreadObject->SignalInfo.CurrentSignalMask.Val = GuestNew;
++        NewMask = GuestNew;
++        for (size_t i = 0; i < MAX_SIGNALS; ++i) {
++          if (HostHandlers[i + 1].Required.load(std::memory_order_relaxed)) {
++            NewMask &= ~(1ULL << i); // never mask our required signals at the host level
++          }
++        }
++      }
++      SigTrace::Log(ThreadObject->ThreadInfo.TID, SigTrace::Delivered, Signal, reinterpret_cast<uint64_t>(Handler.GuestAction.sigaction_handler.sigaction), NewMask);
+ 
+       // Update our host signal mask so we don't hit race conditions with signals
+       // This allows us to maintain the expected signal mask through the guest signal handling and then all the way back again
+@@ -889,6 +929,10 @@ SignalDelegator::SignalDelegator(FEXCore::Context::Context* _CTX, const std::str
+   , ApplicationName {ApplicationName}
+   , SupportsAVX {SupportsAVX}
+   , SupportsSVE256 {SupportsSVE256} {
++  if (SignalTrace()) {
++    SigTrace::Init();
++  }
++
+   // Signal zero isn't real
+   HostHandlers[0].Installed = true;
+ 
+@@ -1210,6 +1254,7 @@ static void CheckForPendingSignals(const FEX::HLE::ThreadStateObject* Thread) {
+   if (PendingSignals != 0) {
+     for (int i = 0; i < 64; ++i) {
+       if (PendingSignals & (1ULL << i)) {
++        SigTrace::Log(Thread->ThreadInfo.TID, SigTrace::Reraise, i + 1, Thread->SignalInfo.CurrentSignalMask.Val, Thread->SignalInfo.PendingSignals);
+         FHU::Syscalls::tgkill(Thread->ThreadInfo.PID, Thread->ThreadInfo.TID, i + 1);
+         // We might not even return here which is spooky
+       }
+@@ -1250,6 +1295,11 @@ uint64_t SignalDelegator::GuestSigProcMask(FEX::HLE::ThreadStateObject* Thread,
+     }
+ 
+     ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &HostMask, nullptr, 8);
++    // Wine brackets every server call with a block/restore pair (tens of thousands per second): only the ones made inside a guest
++    // signal handler are interesting.
++    if (Thread->Thread->CurrentFrame->SignalHandlerRefCounter != 0) {
++      SigTrace::Log(Thread->ThreadInfo.TID, SigTrace::ProcMask, how, *set, Thread->SignalInfo.CurrentSignalMask.Val);
++    }
+   }
+ 
+   if (oldset) {
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
+index c37d82c3e..5d3ad1a07 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
+@@ -184,6 +184,8 @@ private:
+   FEXCore::Context::Context* CTX;
+ 
+   FEX_CONFIG_OPT(Is64BitMode, IS64BIT_MODE);
++  FEX_CONFIG_OPT(SignalMaskFix, SIGNALMASKFIX);
++  FEX_CONFIG_OPT(SignalTrace, SIGNALTRACE);
+   const fextl::string ApplicationName;
+   FEX_CONFIG_OPT(HalfBarrierTSOEnabled, HALFBARRIERTSOENABLED);
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.cpp
+new file mode 100644
+index 000000000..703281c47
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.cpp
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: MIT
++#include "LinuxSyscalls/SignalTrace.h"
++
++#include <fcntl.h>
++#include <string>
++#include <sys/mman.h>
++#include <unistd.h>
++
++namespace FEX::HLE::SigTrace {
++Rec* Buf = nullptr;
++std::atomic<uint32_t> Idx {0};
++
++void Init() {
++  if (Buf) {
++    return;
++  }
++  const std::string Path = "/dev/shm/fex-" + std::to_string(getpid()) + "-sigtrace";
++  const int fd = open(Path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
++  if (fd < 0) {
++    return;
++  }
++  if (ftruncate(fd, sizeof(Rec) * Recs) != 0) {
++    close(fd);
++    return;
++  }
++  void* Map = mmap(nullptr, sizeof(Rec) * Recs, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++  close(fd);
++  if (Map != MAP_FAILED) {
++    Buf = static_cast<Rec*>(Map);
++  }
++}
++} // namespace FEX::HLE::SigTrace
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.h
+new file mode 100644
+index 000000000..957143313
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.h
+@@ -0,0 +1,63 @@
++// SPDX-License-Identifier: MIT
++/*
++$info$
++tags: LinuxSyscalls|Debug
++desc: Optional in-memory trace of guest signal handling (FEX_SIGNALTRACE=1), for diagnosing lost signals
++$end_info$
++*/
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++
++namespace FEX::HLE::SigTrace {
++/**
++ * A lock-free ring of fixed-size records in /dev/shm/fex-<pid>-sigtrace. Log() is async-signal-safe (an atomic increment and
++ * plain stores), so it can be used from the host signal handlers. Decode with tools/harness/sigtrace.py.
++ */
++enum Event : uint16_t {
++  HostArrive = 1, ///< a host signal reached HandleGuestSignal: A = guest-visible mask, B = (deferral count << 32) | si_code
++  Masked = 2,     ///< consumed because FEX considers the signal masked and recorded as pending: A = mask, B = pending set
++  Deferred = 3,   ///< queued behind a signal-deferring section
++  Delivered = 4,  ///< a guest handler frame was set up: A = handler, B = new host mask
++  SigReturn = 5,  ///< guest rt_sigreturn: A = guest rsp
++  ProcMask = 6,   ///< guest rt_sigprocmask: Sig = how, A = set, B = mask afterwards
++  Reraise = 7,    ///< a pending signal was re-raised after being unmasked: A = mask, B = pending set
++  Kill = 8,       ///< guest kill/tkill/tgkill: Sig = signal, A = target pid/tid, B = tgid (tgkill)
++  Read16 = 9,     ///< guest read() of 16 bytes (Wine's wake-up replies) returned: Sig = fd, A = result, B = first 8 bytes read (or errno | 1<<63)
++  Write16 = 10,   ///< guest write() of 16 bytes returned: Sig = fd, A = result, B = first 8 bytes written (or errno | 1<<63)
++  EpollCtl = 11,  ///< guest epoll_ctl: Sig = op (1 add, 2 del, 3 mod), A = fd, B = events (| result << 32)
++};
++
++struct Rec {
++  uint64_t Tsc; ///< CNTVCT_EL0 (24 MHz on Apple silicon)
++  uint32_t Tid;
++  uint16_t Ev;
++  uint16_t Sig;
++  uint64_t A;
++  uint64_t B;
++};
++
++constexpr uint32_t Recs = 1u << 19; // 16 MiB
++extern Rec* Buf;
++extern std::atomic<uint32_t> Idx;
++
++/// Creates the ring if FEX_SIGNALTRACE is enabled. Call once at start-up.
++void Init();
++
++inline bool Enabled() {
++  return Buf != nullptr;
++}
++
++inline void Log(uint32_t Tid, uint16_t Ev, uint16_t Sig, uint64_t A, uint64_t B) {
++  if (!Buf) {
++    return;
++  }
++  uint64_t Tsc = 0;
++#if defined(__aarch64__)
++  asm volatile("mrs %0, cntvct_el0" : "=r"(Tsc));
++#endif
++  Rec& R = Buf[Idx.fetch_add(1, std::memory_order_relaxed) & (Recs - 1)];
++  R = {Tsc, Tid, Ev, Sig, A, B};
++}
++} // namespace FEX::HLE::SigTrace
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
+index 4e70474a8..45cf08548 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
+@@ -10,6 +10,11 @@ $end_info$
+ #include "LinuxSyscalls/x64/Syscalls.h"
+ #include "LinuxSyscalls/x32/Syscalls.h"
+ #include "LinuxSyscalls/PtraceEmu.h"
++#include "LinuxSyscalls/SignalTrace.h"
++
++#include <errno.h>
++#include <sys/syscall.h>
++#include <unistd.h>
+ 
+ #include <stdint.h>
+ #include <sys/epoll.h>
+@@ -211,8 +216,24 @@ uint64_t SyscallPassthrough7(FEXCore::Core::CpuStateFrame* Frame, uint64_t arg1,
+ #endif
+ 
+ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+-  REGISTER_SYSCALL_IMPL(read, SyscallPassthrough3<SYSCALL_DEF(read)>);
+-  REGISTER_SYSCALL_IMPL(write, SyscallPassthrough3<SYSCALL_DEF(write)>);
++  // Wine's thread wake-up protocol moves 16-byte records through a pipe per thread; with FEX_SIGNALTRACE those reads and writes
++  // (and their first 8 bytes, the wait cookie) go into the trace ring.
++  REGISTER_SYSCALL_IMPL(read, [](FEXCore::Core::CpuStateFrame* Frame, int fd, void* buf, size_t count) -> uint64_t {
++    uint64_t Result = ::syscall(SYSCALL_DEF(read), fd, buf, count);
++    if (count == 16 && SigTrace::Enabled()) {
++      const int Errno = errno;
++      SigTrace::Log(::syscall(SYS_gettid), SigTrace::Read16, fd, Result, Result == 16 ? *static_cast<const uint64_t*>(buf) : (1ULL << 63) | Errno);
++    }
++    SYSCALL_ERRNO();
++  });
++  REGISTER_SYSCALL_IMPL(write, [](FEXCore::Core::CpuStateFrame* Frame, int fd, const void* buf, size_t count) -> uint64_t {
++    uint64_t Result = ::syscall(SYSCALL_DEF(write), fd, buf, count);
++    if (count == 16 && SigTrace::Enabled()) {
++      const int Errno = errno;
++      SigTrace::Log(::syscall(SYS_gettid), SigTrace::Write16, fd, Result, Result == 16 ? *static_cast<const uint64_t*>(buf) : (1ULL << 63) | Errno);
++    }
++    SYSCALL_ERRNO();
++  });
+   REGISTER_SYSCALL_IMPL(lseek, SyscallPassthrough3<SYSCALL_DEF(lseek)>);
+   REGISTER_SYSCALL_IMPL(sched_yield, SyscallPassthrough0<SYSCALL_DEF(sched_yield)>);
+   REGISTER_SYSCALL_IMPL(msync, SyscallPassthrough3<SYSCALL_DEF(msync)>);
+@@ -230,7 +251,11 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+   REGISTER_SYSCALL_IMPL(getsockname, SyscallPassthrough3<SYSCALL_DEF(getsockname)>);
+   REGISTER_SYSCALL_IMPL(getpeername, SyscallPassthrough3<SYSCALL_DEF(getpeername)>);
+   REGISTER_SYSCALL_IMPL(socketpair, SyscallPassthrough4<SYSCALL_DEF(socketpair)>);
+-  REGISTER_SYSCALL_IMPL(kill, SyscallPassthrough2<SYSCALL_DEF(kill)>);
++  REGISTER_SYSCALL_IMPL(kill, [](FEXCore::Core::CpuStateFrame* Frame, pid_t pid, int sig) -> uint64_t {
++    SigTrace::Log(::syscall(SYS_gettid), SigTrace::Kill, sig, pid, 0);
++    uint64_t Result = ::syscall(SYSCALL_DEF(kill), pid, sig);
++    SYSCALL_ERRNO();
++  });
+   REGISTER_SYSCALL_IMPL(semget, SyscallPassthrough3<SYSCALL_DEF(semget)>);
+   REGISTER_SYSCALL_IMPL(msgget, SyscallPassthrough2<SYSCALL_DEF(msgget)>);
+   REGISTER_SYSCALL_IMPL(msgsnd, SyscallPassthrough4<SYSCALL_DEF(msgsnd)>);
+@@ -293,7 +318,11 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+   REGISTER_SYSCALL_IMPL(fgetxattr, SyscallPassthrough4<SYSCALL_DEF(fgetxattr)>);
+   REGISTER_SYSCALL_IMPL(flistxattr, SyscallPassthrough3<SYSCALL_DEF(flistxattr)>);
+   REGISTER_SYSCALL_IMPL(fremovexattr, SyscallPassthrough2<SYSCALL_DEF(fremovexattr)>);
+-  REGISTER_SYSCALL_IMPL(tkill, SyscallPassthrough2<SYSCALL_DEF(tkill)>);
++  REGISTER_SYSCALL_IMPL(tkill, [](FEXCore::Core::CpuStateFrame* Frame, pid_t tid, int sig) -> uint64_t {
++    SigTrace::Log(::syscall(SYS_gettid), SigTrace::Kill, sig, tid, 0);
++    uint64_t Result = ::syscall(SYSCALL_DEF(tkill), tid, sig);
++    SYSCALL_ERRNO();
++  });
+   REGISTER_SYSCALL_IMPL(sched_setaffinity, SyscallPassthrough3<SYSCALL_DEF(sched_setaffinity)>);
+   REGISTER_SYSCALL_IMPL(sched_getaffinity, SyscallPassthrough3<SYSCALL_DEF(sched_getaffinity)>);
+   REGISTER_SYSCALL_IMPL(io_setup, SyscallPassthrough2<SYSCALL_DEF(io_setup)>);
+@@ -303,7 +332,11 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+   REGISTER_SYSCALL_IMPL(remap_file_pages, SyscallPassthrough5<SYSCALL_DEF(remap_file_pages)>);
+   REGISTER_SYSCALL_IMPL(timer_getoverrun, SyscallPassthrough1<SYSCALL_DEF(timer_getoverrun)>);
+   REGISTER_SYSCALL_IMPL(timer_delete, SyscallPassthrough1<SYSCALL_DEF(timer_delete)>);
+-  REGISTER_SYSCALL_IMPL(tgkill, SyscallPassthrough3<SYSCALL_DEF(tgkill)>);
++  REGISTER_SYSCALL_IMPL(tgkill, [](FEXCore::Core::CpuStateFrame* Frame, pid_t tgid, pid_t tid, int sig) -> uint64_t {
++    SigTrace::Log(::syscall(SYS_gettid), SigTrace::Kill, sig, tid, tgid);
++    uint64_t Result = ::syscall(SYSCALL_DEF(tgkill), tgid, tid, sig);
++    SYSCALL_ERRNO();
++  });
+   REGISTER_SYSCALL_IMPL(mbind, SyscallPassthrough6<SYSCALL_DEF(mbind)>);
+   REGISTER_SYSCALL_IMPL(set_mempolicy, SyscallPassthrough3<SYSCALL_DEF(set_mempolicy)>);
+   REGISTER_SYSCALL_IMPL(get_mempolicy, SyscallPassthrough5<SYSCALL_DEF(get_mempolicy)>);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/EPoll.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/EPoll.cpp
+index d1ab9cdf8..84c612940 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/EPoll.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/x64/EPoll.cpp
+@@ -6,6 +6,7 @@ tags: LinuxSyscalls|syscalls-x86-64
+ $end_info$
+ */
+ 
++#include "LinuxSyscalls/SignalTrace.h"
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/Types.h"
+ #include "LinuxSyscalls/x64/Syscalls.h"
+@@ -14,6 +15,7 @@ $end_info$
+ #include <FEXCore/fextl/vector.h>
+ 
+ #include <algorithm>
++#include <errno.h>
+ #include <cstdint>
+ #include <stddef.h>
+ #include <sys/epoll.h>
+@@ -50,6 +52,9 @@ void RegisterEpoll(FEX::HLE::SyscallHandler* Handler) {
+       EventPtr = &Event;
+     }
+     uint64_t Result = ::syscall(SYSCALL_DEF(epoll_ctl), epfd, op, fd, EventPtr);
++    if (SigTrace::Enabled()) {
++      SigTrace::Log(::syscall(SYS_gettid), SigTrace::EpollCtl, op, fd, (EventPtr ? EventPtr->events : 0) | (Result << 32));
++    }
+     if (Result != -1 && event) {
+       FaultSafeUserMemAccess::VerifyIsWritable(event, sizeof(FEX::HLE::epoll_event_x86));
+       *event = Event;
+-- 
+2.55.0
+

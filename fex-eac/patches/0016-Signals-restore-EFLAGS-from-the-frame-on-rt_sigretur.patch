@@ -1,0 +1,46 @@
+From d925b5c405ae74a724e62f819bc5e9de7a3b3513 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 22:07:31 +0300
+Subject: [PATCH] Signals: restore EFLAGS from the frame on rt_sigreturn even
+ when RIP is unchanged
+
+Linux sigreturn always applies the frame's EFLAGS through FIX_EFLAGS (arch/x86/include/asm/sighandling.h),
+which covers TF. A handler that clears TF in its ucontext must therefore stop single-stepping, and one that
+leaves it set must keep trapping once per instruction. FEX only restored the flags when the guest had also
+changed the RIP, so a handler that left RIP alone and cleared TF was ignored.
+---
+ .../SignalDelegator/GuestFramesManagement.cpp         | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+index f9945a2e8..e4053cdd8 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+@@ -127,6 +127,14 @@ void SignalDelegator::RestoreFrame_x64(FEXCore::Core::InternalThreadState* Threa
+   auto* guest_uctx = reinterpret_cast<FEXCore::x86_64::ucontext_t*>(Context->UContextLocation);
+   [[maybe_unused]] auto* guest_siginfo = reinterpret_cast<siginfo_t*>(Context->SigInfoLocation);
+ 
++  // The frame's EFLAGS is authoritative on rt_sigreturn, even when the RIP is unchanged.
++  // Linux restores the flags the handler left in uc_mcontext (FIX_EFLAGS in
++  // arch/x86/include/asm/sighandling.h covers TF/DF/AC/RF): clearing TF there stops
++  // single-stepping, leaving it set keeps it going, one trap per instruction. Only
++  // restoring the interrupted flags when the RIP changed is what let a handler's TF
++  // clear be ignored.
++  CTX->SetFlagsFromCompactedEFLAGS(Thread, guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_EFL]);
++
+   // If the guest modified the RIP then we need to take special precautions here
+   if (Context->OriginalRIP != guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_RIP] || Context->FaultToTopAndGeneratedException) {
+ 
+@@ -150,9 +158,6 @@ void SignalDelegator::RestoreFrame_x64(FEXCore::Core::InternalThreadState* Threa
+     Frame->State.cs_cached = Frame->State.CalculateGDTBase(*Frame->State.GetSegmentFromIndex(Frame->State, Frame->State.cs_idx));
+     Frame->State.ss_cached = Frame->State.CalculateGDTBase(*Frame->State.GetSegmentFromIndex(Frame->State, Frame->State.ss_idx));
+ 
+-    // XXX: Full context setting
+-    CTX->SetFlagsFromCompactedEFLAGS(Thread, guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_EFL]);
+-
+ #define COPY_REG(x) Frame->State.gregs[FEXCore::X86State::REG_##x] = guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_##x];
+     COPY_REG(R8);
+     COPY_REG(R9);
+-- 
+2.44.0
+

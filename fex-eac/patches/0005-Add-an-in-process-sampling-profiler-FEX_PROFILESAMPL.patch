@@ -1,0 +1,302 @@
+From 5a8b8b9ac82ac17c6352352e94b70fb52d6328b8 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 07:25:50 +0300
+Subject: [PATCH 5/9] Add an in-process sampling profiler (FEX_PROFILESAMPLEHZ)
+
+Anti-cheat clients detect debuggers and `perf`, so a game under one cannot be profiled from outside. This adds a
+statistical sampler that lives entirely inside the emulator process: a host thread sends SIGPROF to the busy guest threads
+while /dev/shm/fex-<pid>-sample-on exists; a host signal handler records {host PC, tid, last guest RIP} into
+/dev/shm/fex-<pid>-samples. With FEX_LIBRARYJITNAMING=1 the host PCs resolve to guest libraries through
+/tmp/perf-<pid>.map, and to FEX functions with an unstripped FEX binary.
+
+The sampler only starts in a process that grows past 100 guest threads (the application, not the hundreds of helper FEX
+processes of a Wine session), creates its record file lazily on the first trigger, and stands down while a ptrace tracer
+is attached (it would see every SIGPROF).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../Source/Interface/Config/Config.json.in    |  17 +++
+ Source/Tools/LinuxEmulation/CMakeLists.txt    |   1 +
+ .../LinuxSyscalls/PtraceEmu.cpp               |   6 +
+ .../LinuxSyscalls/SamplingProfiler.cpp        | 143 ++++++++++++++++++
+ .../LinuxSyscalls/SamplingProfiler.h          |  30 ++++
+ .../LinuxSyscalls/ThreadManager.cpp           |  12 ++
+ 6 files changed, 209 insertions(+)
+ create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp
+ create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.h
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index 94f4597a9..5e94fdf39 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -574,6 +574,23 @@
+           "\tfull: Validate code before every run (slow)"
+         ]
+       },
++      "ProfileSampleHz": {
++        "Type": "uint32",
++        "Default": "0",
++        "AffectsCodeGen": "false",
++        "Desc": [
++          "Samples the host PC of the main guest thread this many times per second into /dev/shm/fex-<pid>-samples (in-process; no ptrace).",
++          "Use with LibraryJITNaming to attribute samples to guest libraries. 0 disables."
++        ]
++      },
++      "ProfileSampleAllThreads": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "false",
++        "Desc": [
++          "ProfileSampleHz samples every guest thread instead of only the main one."
++        ]
++      },
+       "SMCHotPageFaults": {
+         "Type": "uint32",
+         "Default": "32",
+diff --git a/Source/Tools/LinuxEmulation/CMakeLists.txt b/Source/Tools/LinuxEmulation/CMakeLists.txt
+index a6b7338c9..500e00158 100644
+--- a/Source/Tools/LinuxEmulation/CMakeLists.txt
++++ b/Source/Tools/LinuxEmulation/CMakeLists.txt
+@@ -11,6 +11,7 @@ add_library(LinuxEmulation STATIC
+   LinuxSyscalls/FaultSafeUserMemAccess.cpp
+   LinuxSyscalls/FileManagement.cpp
+   LinuxSyscalls/PtraceEmu.cpp
++  LinuxSyscalls/SamplingProfiler.cpp
+   LinuxSyscalls/LinuxAllocator.cpp
+   LinuxSyscalls/Seccomp/SeccompEmulator.cpp
+   LinuxSyscalls/Seccomp/BPFEmitter.cpp
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
+index e5eaa821a..d378b7b8c 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
+@@ -541,6 +541,12 @@ bool FixupWaitStatus(pid_t Pid, int* Status) {
+     return true;
+   }
+ 
++  if ((St >> 16) == 0 && WSTOPSIG(St) == SIGPROF && IsFexTracee(Pid)) {
++    // FEX's own sampling profiler signal: never visible to the guest tracer.
++    HostPtrace(PTRACE_CONT, Pid, nullptr, nullptr);
++    return true;
++  }
++
+   if ((St >> 16) == X86_PTRACE_EVENT_EXEC) {
+     // The tracee is now a fresh FEX image: keep the new image's path, drop the old image's state page.
+     CaptureExecPath(Pid);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp
+new file mode 100644
+index 000000000..9645e242b
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp
+@@ -0,0 +1,143 @@
++// SPDX-License-Identifier: MIT
++#include "LinuxSyscalls/SamplingProfiler.h"
++#include "LinuxSyscalls/SignalDelegator.h"
++#include "LinuxSyscalls/PtraceEmu.h"
++#include "ArchHelpers/MContext.h"
++
++#include <FEXCore/Core/CoreState.h>
++#include <FEXCore/Debug/InternalThreadState.h>
++
++#include <atomic>
++#include <csignal>
++#include <dirent.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <unordered_map>
++#include <sys/mman.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++
++namespace FEX::HLE {
++namespace {
++  struct Sample {
++    uint64_t HostPC;
++    uint64_t Info; ///< low 32 bits: host tid, high 32 bits: low half of the last guest RIP stored in the thread state
++  };
++  constexpr size_t MaxSamples = 1 << 18; // 4 MiB
++  std::atomic<Sample*> RecordsPtr {nullptr};
++  Sample* Records = nullptr;
++  std::atomic<uint32_t> Count {0};
++
++  // Threads worth sampling in "all threads" mode: the busy-prone ones. A process has hundreds of mostly idle threads
++  // (Unity workers, thread pools); signalling all of them at the sampling rate would perturb what is measured. Samples
++  // are taken from threads whose utime+stime advanced since the previous round.
++  bool IsInteresting(pid_t Tid) {
++    static thread_local std::unordered_map<pid_t, uint64_t> Last;
++    char Path[64];
++    snprintf(Path, sizeof(Path), "/proc/self/task/%d/stat", Tid);
++    FILE* F = fopen(Path, "r");
++    if (!F) {
++      return false;
++    }
++    char Buf[512];
++    const bool Ok = fgets(Buf, sizeof(Buf), F) != nullptr;
++    fclose(F);
++    if (!Ok) {
++      return false;
++    }
++    const char* P = strrchr(Buf, ')');
++    unsigned long Ut = 0, St = 0;
++    if (!P || sscanf(P + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu", &Ut, &St) != 2) {
++      return false;
++    }
++    auto& L = Last[Tid];
++    const bool Busy = (Ut + St) > L;
++    L = Ut + St;
++    return Busy;
++  }
++
++  // The record file is created on the first trigger only: many FEX processes (a whole Steam/Wine session) enable the
++  // profiler through the environment and most of them are never sampled.
++  bool OpenRecords(pid_t Pid) {
++    if (Records) {
++      return true;
++    }
++    const std::string Path = "/dev/shm/fex-" + std::to_string(Pid) + "-samples";
++    const int fd = open(Path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
++    if (fd < 0 || ftruncate(fd, sizeof(Sample) * MaxSamples) != 0) {
++      return false;
++    }
++    void* Map = mmap(nullptr, sizeof(Sample) * MaxSamples, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    close(fd);
++    if (Map == MAP_FAILED) {
++      return false;
++    }
++    Records = static_cast<Sample*>(Map);
++    return true;
++  }
++
++  void* SamplerThread(void* Arg) {
++    const uint32_t Hz = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(Arg) & 0xffff);
++    const bool All = (reinterpret_cast<uintptr_t>(Arg) >> 16) != 0;
++    const pid_t Pid = getpid();
++    // Samples are only taken while /dev/shm/fex-<pid>-sample-on exists (create/remove it from outside), so that
++    // starting the profiler never perturbs process start-up (an anti-cheat launcher may be ptracing us then) or the other
++    // FEX processes of the same application.
++    const std::string Trigger = "/dev/shm/fex-" + std::to_string(Pid) + "-sample-on";
++    for (;;) {
++      if (access(Trigger.c_str(), F_OK) != 0) {
++        usleep(100000);
++        continue;
++      }
++      if (!OpenRecords(Pid)) {
++        usleep(100000);
++        continue;
++      }
++      usleep(1000000 / Hz);
++      if (FEX::HLE::PtraceEmu::IsAttached()) {
++        continue; // a host ptrace tracer would see every SIGPROF as a signal-delivery stop
++      }
++      if (All) {
++        if (DIR* D = opendir("/proc/self/task")) {
++          while (auto* E = readdir(D)) {
++            const pid_t Tid = atoi(E->d_name);
++            if (Tid > 0 && Tid != static_cast<pid_t>(syscall(SYS_gettid)) && IsInteresting(Tid)) {
++              syscall(SYS_tgkill, Pid, Tid, SIGPROF);
++            }
++          }
++          closedir(D);
++        }
++      } else {
++        syscall(SYS_tgkill, Pid, Pid, SIGPROF);
++      }
++    }
++    return nullptr;
++  }
++} // namespace
++
++void StartSamplingProfiler(FEX::HLE::SignalDelegator* Signals, uint32_t Hz, bool AllThreads) {
++  if (!Hz) {
++    return;
++  }
++  Signals->RegisterHostSignalHandler(
++    SIGPROF,
++    [](FEXCore::Core::InternalThreadState* Thread, int, void*, void* UContext) {
++      const uint32_t Idx = Count.fetch_add(1, std::memory_order_relaxed);
++      if (Records && Idx < MaxSamples) {
++        Records[Idx] = {ArchHelpers::Context::GetPc(UContext),
++                        static_cast<uint64_t>(static_cast<uint32_t>(syscall(SYS_gettid))) | (Thread ? (Thread->CurrentFrame->State.rip << 32) : 0)};
++      }
++      return true; // consumed: never forwarded to the guest
++    },
++    true);
++
++  pthread_t T;
++  pthread_attr_t Attr;
++  pthread_attr_init(&Attr);
++  pthread_attr_setdetachstate(&Attr, PTHREAD_CREATE_DETACHED);
++  pthread_create(&T, &Attr, SamplerThread, reinterpret_cast<void*>(static_cast<uintptr_t>(Hz | (AllThreads ? 0x10000 : 0))));
++}
++} // namespace FEX::HLE
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.h
+new file mode 100644
+index 000000000..0fd1fa9cf
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.h
+@@ -0,0 +1,30 @@
++// SPDX-License-Identifier: MIT
++/*
++$info$
++tags: LinuxSyscalls|Profiling
++desc: In-process PC sampler for guest threads (no ptrace), driven by a host signal
++$end_info$
++*/
++#pragma once
++
++#include <cstdint>
++
++namespace FEXCore::Core {
++struct InternalThreadState;
++}
++namespace FEX::HLE {
++class SignalDelegator;
++
++/**
++ * Statistical profiler for the emulated process, enabled with FEX_PROFILESAMPLEHZ=<hz> (0 = off).
++ *
++ * A host thread sends SIGPROF to the guest threads' host thread at the requested rate (the main guest thread by default,
++ * every thread with FEX_PROFILESAMPLEALL=1); the signal handler records the interrupted host PC and the last guest RIP
++ * FEX had stored into `/dev/shm/fex-<pid>-samples` as 16-byte records {pc, rip-or-tid}. Resolve host PCs with the
++ * perf map produced by FEX_LIBRARYJITNAMING=1 (`/tmp/perf-<pid>.map`) and the FEX binary's symbols.
++ *
++ * It exists because attaching a debugger or `perf` to a process that runs an anti-cheat is detected (and rightly so);
++ * this runs entirely inside the emulator process.
++ */
++void StartSamplingProfiler(FEX::HLE::SignalDelegator* Signals, uint32_t Hz, bool AllThreads);
++} // namespace FEX::HLE
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+index 69e10b3d2..ae0bc9704 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ 
+ #include "LinuxSyscalls/ThreadManager.h"
++#include "LinuxSyscalls/SamplingProfiler.h"
+ 
+ #include "LinuxSyscalls/Syscalls.h"
+ #include "LinuxSyscalls/SignalDelegator.h"
+@@ -196,6 +197,17 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+   Frame->State.callret_sp = ThreadStateObject->GetCallRetStackInfo().DefaultLocation;
+ 
+   ThreadStateObject->Thread->FrontendPtr = ThreadStateObject;
++
++  {
++    // The sampling profiler (FEX_PROFILESAMPLEHZ) only starts in the process that grows past ~100 guest threads, i.e.
++    // the application itself: a Steam/Wine session runs hundreds of FEX processes and perturbing all of them is useless.
++    static std::atomic<uint32_t> ThreadCount {0};
++    FEX_CONFIG_OPT(ProfileSampleHz, PROFILESAMPLEHZ);
++    FEX_CONFIG_OPT(ProfileSampleAllThreads, PROFILESAMPLEALLTHREADS);
++    if (ProfileSampleHz() && ThreadCount.fetch_add(1) + 1 == 100) {
++      StartSamplingProfiler(SignalDelegation, ProfileSampleHz(), ProfileSampleAllThreads());
++    }
++  }
+   if (ProfileStats()) {
+     ThreadStateObject->Thread->ThreadStats = Stat.AllocateSlot(ThreadStateObject->ThreadInfo.TID);
+   }
+-- 
+2.55.0
+

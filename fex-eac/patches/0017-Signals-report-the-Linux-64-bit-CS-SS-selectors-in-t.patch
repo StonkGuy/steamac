@@ -1,0 +1,93 @@
+From bdfa54839cf3e86cad33c9f8ffdf0f131590c874 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 22:07:36 +0300
+Subject: [PATCH] Signals: report the Linux 64-bit CS/SS selectors in the frame
+ and to mov %cs/%ss
+
+FEX stored cs_idx/ss_idx as a bare GDT index shifted left, so `mov %cs` and the signal frame's CSGSFS read 0x30
+and 0. Linux uses __USER_CS = 0x33 (index 6 | RPL 3) and __USER_DS = 0x2b (index 5 | RPL 3); a 32-bit process
+uses __USER32_CS = 0x23. Set the selector form, scoped by bitness, and initialise SS (which FEX left at 0 in
+64-bit).
+
+arch/x86/kernel/signal_64.c writes __USER_CS/__USER_DS into the frame and forces CPL3 with `| 0x03`.
+---
+ FEXCore/include/FEXCore/Core/CoreState.h        | 10 ++++++++++
+ .../LinuxSyscalls/SignalDelegator.cpp           |  4 ++--
+ .../LinuxSyscalls/ThreadManager.cpp             | 17 +++++++++++++++--
+ 3 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
+index 349355d34..ea9ed2285 100644
+--- a/FEXCore/include/FEXCore/Core/CoreState.h
++++ b/FEXCore/include/FEXCore/Core/CoreState.h
+@@ -242,7 +242,17 @@ struct alignas(64) CPUState {
+   }
+ 
+   // TODO: This should be moved to the frontend.
++  // GDT indexes matching the Linux x86-64 kernel: __USER_CS = 0x33 is index 6, __USER_DS = 0x2b is index 5.
+   constexpr static uint32_t DEFAULT_USER_CS = 6;
++  constexpr static uint32_t DEFAULT_USER_DS = 5;
++
++  // The selector form of the two defaults: index combined with RPL 3. A guest that reads `mov %cs` / `mov %ss`, or a
++  // signal frame compared against a real kernel, sees the selector, not the bare index.
++  constexpr static uint32_t DEFAULT_USER_CS_SEL = (DEFAULT_USER_CS << 3) | 3; // 0x33
++  constexpr static uint32_t DEFAULT_USER_DS_SEL = (DEFAULT_USER_DS << 3) | 3; // 0x2b
++  // A 32-bit process uses __USER32_CS = 0x23 (index 4 | RPL 3); __USER32_DS is the same 0x2b. Kept here so the frame
++  // and `mov %cs` cannot regress to the bare 0x30 for 32-bit guests.
++  constexpr static uint32_t DEFAULT_USER32_CS_SEL = 0x23;
+ 
+   // Follows encoding of the TI bit in segment selector encoding.
+   constexpr static uint32_t SEGMENT_ARRAY_INDEX_GDT = 0;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+index 9c01c5f15..22d9f7289 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -427,8 +427,8 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+   // This way signal handlers always go back to their original operating mode.
+   // Doesn't matter for 32-bit processes as they can only be 32-bit, but does
+   // matter for 64-bit processes as they could have potentially installed a 32-bit code segment.
+-  Frame->State.cs_idx = FEXCore::Core::CPUState::DEFAULT_USER_CS << 3;
+-  Frame->State.ss_idx = 0;
++  Frame->State.cs_idx = Is64BitMode ? FEXCore::Core::CPUState::DEFAULT_USER_CS_SEL : FEXCore::Core::CPUState::DEFAULT_USER32_CS_SEL;
++  Frame->State.ss_idx = FEXCore::Core::CPUState::DEFAULT_USER_DS_SEL;
+   Frame->State.cs_cached = Frame->State.CalculateGDTBase(*Frame->State.GetSegmentFromIndex(Frame->State, Frame->State.cs_idx));
+   Frame->State.ss_cached = Frame->State.CalculateGDTBase(*Frame->State.GetSegmentFromIndex(Frame->State, Frame->State.ss_idx));
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+index 5c581c66f..e3135b677 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+@@ -246,8 +246,9 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+     }
+   } else {
+     // Without any thread data to inherit, setup the default gdt.
+-    // Default code segment indexes match the numbers that the Linux kernel uses.
+-    Frame->State.cs_idx = FEXCore::Core::CPUState::DEFAULT_USER_CS << 3;
++    // The selectors match what the Linux kernel reports: __USER_CS = 0x33 and __USER_DS = 0x2b, both with RPL 3.
++    Frame->State.cs_idx =
++      Is64BitMode() ? FEXCore::Core::CPUState::DEFAULT_USER_CS_SEL : FEXCore::Core::CPUState::DEFAULT_USER32_CS_SEL;
+     auto GDT = FEXCore::Core::CPUState::GetSegmentFromIndex(Frame->State, Frame->State.cs_idx);
+     FEXCore::Core::CPUState::SetGDTBase(GDT, 0);
+     FEXCore::Core::CPUState::SetGDTLimit(GDT, 0xF'FFFFU);
+@@ -261,6 +262,18 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+       GDT->L = 0; // L = Long Mode = 32-bit
+       GDT->D = 1; // D = Default Operand Size = 32-bit
+     }
++
++    // The stack segment. A 64-bit process has SS = __USER_DS; Linux also permits a 32-bit SS in a 64-bit process, but
++    // that is part of the interrupted context and restored by rt_sigreturn, not the reset-to-default value used here.
++    Frame->State.ss_idx = FEXCore::Core::CPUState::DEFAULT_USER_DS_SEL;
++    auto SSGDT = FEXCore::Core::CPUState::GetSegmentFromIndex(Frame->State, Frame->State.ss_idx);
++    FEXCore::Core::CPUState::SetGDTBase(SSGDT, 0);
++    FEXCore::Core::CPUState::SetGDTLimit(SSGDT, 0xF'FFFFU);
++    // SS is a data segment: L is reserved (0) and D is the default operand size; neither is consulted for 64-bit
++    // stack accesses, which are always 64-bit.
++    SSGDT->L = 0;
++    SSGDT->D = 1;
++    Frame->State.ss_cached = FEXCore::Core::CPUState::CalculateGDTBase(*SSGDT);
+   }
+ 
+   if (InheritThread) {
+-- 
+2.44.0
+

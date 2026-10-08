@@ -1,0 +1,289 @@
+From 9e25586d85599a7c72ffc01bf535d5ce542cfb3f Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 01:52:28 +0300
+Subject: [PATCH 2/9] SMC: stop write-protecting pages that keep faulting,
+ verify their code in the JIT instead
+
+With SMCChecks=mtrack a page that mixes code with data that is written all the time (trampoline pools, JIT heaps,
+anti-cheat hook pages) takes a SIGSEGV, an invalidation and a re-translation for every write.
+
+Count SMC write faults per guest page (lock-free table, every mirror of a shared mapping is counted so the executed
+mirror is the one that gets flagged). After SMCHotPageFaults faults (default 32, 0 disables) the page is left
+writable and the JIT emits the SMCChecks=full per-instruction CRC check for instructions translated from it.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../Source/Interface/Config/Config.json.in    |  10 ++
+ FEXCore/Source/Interface/Core/Core.cpp        |   2 +-
+ FEXCore/include/FEXCore/HLE/SyscallHandler.h  |  10 ++
+ .../LinuxSyscalls/SMCHotPages.h               | 112 ++++++++++++++++++
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.h   |   6 +
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp     |  22 ++++
+ 6 files changed, 161 insertions(+), 1 deletion(-)
+ create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/SMCHotPages.h
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index 938377f32..94f4597a9 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -574,6 +574,16 @@
+           "\tfull: Validate code before every run (slow)"
+         ]
+       },
++      "SMCHotPageFaults": {
++        "Type": "uint32",
++        "Default": "32",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "Number of self-modifying-code write faults a guest page may take before FEX stops write-protecting it.",
++          "Instead the JIT verifies the code of every instruction it translates from such a page (like SMCChecks=full, but only for that page).",
++          "Only used with SMCChecks=mtrack. 0 disables the demotion (pages stay write-protected and keep faulting)."
++        ]
++      },
+       "TSOEnabled": {
+         "Type": "bool",
+         "Default": "true",
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 63280a42a..7b2ec3d52 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -641,7 +641,7 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+           Thread->OpDispatcher->_GuestOpcode(InstAddress - GuestRIP);
+         }
+ 
+-        if (Config.SMCChecks == FEXCore::Config::CONFIG_SMC_FULL || Block.ForceFullSMCDetection) {
++        if (Config.SMCChecks == FEXCore::Config::CONFIG_SMC_FULL || Block.ForceFullSMCDetection || SyscallHandler->IsSMCHotPage(InstAddress)) {
+           auto ExistingCodePtr = reinterpret_cast<uint8_t*>(Block.Entry + BlockInstructionsLength);
+           auto InstAddressReg = Thread->OpDispatcher->_EntrypointOffset(GPRSize, InstAddress - GuestRIP);
+ 
+diff --git a/FEXCore/include/FEXCore/HLE/SyscallHandler.h b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
+index 0ba0218e3..bf0cf6d6f 100644
+--- a/FEXCore/include/FEXCore/HLE/SyscallHandler.h
++++ b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
+@@ -33,6 +33,16 @@ public:
+   virtual void HandleSyscall(FEXCore::Core::CpuStateFrame* Frame) = 0;
+ 
+   virtual void MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {}
++
++  /**
++   * @brief Pages that keep faulting on SMC write-protection (code and frequently written data sharing a page).
++   *
++   * The frontend stops write-protecting such a page and the JIT instead verifies the code of every instruction
++   * translated from it (a CRC check before the instruction runs), exactly like SMCChecks=full but only for these pages.
++   */
++  virtual bool IsSMCHotPage(uint64_t Address) {
++    return false;
++  }
+   virtual void InvalidateGuestCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {}
+   virtual void MarkOvercommitRange(uint64_t Start, uint64_t Length) {}
+   virtual void UnmarkOvercommitRange(uint64_t Start, uint64_t Length) {}
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SMCHotPages.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/SMCHotPages.h
+new file mode 100644
+index 000000000..42f51c2ff
+--- /dev/null
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SMCHotPages.h
+@@ -0,0 +1,112 @@
++// SPDX-License-Identifier: MIT
++/*
++$info$
++tags: LinuxSyscalls|SMC
++desc: Detects guest pages that keep taking self-modifying-code write faults
++$end_info$
++*/
++#pragma once
++
++#include <array>
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++
++namespace FEX::HLE {
++
++/**
++ * Tracks guest pages that repeatedly fault on SMC write protection (`SMCChecks=mtrack`).
++ *
++ * Write-protecting a page that holds translated code is cheap when the page is code-only, but a page that mixes code
++ * with frequently written data (a trampoline pool, a JIT code heap with inline constants, an anti-cheat hook page ...)
++ * takes a SIGSEGV, a code invalidation and a re-translation for every write, which can stall a process for seconds.
++ *
++ * Once a page has faulted `SMCHotPageFaults` times (a FEX config option) it is declared *hot*: the page stops being write-protected, and the
++ * JIT verifies the bytes of every instruction it translates from the page before running it (the same per-instruction
++ * check as `SMCChecks=full`, applied to hot pages only). Correctness is unchanged, only the cost moves from the fault
++ * path to the (rare) hot code.
++ *
++ * Both the counter table and the hot set are lock-free: `RecordFault` runs in the SIGSEGV handler and `IsHot` runs in
++ * the JIT on every translated instruction.
++ */
++class SMCHotPageTracker final {
++public:
++  static constexpr uint64_t PageShift = 12;
++
++  /// Records one SMC write fault on the page containing `Address`. Returns true exactly once, when the page has taken
++  /// `FaultThreshold` faults and becomes hot. A threshold of 0 disables the tracking.
++  bool RecordFault(uint64_t Address, uint32_t FaultThreshold) {
++    if (!FaultThreshold) {
++      return false;
++    }
++    const uint64_t Page = Address >> PageShift;
++    auto& Slot = Counters[Hash(Page) & (CounterSlots - 1)];
++
++    uint64_t Old = Slot.load(std::memory_order_relaxed);
++    uint64_t New;
++    do {
++      // Slot layout: [page index : 44][fault count : 20]. A colliding page simply evicts the previous owner.
++      const uint64_t Count = (Old >> CountBits) == Page ? (Old & CountMask) + 1 : 1;
++      New = (Page << CountBits) | (Count < CountMask ? Count : CountMask);
++    } while (!Slot.compare_exchange_weak(Old, New, std::memory_order_relaxed));
++
++    return (New & CountMask) == FaultThreshold && MakeHot(Page);
++  }
++
++  /// True if the page containing `Address` is hot.
++  bool IsHot(uint64_t Address) const {
++    if (HotCount.load(std::memory_order_relaxed) == 0) {
++      return false;
++    }
++
++    const uint64_t Key = (Address >> PageShift) + 1; // 0 marks an empty slot
++    for (size_t i = 0, Idx = Hash(Key - 1); i < HotSlots; ++i, ++Idx) {
++      const uint64_t Entry = Hot[Idx & (HotSlots - 1)].load(std::memory_order_relaxed);
++      if (Entry == Key) {
++        return true;
++      }
++      if (Entry == 0) {
++        return false;
++      }
++    }
++    return false;
++  }
++
++private:
++  static constexpr size_t CounterSlots = 4096;
++  static constexpr size_t HotSlots = 2048;
++  static constexpr unsigned CountBits = 20;
++  static constexpr uint64_t CountMask = (1ULL << CountBits) - 1;
++  static_assert((CounterSlots & (CounterSlots - 1)) == 0 && (HotSlots & (HotSlots - 1)) == 0);
++
++  static size_t Hash(uint64_t Page) {
++    return static_cast<size_t>((Page * 0x9E3779B97F4A7C15ULL) >> 40);
++  }
++
++  // Open-addressed insert. Gives up (the page stays on plain write protection) when the set is 3/4 full.
++  bool MakeHot(uint64_t Page) {
++    if (HotCount.load(std::memory_order_relaxed) >= HotSlots / 4 * 3) {
++      return false;
++    }
++
++    const uint64_t Key = Page + 1;
++    for (size_t i = 0, Idx = Hash(Page); i < HotSlots; ++i, ++Idx) {
++      auto& Entry = Hot[Idx & (HotSlots - 1)];
++      uint64_t Expected = 0;
++      if (Entry.compare_exchange_strong(Expected, Key, std::memory_order_relaxed)) {
++        HotCount.fetch_add(1, std::memory_order_relaxed);
++        return true;
++      }
++      if (Expected == Key) {
++        return false; // already hot
++      }
++    }
++    return false;
++  }
++
++  std::array<std::atomic<uint64_t>, CounterSlots> Counters {};
++  std::array<std::atomic<uint64_t>, HotSlots> Hot {};
++  std::atomic<uint32_t> HotCount {};
++};
++
++} // namespace FEX::HLE
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h
+index 4721fc3b2..7124a05a0 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h
+@@ -14,6 +14,7 @@ $end_info$
+ #include "LinuxSyscalls/LinuxAllocator.h"
+ #include "LinuxSyscalls/ThreadManager.h"
+ #include "LinuxSyscalls/Seccomp/SeccompEmulator.h"
++#include "LinuxSyscalls/SMCHotPages.h"
+ #include "LinuxSyscalls/SyscallsVMATracking.h"
+ #include "ArchHelpers/MContext.h"
+ 
+@@ -203,6 +204,7 @@ public:
+   FEX_CONFIG_OPT(RootFSPath, ROOTFS);
+   FEX_CONFIG_OPT(Is64BitMode, IS64BIT_MODE);
+   FEX_CONFIG_OPT(SMCChecks, SMCCHECKS);
++  FEX_CONFIG_OPT(SMCHotPageFaults, SMCHOTPAGEFAULTS);
+   FEX_CONFIG_OPT(NeedsSeccomp, NEEDSSECCOMP);
+   FEX_CONFIG_OPT(EnableCodeCaching, ENABLECODECACHINGWIP);
+   FEX_CONFIG_OPT(EnableDiskCache, DISKCACHE);
+@@ -288,6 +290,7 @@ public:
+   ///// VMA (Virtual Memory Area) tracking /////
+   static bool HandleSegfault(FEXCore::Core::InternalThreadState* Thread, int Signal, void* info, void* ucontext);
+   void MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override;
++  bool IsSMCHotPage(uint64_t Address) override;
+   void InvalidateGuestCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override;
+   std::optional<FEXCore::ExecutableFileSectionInfo>
+   LookupExecutableFileSection(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestAddr) final override;
+@@ -362,6 +365,9 @@ private:
+   // std::mutex CodeCachePatchingMutex;
+   FEXCore::ForkableUniqueMutex CodeCachePatchingMutex;
+ 
++  // Pages that keep taking SMC write faults; verified by the JIT instead of being write-protected.
++  SMCHotPageTracker SMCHotPages;
++
+   FEX::CodeLoader* LocalLoader {};
+   bool NeedToCheckXID {true};
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+index 94bdd378b..342223c1f 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -108,10 +108,15 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+           } else {
+             _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, FaultBaseMirrored, FEXCore::Utils::FEX_PAGE_SIZE);
+           }
++
++          // Code usually executes from a different mirror than the one that is written through, so every mirror
++          // is accounted: the one that is translated has to become hot.
++          _SyscallHandler->SMCHotPages.RecordFault(FaultBaseMirrored, _SyscallHandler->SMCHotPageFaults());
+         }
+       } while ((VMA = VMA->ResourceNextVMA));
+     } else {
+       _SyscallHandler->TM.InvalidateGuestCodeRange(Thread, FaultBase, FEXCore::Utils::FEX_PAGE_SIZE, UnprotectRegionCallback);
++      _SyscallHandler->SMCHotPages.RecordFault(FaultBase, _SyscallHandler->SMCHotPageFaults());
+     }
+ 
+     FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSMCCount, 1);
+@@ -134,6 +139,10 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+   }
+ }
+ 
++bool SyscallHandler::IsSMCHotPage(uint64_t Address) {
++  return SMCHotPages.IsHot(Address);
++}
++
+ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {
+   const auto Base = Start & FEXCore::Utils::FEX_PAGE_MASK;
+   const auto Top = FEXCore::AlignUp(Start + Length, FEXCore::Utils::FEX_PAGE_SIZE);
+@@ -143,6 +152,19 @@ void SyscallHandler::MarkGuestExecutableRange(FEXCore::Core::InternalThreadState
+       return;
+     }
+ 
++    // Hot pages are not write-protected (the JIT verifies their code instead): protect the rest of the range.
++    for (auto Page = Base; Page < Top; Page += FEXCore::Utils::FEX_PAGE_SIZE) {
++      if (SMCHotPages.IsHot(Page)) {
++        if (Page > Base) {
++          MarkGuestExecutableRange(Thread, Base, Page - Base);
++        }
++        if (Page + FEXCore::Utils::FEX_PAGE_SIZE < Top) {
++          MarkGuestExecutableRange(Thread, Page + FEXCore::Utils::FEX_PAGE_SIZE, Top - (Page + FEXCore::Utils::FEX_PAGE_SIZE));
++        }
++        return;
++      }
++    }
++
+     auto lk = FEXCore::GuardSignalDeferringSection<std::shared_lock>(VMATracking.Mutex, Thread);
+ 
+     // Find the first mapping at or after the range ends, or ::end().
+-- 
+2.55.0
+

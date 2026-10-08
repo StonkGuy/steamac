@@ -1,0 +1,43 @@
+From dc3ee6fdcf3985a9b720dd1cccd79a75a975ad3a Mon Sep 17 00:00:00 2001
+From: build <build@invalid>
+Date: Thu, 8 Oct 2026 20:37:07 +0300
+Subject: [PATCH 15/15] syscalls: restart_syscall returns -EINTR instead of
+ aborting the process
+
+Linux reaches restart_syscall only when the kernel restarted a signal-interrupted
+syscall. With no pending restart_block - the only state this emulated process can
+be in, since FEX never arms one - kernel/signal.c do_no_restart_syscall() returns
+-EINTR.
+
+FEX registered restart_syscall as a SYSCALL_STUB, whose body is
+ERROR_AND_DIE_FMT, so making the call killed the process.
+
+Return -EINTR, the faithful answer. rseq is left as -ENOSYS (out of scope).
+
+Base: FEX-2610 14c92681 + patches 0001-0010.
+---
+ .../Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Stubs.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Stubs.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Stubs.cpp
+index 2c3edeef1..f0d267ba8 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Stubs.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Stubs.cpp
+@@ -27,7 +27,13 @@ struct CpuStateFrame;
+ 
+ namespace FEX::HLE {
+ void RegisterStubs(FEX::HLE::SyscallHandler* Handler) {
+-  REGISTER_SYSCALL_IMPL(restart_syscall, [](FEXCore::Core::CpuStateFrame* Frame) -> uint64_t { SYSCALL_STUB(restart_syscall); });
++  REGISTER_SYSCALL_IMPL(restart_syscall, [](FEXCore::Core::CpuStateFrame* Frame) -> uint64_t {
++    // Linux only reaches this syscall when the kernel restarted an interrupted syscall. FEX never arms a
++    // restart_block, so the call can only ever arrive with no pending restart: kernel/signal.c
++    // do_no_restart_syscall() returns -EINTR. Returning that instead of killing the process (the old
++    // SYSCALL_STUB did ERROR_AND_DIE) matches what a real kernel would report for this emulated process.
++    return -EINTR;
++  });
+ 
+   REGISTER_SYSCALL_IMPL(rseq, [](FEXCore::Core::CpuStateFrame* Frame, struct rseq* rseq, uint32_t rseq_len, int flags, uint32_t sig) -> uint64_t {
+     // We don't support this
+-- 
+2.44.0
+

@@ -1,0 +1,171 @@
+From f987d2965d9b9623396f148301c3d05a5e7eda4c Mon Sep 17 00:00:00 2001
+From: build <build@invalid>
+Date: Thu, 8 Oct 2026 19:40:38 +0300
+Subject: [PATCH] Seccomp: report SECCOMP_RET_TRAP at the instruction after the
+ syscall
+
+Linux enters a SECCOMP_RET_TRAP handler with RIP and si_call_addr pointing just past the syscall instruction, and rt_sigreturn resumes the guest there with the value the handler left in the return register.
+
+FEX reconstructed the RIP at the address of the syscall itself (the dispatcher advances the guest RIP only after the filter has run), so the ucontext handed to the handler was identical to the interrupted RIP. On rt_sigreturn FEX then took its fall-through path, which resets the guest to the interrupted state and discards the handler register updates, and the guest resumed on the syscall instruction and executed it again. For a filter that traps by instruction pointer this repeats forever: every delivery of the signal queues another, and the nested host signal frames kept consuming the stack until FEX ran out of it.
+
+Report the address after the syscall (both syscall instruction forms are two bytes) in si_call_addr, and carry it into the guest signal frame so the ucontext RIP differs from the interrupted RIP. rt_sigreturn then restores the handler registers and resumes past the syscall, and rt_sigreturn returns from the frame to the top of the dispatcher instead of leaving the trapped syscall to be re-executed, so there is no unbounded host stack growth.
+
+Applies to the x86-64, non-realtime ia32 and realtime ia32 signal frame layouts.
+---
+ .../Tools/LinuxEmulation/ArchHelpers/MContext.h  |  2 ++
+ .../LinuxSyscalls/Seccomp/SeccompEmulator.cpp    | 16 +++++++++++++++-
+ .../LinuxSyscalls/SignalDelegator.cpp            | 13 ++++++++++++-
+ .../SignalDelegator/GuestFramesManagement.cpp    | 13 ++++++++++---
+ .../LinuxEmulation/LinuxSyscalls/ThreadManager.h |  8 ++++++++
+ 5 files changed, 47 insertions(+), 5 deletions(-)
+
+diff --git a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
+index 4bc889ed7..42db7a70e 100644
+--- a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
++++ b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
+@@ -44,6 +44,7 @@ struct X86ContextBackup {
+   uint16_t ClearedSyscallInfo;
+   bool FaultToTopAndGeneratedException;
+   uint64_t GuestSignalMask; ///< guest-visible signal mask at the time the guest handler was entered (restored at rt_sigreturn)
++  uint64_t SeccompTrapRIP; ///< non-zero when this frame is a SECCOMP_RET_TRAP SIGSYS: the RIP to enter the handler at (past the syscall)
+ 
+   // Guest state
+   int Signal;
+@@ -73,6 +74,7 @@ struct ArmContextBackup {
+   uint16_t ClearedSyscallInfo;
+   bool FaultToTopAndGeneratedException;
+   uint64_t GuestSignalMask; ///< guest-visible signal mask at the time the guest handler was entered (restored at rt_sigreturn)
++  uint64_t SeccompTrapRIP; ///< non-zero when this frame is a SECCOMP_RET_TRAP SIGSYS: the RIP to enter the handler at (past the syscall)
+ 
+   // Guest state
+   int Signal;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Seccomp/SeccompEmulator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Seccomp/SeccompEmulator.cpp
+index 7b0e9f91c..d8f26866f 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Seccomp/SeccompEmulator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Seccomp/SeccompEmulator.cpp
+@@ -325,6 +325,14 @@ SeccompEmulator::ExecuteFilter(FEXCore::Core::CpuStateFrame* Frame, uint64_t JIT
+   auto Thread = FEX::HLE::ThreadManager::GetStateObjectFromCPUState(Frame);
+   const uint64_t RIP = Thread->Thread->CTX->RestoreRIPFromHostPC(Frame->Thread, JITPC);
+ 
++  // Linux reports a seccomp trap for the instruction *after* the syscall: a SECCOMP_RET_TRAP handler is entered with
++  // RIP and si_call_addr just past the `syscall` (or `int 0x80`), and rt_sigreturn resumes the guest there with the
++  // value the handler left in the return register. That address is where the syscall would have resumed had the
++  // filter allowed it, and the dispatcher advances the guest RIP to it (Syscalls.cpp) once the filter has run, so
++  // reconstruct it here rather than reporting the address of the `syscall` itself. Both forms are two bytes:
++  // `syscall` is `0f 05`, `int 0x80` is `cd 80`.
++  const uint64_t PostSyscallRIP = RIP + 2;
++
+   const auto Arch = Is64BitMode() ? AUDIT_ARCH_X86_64 : AUDIT_ARCH_I386;
+   bool ShouldLog {};
+   uint32_t SeccompResult {};
+@@ -435,10 +443,16 @@ SeccompEmulator::ExecuteFilter(FEXCore::Core::CpuStateFrame* Frame, uint64_t JIT
+       .si_code = 1, // SYS_SECCOMP
+     };
+ 
+-    Info.si_call_addr = reinterpret_cast<void*>(RIP);
++    // Report the address just past the syscall, matching Linux (see PostSyscallRIP above). Record it in the thread so
++    // the guest signal frame is entered with it: the CpuStateFrame still holds the address of the `syscall` itself
++    // here (the dispatcher advances it after the filter has run), and entering the handler at the syscall address
++    // would make rt_sigreturn re-execute the trapped syscall with the handler's return value discarded.
++    Info.si_call_addr = reinterpret_cast<void*>(PostSyscallRIP);
+     Info.si_syscall = Args->Argument[0];
+     Info.si_arch = Arch;
+ 
++    Thread->SeccompTrapRIP = PostSyscallRIP;
++
+     SignalDelegation->QueueSignal(::getpid(), ::gettid(), SIGSYS, &Info, true);
+     break;
+   }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+index 21d5e16f9..9c01c5f15 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -175,6 +175,7 @@ ArchHelpers::Context::ContextBackup* SignalDelegator::StoreThreadState(FEXCore::
+   Context->InSyscallInfo = 0;
+   Context->ClearedSyscallInfo = 0;
+   Context->GuestSignalMask = 0;
++  Context->SeccompTrapRIP = 0;
+ 
+   // Store fault to top status and then reset it
+   Context->FaultToTopAndGeneratedException = Thread->CurrentFrame->SynchronousFaultData.FaultToTopAndGeneratedException;
+@@ -305,9 +306,19 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+ 
+ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadState* Thread, int Signal, void* info, void* ucontext,
+                                                   GuestSigAction* GuestAction, stack_t* GuestStack) {
++  auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread);
++
+   auto ContextBackup = StoreThreadState(Thread, Signal, ucontext);
+   // Remember the guest-visible mask of the interrupted code: rt_sigreturn puts it back (SignalMaskFix).
+-  ContextBackup->GuestSignalMask = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread)->SignalInfo.CurrentSignalMask.Val;
++  ContextBackup->GuestSignalMask = ThreadObject->SignalInfo.CurrentSignalMask.Val;
++
++  // A SECCOMP_RET_TRAP SIGSYS reports the instruction *after* the trapped syscall, so present the handler with that
++  // address in its ucontext (Linux does the same). The frame's RIP, and therefore OriginalRIP, is still the `syscall`
++  // itself, so the ucontext RIP now differs from it: rt_sigreturn then takes the path that restores the handler's
++  // registers and resumes at the ucontext RIP, instead of the path that resets to the interrupted state and re-runs
++  // the syscall (discarding the handler's return value). See SeccompEmulator for the kernel semantics.
++  ContextBackup->SeccompTrapRIP = ThreadObject->SeccompTrapRIP;
++  ThreadObject->SeccompTrapRIP = 0;
+ 
+   auto Frame = Thread->CurrentFrame;
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+index 2401fe496..f9945a2e8 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+@@ -419,7 +419,11 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
+   auto* xstate = reinterpret_cast<FEXCore::x86_64::xstate*>(FPStateLocation);
+   SetXStateInfo(xstate, SupportsAVX);
+ 
+-  guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_RIP] = ContextBackup->OriginalRIP;
++  // A seccomp trap is reported at the instruction after the syscall rather than at OriginalRIP (the `syscall` itself):
++  // the handler is entered past the syscall, and the difference is what makes rt_sigreturn resume there. See
++  // SeccompEmulator and HandleDispatcherGuestSignal. Zero for every other signal.
++  guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_RIP] =
++    ContextBackup->SeccompTrapRIP ? ContextBackup->SeccompTrapRIP : ContextBackup->OriginalRIP;
+   guest_uctx->uc_mcontext.gregs[FEXCore::x86_64::FEX_REG_EFL] = eflags;
+   // This stores the CS/GS/FS selectors. It ALSO stores the SS selector in the top 16 bits...For some reason.
+   // Despite the naming, the endianness is swapped from what you'd expect.
+@@ -574,7 +578,8 @@ uint64_t SignalDelegator::SetupFrame_ia32(FEXCore::Core::InternalThreadState* Th
+     guest_uctx->sc.err = ConvertSignalToError(ucontext, Signal, HostSigInfo);
+   }
+ 
+-  guest_uctx->sc.ip = ContextBackup->OriginalRIP;
++  // A seccomp trap reports the instruction after the syscall; see SetupFrame_x64.
++  guest_uctx->sc.ip = ContextBackup->SeccompTrapRIP ? ContextBackup->SeccompTrapRIP : ContextBackup->OriginalRIP;
+   guest_uctx->sc.flags = eflags;
+   guest_uctx->sc.sp_at_signal = 0;
+ 
+@@ -710,7 +715,9 @@ uint64_t SignalDelegator::SetupRTFrame_ia32(FEXCore::Core::InternalThreadState*
+     guest_uctx->uc.uc_mcontext.gregs[FEXCore::x86::FEX_REG_ERR] = ConvertSignalToError(ucontext, Signal, HostSigInfo);
+   }
+ 
+-  guest_uctx->uc.uc_mcontext.gregs[FEXCore::x86::FEX_REG_EIP] = ContextBackup->OriginalRIP;
++  // A seccomp trap reports the instruction after the syscall; see SetupFrame_x64.
++  guest_uctx->uc.uc_mcontext.gregs[FEXCore::x86::FEX_REG_EIP] =
++    ContextBackup->SeccompTrapRIP ? ContextBackup->SeccompTrapRIP : ContextBackup->OriginalRIP;
+   guest_uctx->uc.uc_mcontext.gregs[FEXCore::x86::FEX_REG_EFL] = eflags;
+   guest_uctx->uc.uc_mcontext.gregs[FEXCore::x86::FEX_REG_UESP] = Frame->State.gregs[FEXCore::X86State::REG_RSP];
+   guest_uctx->uc.uc_mcontext.cr2 = 0;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+index 21bd969c3..86de8da99 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+@@ -90,6 +90,14 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
+   uint32_t SeccompMode {SECCOMP_MODE_DISABLED};
+   fextl::vector<FEX::HLE::SeccompFilterInfo*> Filters {};
+ 
++  // Set to the address just past the syscall instruction when a SECCOMP_RET_TRAP has been queued for that syscall,
++  // zero otherwise. The next guest signal frame is entered with this address in its ucontext, the way Linux reports a
++  // seccomp trap for the instruction following the syscall. It is consumed by HandleDispatcherGuestSignal and
++  // deliberately differs from the CpuStateFrame's RIP at trap time (the syscall instruction itself), which is what
++  // makes rt_sigreturn take the path that restores the guest handler's registers. See the SECCOMP_RET_TRAP handling
++  // in SeccompEmulator for the Linux semantics this reproduces.
++  uint64_t SeccompTrapRIP {};
++
+   // personality emulation.
+   uint32_t persona {};
+ 
+-- 
+2.44.0
+

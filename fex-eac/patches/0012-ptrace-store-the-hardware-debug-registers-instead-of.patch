@@ -1,0 +1,240 @@
+From 4d0625d1bf0da539b92d96f52afaa57ab39ea075 Mon Sep 17 00:00:00 2001
+From: build <build@invalid>
+Date: Thu, 8 Oct 2026 20:36:57 +0300
+Subject: [PATCH 12/15] ptrace: store the hardware debug registers instead of
+ discarding them
+
+On x86-64 the debug registers live inside struct user: DR0-DR3 at byte 848,
+then DR4/DR5 (which do not exist), DR6, DR7, and the struct ends at 1032.
+arch/x86/kernel/ptrace.c PTRACE_POKEUSR stores an in-range slot through
+ptrace_set_debugreg and returns -EIO for DR4/DR5, for a slot-unaligned offset and
+for anything at or past sizeof(struct user); PTRACE_PEEKUSR puts 0 for an
+in-struct offset with no handler and is -EIO only for the unaligned/out-of-range
+cases.
+
+FEX accepted every out-of-image POKEUSER and silently discarded it, and returned
+-EPERM from PEEKUSER, so a tracer that set a hardware breakpoint and read it back
+got no value and a bogus error.
+
+Add a DR0-DR7 shadow to the tracee's shared state, round-trip it through
+PEEKUSER/POKEUSER, answer DR4/DR5 the way the kernel does, and return -EIO for
+the offsets Linux rejects. Firing an actual JIT breakpoint on a matched RIP is
+not implemented (see FEXGAPS-VERIFY.md).
+
+Base: FEX-2610 14c92681 + patches 0001-0010.
+---
+ .../LinuxSyscalls/PtraceEmu.cpp               | 158 ++++++++++++++++--
+ .../LinuxEmulation/LinuxSyscalls/PtraceEmu.h  |   1 +
+ 2 files changed, 148 insertions(+), 11 deletions(-)
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
+index d378b7b8c..1e23ab8d0 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
+@@ -38,6 +38,75 @@ namespace {
+   };
+   static_assert(Gs + 1 == NumUserRegs);
+ 
++  // The kernel's x86-64 `struct user` (arch/x86/include/asm/user_64.h) is 928 bytes: 27 register slots (216),
++  // the i387/gdb bookkeeping area, then u_debugreg[8] at byte 848, error_code at 912 and fault_address at 920.
++  // (glibc's struct user stops at 912 because it omits the last two fields, but it is the kernel's layout that
++  // PTRACE_PEEKUSR/POKEUSR validate against.) Both requests reject a slot-unaligned offset and anything at or
++  // past 928 with -EIO; only the register image and the DR range have handlers, and every other in-range offset
++  // reads the initialised 0.
++  constexpr uintptr_t UserDebugRegByteOffset = 848;
++  constexpr uintptr_t UserDebugRegByteEnd = UserDebugRegByteOffset + 8 * sizeof(uint64_t); // 912
++  constexpr uintptr_t UserStructSize = 928;
++
++  // TASK_SIZE_MAX on x86-64 with 4-level paging, the boundary arch/x86/kernel/hw_breakpoint.c
++  // arch_check_bp_in_kernelspace() tests a breakpoint address against.
++  constexpr uint64_t UserTaskSizeMax = 0x00007ffffffff000ULL;
++
++  // DR7 field encoding (arch/x86/include/uapi/asm/debugreg.h): the length is the high nibble, the type the low.
++  // arch/x86/kernel/hw_breakpoint.c arch_bp_generic_fields() decodes these and rejects everything else; an
++  // execute breakpoint must use the undefined length encoding (bits 7:6 set, low bits clear).
++  bool DrFieldValid(uint64_t Field, uint64_t* AlignMask) {
++    const uint64_t Len = Field & 0xC;
++    switch (Field & 0x3) {
++    case 0x0: // execute
++      if (Len != 0x0) {
++        return false;
++      }
++      *AlignMask = 0; // "len X": no alignment requirement
++      return true;
++    case 0x1: // write
++    case 0x3: // read/write
++      switch (Len) {
++      case 0x0: *AlignMask = 0; return true; // len 1
++      case 0x4: *AlignMask = 1; return true; // len 2
++      case 0xC: *AlignMask = 3; return true; // len 4
++      case 0x8: *AlignMask = 7; return true; // len 8
++      default: return false;
++      }
++    default: // type 2 is reserved
++      return false;
++    }
++  }
++
++  constexpr unsigned DrEnableShift(unsigned N) { return N * 2; }
++  constexpr unsigned DrFieldShift(unsigned N) { return 16 + N * 4; }
++
++  // A DR0-DR3 address must be a user address below TASK_SIZE_MAX and meet the alignment implied by its length
++  // (arch/x86/kernel/hw_breakpoint.c arch_check_bp_in_kernelspace() + hw_breakpoint_arch_parse()).
++  bool DrAddressValid(uint64_t Addr, uint64_t AlignMask) {
++    return Addr < UserTaskSizeMax && (Addr & AlignMask) == 0;
++  }
++
++  // arch/x86/kernel/ptrace.c ptrace_write_dr7(): a field with no enable bits and no already-registered breakpoint
++  // is not validated at all; otherwise the kernel (re)registers the breakpoint, which validates the encoding
++  // (arch_bp_generic_fields) and the address for the implied length. Any failure makes the whole write -EINVAL.
++  // `Dr` is the shadow before the write; a slot the kernel never accepted holds 0.
++  bool Dr7Valid(const uint64_t Dr[8], uint64_t NewDr7) {
++    for (unsigned N = 0; N < 4; ++N) {
++      const bool Enabled = (NewDr7 >> DrEnableShift(N)) & 0x3;
++      const bool Registered = Dr[N] != 0;
++      if (!Enabled && !Registered) {
++        continue;
++      }
++      const uint64_t Field = (NewDr7 >> DrFieldShift(N)) & 0xF;
++      uint64_t AlignMask = 0;
++      if (!DrFieldValid(Field, &AlignMask) || !DrAddressValid(Dr[N], AlignMask)) {
++        return false;
++      }
++    }
++    return true;
++  }
++
+   constexpr uint16_t UserCodeSegment = 0x33;
+   constexpr uint16_t UserStackSegment = 0x2b;
+   constexpr uint64_t UserFlags = 0x246;
+@@ -387,6 +456,50 @@ namespace {
+     return offsetof(SharedState, Regs) + Index * sizeof(uint64_t);
+   }
+ 
++  // Reads DR<n>. There are no DR4/DR5 registers: ptrace_get_debugreg returns 0 for them.
++  bool ReadDebugReg(pid_t Pid, unsigned N, uint64_t* Out) {
++    if (N == 4 || N == 5) {
++      *Out = 0;
++      return true;
++    }
++    if (N > 7) {
++      return false;
++    }
++    return ReadWord(Pid, offsetof(SharedState, DebugRegs) + N * sizeof(uint64_t), Out);
++  }
++
++  // Writes DR<n>, mirroring arch/x86/kernel/ptrace.c ptrace_set_debugreg(). Returns 0 on success or the negative
++  // errno the kernel uses.
++  int WriteDebugReg(pid_t Pid, unsigned N, uint64_t Value) {
++    if (N == 4 || N == 5) {
++      return -EIO; // "There are no DR4 or DR5 registers"
++    }
++    if (N <= 3) {
++      // A slot that is not yet a breakpoint is registered with the kernel's default len-1 write shape, which
++      // imposes no alignment, so only the address itself is checked. An already-registered slot was created the
++      // same way (the length only changes through DR7), so the alignment requirement is still none.
++      if (!DrAddressValid(Value, 0)) {
++        return -EINVAL;
++      }
++      return WriteWord(Pid, offsetof(SharedState, DebugRegs) + N * sizeof(uint64_t), Value) ? 0 : -ESRCH;
++    }
++    if (N == 6) {
++      // The kernel stores DR6 raw (virtual_dr6 ^ DR6_RESERVED) and reads it back XORed again, so it round-trips.
++      return WriteWord(Pid, offsetof(SharedState, DebugRegs) + 6 * sizeof(uint64_t), Value) ? 0 : -ESRCH;
++    }
++    // N == 7: validate against the current shadow, then store the raw value as the kernel does.
++    uint64_t Dr[8] {};
++    for (unsigned I = 0; I < 8; ++I) {
++      if (!ReadWord(Pid, offsetof(SharedState, DebugRegs) + I * sizeof(uint64_t), &Dr[I])) {
++        return -ESRCH;
++      }
++    }
++    if (!Dr7Valid(Dr, Value)) {
++      return -EINVAL;
++    }
++    return WriteWord(Pid, offsetof(SharedState, DebugRegs) + 7 * sizeof(uint64_t), Value) ? 0 : -ESRCH;
++  }
++
+   Remote* FpState(pid_t Pid) {
+     std::lock_guard lk(RemotesLock);
+     Remote* R = Lookup(Pid);
+@@ -627,13 +740,24 @@ bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Res
+ 
+   case PTRACE_PEEKUSER: {
+     const uintptr_t Off = reinterpret_cast<uintptr_t>(Addr);
+-    if (Off >= NumUserRegs * sizeof(uint64_t)) {
+-      return false; // not part of the emulated register image
++    // Mirror arch/x86/kernel/ptrace.c PTRACE_PEEKUSR: a slot-unaligned offset or one at/after sizeof(struct
++    // user) is -EIO; the register image and the DR range are served; every other in-struct offset reads the
++    // initialised 0.
++    if ((Off % sizeof(uint64_t)) != 0 || Off >= UserStructSize) {
++      *Result = static_cast<uint64_t>(-EIO);
++      return true;
+     }
+     uint64_t V = 0;
+-    if (!ReadSlot(Pid, RegOffset(Off / 8), &V)) {
+-      *Result = static_cast<uint64_t>(-ESRCH);
+-      return true;
++    if (Off < NumUserRegs * sizeof(uint64_t)) {
++      if (!ReadSlot(Pid, RegOffset(Off / 8), &V)) {
++        *Result = static_cast<uint64_t>(-ESRCH);
++        return true;
++      }
++    } else if (Off >= UserDebugRegByteOffset && Off < UserDebugRegByteEnd) {
++      if (!ReadDebugReg(Pid, static_cast<unsigned>((Off - UserDebugRegByteOffset) / sizeof(uint64_t)), &V)) {
++        *Result = static_cast<uint64_t>(-ESRCH);
++        return true;
++      }
+     }
+     *static_cast<uint64_t*>(Data) = V;
+     *Result = 0;
+@@ -642,16 +766,28 @@ bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Res
+ 
+   case PTRACE_POKEUSER: {
+     const uintptr_t Off = reinterpret_cast<uintptr_t>(Addr);
+-    if (Off >= NumUserRegs * sizeof(uint64_t)) {
+-      *Result = 0; // debug registers etc. have no aarch64 equivalent: accept and discard
++    // Mirror arch/x86/kernel/ptrace.c PTRACE_POKEUSR: a slot-unaligned offset or one at/after sizeof(struct
++    // user) is -EIO; the register image is written; the DR range goes through ptrace_set_debugreg (which stores
++    // DR0-DR3/DR6/DR7, rejects DR4/DR5 with -EIO and validates DR0-DR3 and DR7 with -EINVAL); every other
++    // in-struct offset has no handler and is -EIO.
++    if ((Off % sizeof(uint64_t)) != 0 || Off >= UserStructSize) {
++      *Result = static_cast<uint64_t>(-EIO);
+       return true;
+     }
+-    if (!WriteWord(Pid, RegOffset(Off / 8), reinterpret_cast<uint64_t>(Data))) {
+-      *Result = static_cast<uint64_t>(-ESRCH);
++    if (Off < NumUserRegs * sizeof(uint64_t)) {
++      if (!WriteWord(Pid, RegOffset(Off / 8), reinterpret_cast<uint64_t>(Data))) {
++        *Result = static_cast<uint64_t>(-ESRCH);
++        return true;
++      }
++      MarkDirty(Pid, 1ULL << (Off / 8));
++      *Result = 0;
+       return true;
+     }
+-    MarkDirty(Pid, 1ULL << (Off / 8));
+-    *Result = 0;
++    if (Off >= UserDebugRegByteOffset && Off < UserDebugRegByteEnd) {
++      *Result = static_cast<uint64_t>(WriteDebugReg(Pid, static_cast<unsigned>((Off - UserDebugRegByteOffset) / sizeof(uint64_t)), reinterpret_cast<uint64_t>(Data)));
++      return true;
++    }
++    *Result = static_cast<uint64_t>(-EIO);
+     return true;
+   }
+ 
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.h
+index cc09dacc3..99b83cd76 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.h
+@@ -67,6 +67,7 @@ struct SharedState {
+   volatile uint64_t PendingArgs[6];
+   volatile uint64_t PendingRet;
+   volatile uint64_t Regs[NumUserRegs]; ///< x86-64 user_regs_struct image at the stop
++  volatile uint64_t DebugRegs[8];      ///< x86-64 DR0-DR7 shadow (DR4/DR5 do not exist; see PtraceEmu.cpp)
+   volatile uint64_t DirtyMask;         ///< bit i set: the tracer wrote Regs[i]; apply it when resuming
+   volatile uint64_t SignalNumber;      ///< Non-zero: the pending stop is a signal-delivery stop for this signal
+   volatile uint64_t FlushAddr;         ///< The tracer wrote tracee memory: invalidate translated code here
+-- 
+2.44.0
+
