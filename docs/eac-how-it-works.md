@@ -43,7 +43,7 @@ in the research repo.
 | 0007 | runs guest signal handlers with the Linux signal mask |
 | 0008 | keeps registers set on a handler entered from a syscall |
 | 0010 | the emulated seccomp/SIGSYS path (`SECCOMP_RET_TRAP`) — a trapped syscall is entered after it, not re-run; today's Wine `install_bpf` mutual-trap livelock lives here |
-| 0011–0021 | kernel-fidelity gaps a title or Wine can observe (debug registers, `/proc/<pid>/status`, `arch_prctl`, regsets, `restart_syscall`, the signal frame, a faulting `pop`) |
+| 0011–0020 | kernel-fidelity gaps a title or Wine can observe (debug registers, `/proc/<pid>/status`, `arch_prctl`, regsets, `restart_syscall`, the signal frame) |
 | 0003, 0005, 0006, 0009 | diagnostics and profiling only — not fixes |
 
 Required for VRChat: 0001 (to inject at all), 0002 (so the client finishes loading) and 0007 (to avoid Photon
