@@ -42,7 +42,7 @@ in the research repo.
 | 0004 | cheaper code-range invalidation with ~200 threads |
 | 0007 | runs guest signal handlers with the Linux signal mask |
 | 0008 | keeps registers set on a handler entered from a syscall |
-| 0010 | the emulated seccomp/SIGSYS path (`SECCOMP_RET_TRAP`) — a trapped syscall is entered after it, not re-run; today's Wine `install_bpf` mutual-trap livelock lives here |
+| 0010 | the emulated seccomp/SIGSYS path (`SECCOMP_RET_TRAP`): the handler's `rt_sigreturn` resumes past the trapped syscall instead of re-running it. It does not fix Wine's separate `install_bpf` / `sigsys_handler` livelock, which is upstream Wine (Proton #9827/#9164) |
 | 0011–0020 | kernel-fidelity gaps a title or Wine can observe (debug registers, `/proc/<pid>/status`, `arch_prctl`, regsets, `restart_syscall`, the signal frame) |
 | 0003, 0005, 0006, 0009 | diagnostics and profiling only — not fixes |
 
