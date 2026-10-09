@@ -158,6 +158,18 @@
 #              "VM crashed in the GPU stack" (see audit/APPFORK-CRASH.md). A failed state never becomes ready, so
 #              the draw is dropped and VK_ERROR_INVALID_SHADER_NV is set on the command buffer, as mode 2 already
 #              did. Not a replay: waiting would only delay the same drop.
+
+#   0047       steamac: the MESA_KK_ASYNC_PIPELINES draw gate watched the bound VS. When a reduction sampler is
+#              bound, kk_cmd_shader_pipeline resolves the pipeline to the VS's min/max emulating companion (0029),
+#              and the companion is compiled through the same async path, so it can be async on its own (the VS is
+#              never async when it has a companion - kk_compile_graphics_pipeline skips the async path for
+#              info.minmax_sets). The gate therefore recorded a draw whose encoder kk_flush_pipeline then left
+#              without a render pipeline state (gfx->pipe->gfx.render NULL, assert compiled out by -Db_ndebug),
+#              faulting in AGXMetal's draw - the surviving 0041 SIGSEGV 0043 did not cover. Decide on the program
+#              the flush will read (kk_draw_async_action, the same kk_cmd_shader_pipeline resolve) and adopt it
+#              into gfx->pipe; make the flush and dispatch bails structural (command-buffer error, no dispatch
+#              without a render state) instead of asserts. Live-verified: VRChat world join, menu, settings and
+#              resolution changes under MESA_KK_ASYNC_PIPELINES=2, no SIGSEGV, no hang.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -390,6 +402,7 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0041 = steamac: MESA_KK_ASYNC_PIPELINES builds a graphics pipeline's Metal render pipeline state on workers"
 	echo "  0042 = steamac: robustness fixes (XFB counter bounds, sparse container_of, minmax update-after-bind scan, sparse view underflow)"
 	echo "  0043 = steamac: drop a draw whose async render pipeline state failed instead of recording it with a NULL state"
+	echo "  0047 = steamac: gate the async draw on the program the draw actually uses (not the bound VS)"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."

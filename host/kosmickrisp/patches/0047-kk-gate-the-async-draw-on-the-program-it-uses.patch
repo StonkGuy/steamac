@@ -1,0 +1,139 @@
+From 4c1d9a7b2e6f58439107a2b3c4d5e6f70819a2b3 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Thu, 9 Oct 2026 11:40:00 +0300
+Subject: [PATCH] kk: gate the async draw on the program the draw actually uses
+
+MESA_KK_ASYNC_PIPELINES builds a graphics pipeline's Metal render pipeline
+state on a worker (0041) and a draw whose state is not published yet is
+deferred (mode 1) or dropped (mode 2).  The gate watched
+cmd->state.shaders[MESA_SHADER_VERTEX], the bound VS.  That is the right
+program except when a reduction sampler is bound: kk_cmd_shader_pipeline
+then resolves the pipeline to the VS's min/max emulating companion (0029),
+and the companion is compiled through the same async path, so it can be
+async on its own even though the VS is never async when it has a companion
+(kk_compile_graphics_pipeline skips the async path for info.minmax_sets).
+For such a draw the gate saw the (synchronous) VS, recorded the draw, and
+kk_flush_pipeline then read gfx->pipe->gfx.render == NULL; with
+-Db_ndebug=true the assert compiled out and the flush returned silently,
+leaving the Metal encoder without a render pipeline state and faulting in
+AGXMetal's draw call (the 0041 SIGSEGV).
+
+Resolve the program at the gate the same way the flush does
+(kk_draw_async_action) and decide on that; adopt it into gfx->pipe so the
+flush reads exactly the program the decision was made for.  Also make the
+two bail points structural rather than asserts: kk_flush_pipeline sets a
+command-buffer error instead of returning with half a state, and
+kk_dispatch_draw refuses to dispatch on an encoder with no render pipeline
+state.  Cost when unused: two loads and a predictable branch on the draw
+path, zero for programs with no companion (the early-out pipe == gfx->pipe
+makes the re-resolve a no-op).
+
+---
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -1036,10 +1036,12 @@
+        * while this runs. */
+       mtl_render_pipeline_state *render = p_atomic_read(&gfx->pipe->gfx.render);
+       if (unlikely(render == NULL)) {
+-         /* Only an async program can be here without a state
+-          * (kk_shader_async_pipeline), and a draw of one returns above unless
+-          * kk_shader_async_draw_ok allowed it. */
+-         assert(kk_shader_async_pipeline(gfx->pipe) != NULL);
++         /* An async program whose state is not published (yet). The draw gate
++          * (kk_draw_async_action / kk_shader_async_draw_ok) drops or defers
++          * such a draw, so this should not be reached; never leave the encoder
++          * without a pipeline state on account of it, as a dispatch with none
++          * faults in AGXMetal (kk_dispatch_draw). */
++         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_INVALID_SHADER_NV);
+          return;
+       }
+       mtl_render_set_pipeline_state(enc, render);
+@@ -1611,7 +1613,40 @@
+    if (gfx->dirty & KK_DIRTY_OCCLUSION) {
+       mtl_set_visibility_result_mode(enc, gfx->occlusion.mode,
+                                      gfx->occlusion.index * sizeof(uint64_t));
++   }
++}
++
++/* MESA_KK_ASYNC_PIPELINES: the draw gate's decision for the program this
++ * draw actually uses. kk_flush_gfx_state resolves it with kk_cmd_shader_pipeline
++ * further down (the bound VS, or its min/max emulating companion while a
++ * reduction sampler is bound), and kk_flush_pipeline then reads
++ * gfx->pipe->gfx.render. The gate has to watch that same program: the bound VS
++ * is never async when it has a companion (kk_compile_graphics_pipeline skips
++ * the async path for info.minmax_sets), but the companion itself is compiled
++ * through the same path, so it can be async on its own. Resolving it here
++ * again is what kk_flush_gfx_state does at the top of the flush, and its
++ * cheap early-out (pipe == gfx->pipe) makes this a no-op when they agree. */
++static enum kk_async_action
++kk_draw_async_action(struct kk_cmd_buffer *cmd, bool *not_ready)
++{
++   struct kk_graphics_state *gfx = &cmd->state.gfx;
++   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
++   if (vs == NULL)
++      return KK_ASYNC_ACTION_RECORD;
++
++   const struct kk_pipeline_handles *pipe =
++      kk_cmd_shader_pipeline(cmd, vs, &gfx->descriptors);
++   struct kk_shader *program = container_of(pipe, struct kk_shader, pipeline);
++   if (program->async == NULL)
++      return KK_ASYNC_ACTION_RECORD;
++
++   /* Adopt the resolved program now, so the flush below reads exactly the
++    * program this decision was made for. */
++   if (pipe != gfx->pipe) {
++      gfx->pipe = pipe;
++      cmd->state.dirty_shaders |= BITFIELD_BIT(MESA_SHADER_VERTEX);
+    }
++   return kk_shader_async_draw_ok(cmd, program, not_ready);
+ }
+ 
+ static void
+@@ -1902,6 +1937,19 @@
+ kk_dispatch_draw(struct kk_cmd_buffer *cmd, struct kk_draw_data data)
+ {
+    mtl_render_encoder *enc = cs_get_render(cmd);
++
++   /* MESA_KK_ASYNC_PIPELINES: never dispatch on an encoder with no render
++    * pipeline state. A draw is only recorded once the gate above allowed the
++    * program it uses, so this cannot fire on a correct path; it is the one
++    * boundary that makes the nil-pipeline nil dispatch (EXC_BAD_ACCESS in
++    * AGXMetal's drawIndexedPrimitives:) structurally impossible. Two loads and
++    * a predictable branch on the normal path. */
++   const struct kk_pipeline_handles *pipe = cmd->state.gfx.pipe;
++   if (unlikely(pipe == NULL ||
++                p_atomic_read(&pipe->gfx.render) == NULL)) {
++      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_INVALID_SHADER_NV);
++      return;
++   }
+ 
+    if (kk_grid_is_indirect(data.grid)) {
+       if (data.index.el_size_B) {
+@@ -2469,16 +2517,18 @@
+ 
+    /* MESA_KK_ASYNC_PIPELINES: decide before flushing anything, so that a draw
+     * that is not recorded leaves no flushed state and no touched encoder
+-    * behind. cmd->state.shaders[MESA_SHADER_VERTEX] is the program this draw's
+-    * pipeline uses when its Metal render pipeline state is being built
+-    * asynchronously: such a program never has a min/max emulating companion
+-    * (kk_compile_graphics_pipeline), which is the only case where
+-    * kk_cmd_shader_pipeline returns a different program than the bound VS. */
++    * behind. The decision is made on the program this draw's pipeline
++    * actually uses (kk_draw_async_action), not on the bound VS: a program
++    * with a min/max emulating companion is never async itself, but the
++    * companion is compiled through the same async path, so gating on the VS
++    * alone would record a draw whose encoder is then left without a render
++    * pipeline state (kk_flush_pipeline reads a NULL handle and, with
++    * -Db_ndebug=true, returns) and reach Metal with none. */
+    struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
+-   if (unlikely(vs != NULL && vs->async != NULL)) {
++   if (unlikely(vs != NULL)) {
+       bool not_ready = false;
+       const enum kk_async_action action =
+-         kk_shader_async_draw_ok(cmd, vs, &not_ready);
++         kk_draw_async_action(cmd, &not_ready);
+       /* Mode 2 (never wait): the state is not ready, so the draw is dropped for
+        * good. It is re-recorded or resubmitted by the application like any
+        * other draw, and recorded then if the state is published by then. */
+-- 
+2.44.0
