@@ -1,0 +1,59 @@
+From 63c562dec63fd1505932d1e7f42bca62d6463002 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 21:40:02 +0300
+Subject: [PATCH 23/25] LinuxEmulation: deliver guest reads of the call/ret
+ shadow-stack guard pages instead of spinning
+
+The SIGSEGV handler took every fault inside a thread's call/ret shadow-stack allocation (the stack and its two guard pages)
+for a shadow-stack overflow or underflow: it reset REG_CALLRET_SP (x25) to the default location and resumed the faulting
+instruction. That only fixes a fault taken by a push or pop through x25. The guard pages are also listed in the guest's
+/proc/self/maps ("[anon:FEXMem_CallRetStacks]", ---p), and code that reads its maps and probes every listed range under a
+fault handler touches them with an ordinary load. Resetting x25 does not change that load, so it faulted again forever: one
+thread at 100% CPU, mostly kernel time, nothing ever delivered to the guest. An anti-tamper bootstrapper does exactly this
+scan (it reads /proc/self/maps and probes each range) and never got past it.
+
+Treat the fault as a shadow-stack overflow/underflow only when its address is where an x25 access lands (stp [x25, #-16]!
+writes x25-16..x25-1, ldp [x25] reads x25..x25+15); anything else falls through to the normal paths and is delivered to
+the guest as SIGSEGV, as a read of an inaccessible page is on Linux. Cost: two instructions on a SIGSEGV that hits the
+allocation; nothing on any other path.
+
+tests/maps-probe reads /proc/self/maps and probes every ---p mapping: native x86-64 PASS; the 0001-0020 build hangs on the first
+FEXMem_CallRetStacks guard page; with this change PASS.
+
+Upstream FEX main has the identical check (SyscallsSMCTracking.cpp, HandleSegfault); the Windows frontends'
+CallRetStack::HandleAccessViolation have the same shape and are not touched here.
+
+Base: FEX-2610 14c92681 + patches 0001-0022.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../LinuxSyscalls/SyscallsSMCTracking.cpp           | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+index 342223c1f..ffbb492cc 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -52,9 +52,16 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+   auto ThreadObject = FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread);
+   auto CallRetStackInfo = ThreadObject->GetCallRetStackInfo();
+   if (FaultAddress >= CallRetStackInfo.AllocationBase && FaultAddress < CallRetStackInfo.AllocationEnd) {
+-    // Reset REG_CALLRET_SP to the default location to allow for underflows/overflows
+-    ArchHelpers::Context::SetArmReg(ucontext, 25, CallRetStackInfo.DefaultLocation);
+-    return true;
++    // Only a push or pop through REG_CALLRET_SP (stp [x25, #-16]! / ldp [x25]) is a shadow-stack overflow or underflow. The
++    // guest can also read the guard pages itself: they are listed in its /proc/self/maps, and code that probes every mapped
++    // range (anti-tamper scanners do) touches them. Resetting x25 does not fix such an access, so it would fault again forever;
++    // it is an ordinary guest fault and must be delivered as one.
++    const uint64_t CallRetSP = ArchHelpers::Context::GetArmReg(ucontext, 25);
++    if (FaultAddress - (CallRetSP - 16) < 32) {
++      // Reset REG_CALLRET_SP to the default location to allow for underflows/overflows
++      ArchHelpers::Context::SetArmReg(ucontext, 25, CallRetStackInfo.DefaultLocation);
++      return true;
++    }
+   }
+ 
+   {
+-- 
+2.44.0
+

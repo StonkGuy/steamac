@@ -1,0 +1,191 @@
+From 80149cab11c41c2634349dec827516d03a4a4f60 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 21:40:02 +0300
+Subject: [PATCH 24/25] SamplingProfiler: FEX_PROFILESAMPLEMINTHREADS and
+ external SIGPROF snapshots
+
+The sampler (0005/0006) starts only in the process that reaches 100 guest threads, so it is blind to a process that spins
+with one thread (an anti-tamper bootstrapper stuck before it creates any). ProfileSampleMinThreads sets that threshold
+(default 100, unchanged behaviour).
+
+ProfileSampleMinThreads=0 starts no sampler thread at all (a process that is checked for unexpected threads, or that forks,
+should not grow one): the SIGPROF handler is registered and every SIGPROF sent from outside (kill -PROF <pid>) stores one
+snapshot record of the receiving thread into a 1024-entry ring in /dev/shm/fex-<pid>-snap. When the thread was interrupted
+in translated code the record carries the live guest RIP (RestoreRIPFromHostPC) and the statically allocated guest
+registers from the host context, and the guest stack is read at the live RSP. FutexWord = 1 marks such a record,
+FutexExpected is the sequence number and FutexAddr the interrupted host SP. Same layout as the snapshot file, no ptrace.
+
+Cost: none unless ProfileSampleHz is set.
+
+Base: FEX-2610 14c92681 + patches 0001-0023.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../Source/Interface/Config/Config.json.in    | 10 ++++
+ .../LinuxSyscalls/SamplingProfiler.cpp        | 59 ++++++++++++++++++-
+ .../LinuxSyscalls/SamplingProfiler.h          |  2 +-
+ .../LinuxSyscalls/ThreadManager.cpp           |  9 +--
+ 4 files changed, 72 insertions(+), 8 deletions(-)
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index 85dec666e..c15378996 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -583,6 +583,16 @@
+           "Use with LibraryJITNaming to attribute samples to guest libraries. 0 disables."
+         ]
+       },
++      "ProfileSampleMinThreads": {
++        "Type": "uint32",
++        "Default": "100",
++        "AffectsCodeGen": "false",
++        "Desc": [
++          "ProfileSampleHz starts the sampler in the process that reaches this many guest threads (default 100: the application,",
++          "not the hundreds of helper processes of a Steam/Wine session). 1 samples every process from its first thread.",
++          "0: no sampler thread; each SIGPROF sent from outside stores a snapshot record of the receiving thread (ring in fex-<pid>-snap)."
++        ]
++      },
+       "ProfileSampleAllThreads": {
+         "Type": "bool",
+         "Default": "false",
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp
+index e7542eecc..32e3d1d90 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.cpp
+@@ -4,6 +4,7 @@
+ #include "LinuxSyscalls/PtraceEmu.h"
+ #include "ArchHelpers/MContext.h"
+ 
++#include <FEXCore/Core/Context.h>
+ #include <FEXCore/Core/CoreState.h>
+ #include <FEXCore/Core/X86Enums.h>
+ #include <FEXCore/Debug/InternalThreadState.h>
+@@ -50,6 +51,29 @@ namespace {
+   SnapRecord* Snaps = nullptr;
+   std::atomic<uint32_t> SnapCount {0};
+   std::atomic<bool> SnapMode {false};
++  // External mode (FEX_PROFILESAMPLEMINTHREADS=0): no sampler thread at all; every SIGPROF sent from outside (kill -PROF <pid>)
++  // stores one snapshot record of the receiving thread into a ring in /dev/shm/fex-<pid>-snap. For processes that must not
++  // grow an extra thread. FutexAddr holds the interrupted host SP, FutexExpected the sequence number.
++  bool ExternalMode = false;
++  FEX::HLE::SignalDelegator* Delegator = nullptr;
++  std::atomic<bool> ExternalOpen {false};
++
++  void OpenExternalSnaps() {
++    if (ExternalOpen.exchange(true)) {
++      return;
++    }
++    char Path[64];
++    snprintf(Path, sizeof(Path), "/dev/shm/fex-%d-snap", static_cast<int>(getpid()));
++    const int fd = open(Path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
++    if (fd < 0 || ftruncate(fd, sizeof(SnapRecord) * MaxSnaps) != 0) {
++      return;
++    }
++    void* Map = mmap(nullptr, sizeof(SnapRecord) * MaxSnaps, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    close(fd);
++    if (Map != MAP_FAILED) {
++      Snaps = static_cast<SnapRecord*>(Map);
++    }
++  }
+ 
+   // Threads worth sampling in "all threads" mode: the busy-prone ones. A process has hundreds of mostly idle threads
+   // (Unity workers, thread pools); signalling all of them at the sampling rate would perturb what is measured. Samples
+@@ -174,15 +198,24 @@ namespace {
+   }
+ } // namespace
+ 
+-void StartSamplingProfiler(FEX::HLE::SignalDelegator* Signals, uint32_t Hz, bool AllThreads) {
++void StartSamplingProfiler(FEX::HLE::SignalDelegator* Signals, uint32_t Hz, bool AllThreads, bool External) {
+   if (!Hz) {
+     return;
+   }
++  ExternalMode = External;
++  Delegator = Signals;
+   Signals->RegisterHostSignalHandler(
+     SIGPROF,
+     [](FEXCore::Core::InternalThreadState* Thread, int, void*, void* UContext) {
+-      if (SnapMode.load(std::memory_order_relaxed)) {
+-        const uint32_t SIdx = SnapCount.fetch_add(1, std::memory_order_relaxed);
++      if (ExternalMode) {
++        OpenExternalSnaps();
++      }
++      if (ExternalMode || SnapMode.load(std::memory_order_relaxed)) {
++        uint32_t SIdx = SnapCount.fetch_add(1, std::memory_order_relaxed);
++        const uint32_t Seq = SIdx;
++        if (ExternalMode) {
++          SIdx %= MaxSnaps;
++        }
+         if (Snaps && SIdx < MaxSnaps) {
+           SnapRecord& R = Snaps[SIdx];
+           R.Tid = static_cast<uint64_t>(syscall(SYS_gettid));
+@@ -222,6 +255,23 @@ void StartSamplingProfiler(FEX::HLE::SignalDelegator* Signals, uint32_t Hz, bool
+               }
+             }
+           }
++          if (ExternalMode) {
++            R.FutexWord = 0;
++            R.FutexExpected = Seq;
++            R.FutexAddr = ArchHelpers::Context::GetSp(UContext);
++            // Interrupted in translated code: the thread state is stale, take RIP and the statically allocated registers live.
++            if (Thread && Thread->CTX->IsAddressInCodeBuffer(Thread, R.HostPC)) {
++              R.FutexWord = 1;
++              R.Rip = Thread->CTX->RestoreRIPFromHostPC(Thread, R.HostPC);
++              const auto& Cfg = Delegator->GetConfig();
++              for (size_t i = 0; i < Cfg.SRAGPRCount && i < 16; ++i) {
++                R.Gregs[i] = ArchHelpers::Context::GetArmReg(UContext, Cfg.SRAGPRMapping[i]);
++              }
++              iovec Local {R.Stack, sizeof(R.Stack)};
++              iovec Remote {reinterpret_cast<void*>(R.Gregs[FEXCore::X86State::REG_RSP]), sizeof(R.Stack)};
++              process_vm_readv(getpid(), &Local, 1, &Remote, 1, 0);
++            }
++          }
+         }
+         return true;
+       }
+@@ -234,6 +284,9 @@ void StartSamplingProfiler(FEX::HLE::SignalDelegator* Signals, uint32_t Hz, bool
+     },
+     true);
+ 
++  if (External) {
++    return;
++  }
+   pthread_t T;
+   pthread_attr_t Attr;
+   pthread_attr_init(&Attr);
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.h
+index 0fd1fa9cf..19f615be7 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SamplingProfiler.h
+@@ -26,5 +26,5 @@ class SignalDelegator;
+  * It exists because attaching a debugger or `perf` to a process that runs an anti-cheat is detected (and rightly so);
+  * this runs entirely inside the emulator process.
+  */
+-void StartSamplingProfiler(FEX::HLE::SignalDelegator* Signals, uint32_t Hz, bool AllThreads);
++void StartSamplingProfiler(FEX::HLE::SignalDelegator* Signals, uint32_t Hz, bool AllThreads, bool External = false);
+ } // namespace FEX::HLE
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+index e3135b677..68c78dedd 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.cpp
+@@ -212,13 +212,14 @@ ThreadManager::CreateThread(const FEXCore::Core::CPUState* NewThreadState, uint6
+   ThreadStateObject->Thread->FrontendPtr = ThreadStateObject;
+ 
+   {
+-    // The sampling profiler (FEX_PROFILESAMPLEHZ) only starts in the process that grows past ~100 guest threads, i.e.
+-    // the application itself: a Steam/Wine session runs hundreds of FEX processes and perturbing all of them is useless.
++    // The sampling profiler (FEX_PROFILESAMPLEHZ) only starts in the process that reaches FEX_PROFILESAMPLEMINTHREADS (100)
++    // guest threads, i.e. the application itself: a Steam/Wine session runs hundreds of FEX processes and perturbing all of them is useless.
+     static std::atomic<uint32_t> ThreadCount {0};
+     FEX_CONFIG_OPT(ProfileSampleHz, PROFILESAMPLEHZ);
+     FEX_CONFIG_OPT(ProfileSampleAllThreads, PROFILESAMPLEALLTHREADS);
+-    if (ProfileSampleHz() && ThreadCount.fetch_add(1) + 1 == 100) {
+-      StartSamplingProfiler(SignalDelegation, ProfileSampleHz(), ProfileSampleAllThreads());
++    FEX_CONFIG_OPT(ProfileSampleMinThreads, PROFILESAMPLEMINTHREADS);
++    if (ProfileSampleHz() && ThreadCount.fetch_add(1) + 1 == std::max<uint32_t>(ProfileSampleMinThreads(), 1)) {
++      StartSamplingProfiler(SignalDelegation, ProfileSampleHz(), ProfileSampleAllThreads(), ProfileSampleMinThreads() == 0);
+     }
+   }
+   if (ProfileStats()) {
+-- 
+2.44.0
+

@@ -1,0 +1,161 @@
+From db274b1287a5262e4846d70e628283297b116657 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 22:35:05 +0300
+Subject: [PATCH] Signals: keep the signal alt stack while a thread exits on it
+
+A guest thread can leave from inside a signal handler that FEX runs on the thread's host alt stack. Wine does this whenever
+it terminates another thread: the target gets SIGQUIT, and when the target is in user mode the handler ends it right there
+(quit_handler -> abort_thread -> exit). If the SIGQUIT arrives while the thread is inside FEX's handling of a trapped
+syscall (a SECCOMP_RET_TRAP SIGSYS, which Wine installs for every raw `syscall`), FEX runs the guest handler on the alt
+stack, and the exit syscall's UninstallTLSState unmapped that stack while the thread still stood on it: the next stack
+access (the return from munmap) faulted and the whole process died with SIGSEGV.
+
+UninstallTLSState now asks the kernel whether the thread is on its alt stack (sigaltstack(NULL, &cur), SS_ONSTACK). If it
+is, the stack is kept and marked; the pthread exit path releases it after the long jump back to the thread's own stack,
+before the thread object is destroyed. A non-pthread thread that exits on its alt stack keeps it until process exit (one
+alt stack, SIGSTKSZ * 16). The release also disables the alt stack before unmapping it (it used to unmap first), so a
+signal arriving in between is not delivered onto unmapped memory. Cost: one sigaltstack query per thread exit; nothing on
+any other path.
+
+tests/seccomp-trap check 7: 20 worker threads busy in trapped syscalls are each ended by a signal whose handler calls
+exit(): native x86-64 PASS 3/3; without this change the process dies with SIGSEGV before the check prints (2/2); with it
+PASS 2/2. A Wine repro (TerminateThread on a thread spinning on raw NT syscalls, 40 times) crashes the process without this
+change and passes all four cases, 160/160 terminations, with it, as it does natively.
+
+Upstream FEX main has the same exit path (Syscalls/Thread.cpp exit -> UninstallTLSState -> munmap of the alt stack).
+
+Base: FEX-2610 14c92681 + patches 0001-0025.
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../LinuxSyscalls/SignalDelegator.cpp         | 32 +++++++++++++++----
+ .../LinuxSyscalls/SignalDelegator.h           |  3 ++
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  4 +++
+ .../LinuxEmulation/LinuxSyscalls/Syscalls.h   |  1 +
+ .../LinuxSyscalls/ThreadManager.h             |  3 ++
+ .../LinuxSyscalls/Utils/Threads.cpp           |  2 ++
+ 6 files changed, 38 insertions(+), 7 deletions(-)
+
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+index c84da059f..a38a9cdc8 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -1167,23 +1167,41 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
+   }
+ }
+ 
+-void SignalDelegator::UninstallTLSState(FEX::HLE::ThreadStateObject* Thread) {
+-  FEXCore::Allocator::munmap(Thread->SignalInfo.AltStackPtr, SIGSTKSZ * 16);
+-
+-  Thread->SignalInfo.AltStackPtr = nullptr;
+-
++void SignalDelegator::ReleaseAltStack(FEX::HLE::ThreadStateObject* Thread) {
++  // Uninstall the alt stack before unmapping it, so a signal arriving in between is not delivered onto unmapped memory.
+   stack_t altstack {};
+   altstack.ss_flags = SS_DISABLE;
+-
+-  // Uninstall the alt stack
+   const int Result = sigaltstack(&altstack, nullptr);
+   if (Result == -1) {
+     LogMan::Msg::EFmt("Failed to uninstall alternative signal stack {}", strerror(errno));
+   }
+ 
++  FEXCore::Allocator::munmap(Thread->SignalInfo.AltStackPtr, SIGSTKSZ * 16);
++  Thread->SignalInfo.AltStackPtr = nullptr;
++  Thread->SignalInfo.AltStackReleaseDeferred = false;
++}
++
++void SignalDelegator::UninstallTLSState(FEX::HLE::ThreadStateObject* Thread) {
++  // A guest thread can leave from inside a signal handler that FEX runs on this alt stack: Wine terminates another
++  // thread with SIGQUIT, and when that thread is inside a trapped syscall its handler calls exit() right there. Unmapping
++  // the stack we are standing on faults on the next stack access and kills the process, so in that case keep it and
++  // release it once the thread is back on its own stack.
++  stack_t Current {};
++  if (sigaltstack(nullptr, &Current) == 0 && (Current.ss_flags & SS_ONSTACK)) {
++    Thread->SignalInfo.AltStackReleaseDeferred = true;
++  } else {
++    ReleaseAltStack(Thread);
++  }
++
+   FEXCore::Allocator::UninstallTLSData(Thread->Thread);
+ }
+ 
++void SignalDelegator::ReleaseDeferredTLSState(FEX::HLE::ThreadStateObject* Thread) {
++  if (Thread->SignalInfo.AltStackReleaseDeferred) {
++    ReleaseAltStack(Thread);
++  }
++}
++
+ void SignalDelegator::FrontendRegisterHostSignalHandler(int Signal, bool Required) {
+   // Linux signal handlers are per-process rather than per thread
+   // Multiple threads could be calling in to this
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
+index 047061455..236da05e1 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.h
+@@ -62,6 +62,9 @@ public:
+ 
+   void RegisterTLSState(FEX::HLE::ThreadStateObject* Thread);
+   void UninstallTLSState(FEX::HLE::ThreadStateObject* Thread);
++  // Releases an alt stack UninstallTLSState had to keep because the thread was running on it.
++  void ReleaseDeferredTLSState(FEX::HLE::ThreadStateObject* Thread);
++  void ReleaseAltStack(FEX::HLE::ThreadStateObject* Thread);
+ 
+   /**
+    * @brief Registers a signal handler for the host to handle a signal
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
+index ac8cc16ad..207c33b24 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
+@@ -1045,6 +1045,10 @@ void SyscallHandler::UninstallTLSState(FEX::HLE::ThreadStateObject* Thread) {
+   FEX::HLE::ThreadManager::SetCurrentThreadObject(nullptr);
+ }
+ 
++void SyscallHandler::ReleaseDeferredTLSState(FEX::HLE::ThreadStateObject* Thread) {
++  SignalDelegation->ReleaseDeferredTLSState(Thread);
++}
++
+ static bool isHEX(char c) {
+   return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+ }
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h
+index 7124a05a0..0813fca0b 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.h
+@@ -306,6 +306,7 @@ public:
+ 
+   void RegisterTLSState(FEX::HLE::ThreadStateObject* Thread);
+   void UninstallTLSState(FEX::HLE::ThreadStateObject* Thread);
++  void ReleaseDeferredTLSState(FEX::HLE::ThreadStateObject* Thread);
+ 
+   SourcecodeResolver* GetSourcecodeResolver() override {
+     return this;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+index 61fd91aae..7c86004c7 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+@@ -69,6 +69,9 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
+     SignalDelegator* Delegator {};
+ 
+     void* AltStackPtr {};
++    // Set when the thread left the guest (exit) while running on AltStackPtr: the stack could not be released under
++    // itself and is released once the thread is back on its own stack (ReleaseDeferredTLSState).
++    bool AltStackReleaseDeferred {};
+     stack_t GuestAltStack {
+       .ss_sp = nullptr,
+       .ss_flags = SS_DISABLE, // By default the guest alt stack is disabled
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
+index 8b9c25948..00188fcd7 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Utils/Threads.cpp
+@@ -347,6 +347,8 @@ namespace PThreads {
+     Thread->detach();
+ 
+     if (LongJumpExit) {
++      // Back on this thread's own stack: release the signal alt stack the exit had to keep because it ran on it.
++      FEX::HLE::_SyscallHandler->ReleaseDeferredTLSState(ThreadObject);
+       // We have ownership of the thread object. Make sure to clean it up to prevent memory leaks.
+       FEX::HLE::_SyscallHandler->TM.DestroyThread(ThreadObject, true);
+       if (Status == 0) {
+-- 
+2.44.0
+

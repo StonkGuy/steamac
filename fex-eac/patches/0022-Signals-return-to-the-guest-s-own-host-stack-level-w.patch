@@ -1,0 +1,158 @@
+From c7c2da7f5193f2e04384a8f2784f440f23dc4ca4 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 20:29:03 +0300
+Subject: [PATCH] Signals: return to the guest's own host stack level when
+ rt_sigreturn abandons a syscall handler
+
+A guest signal handler that interrupts the C++ half of a syscall handler (the host signal arrives while HandleSyscall is on
+the stack; a SECCOMP_RET_TRAP SIGSYS is raised from inside it) runs below those frames. When the handler returns with a
+different RIP (a seccomp trap always does: the frame is entered past the syscall, see 0010; Wine's handlers also redirect
+RIP), RestoreFrame_* sends the thread to the top of the dispatcher, abandoning the interrupted syscall handler. It restored the
+host stack pointer of the interrupted code first and kept it, so every such sigreturn leaked the abandoned frames. A thread that
+takes many seccomp traps (Wine traps every NT syscall issued from its stubs: ~390k in the t_p0 repro) exhausted its 8 MiB host
+stack after about 20k of them, faulted on the guard page inside FEX, and the SEGV handler returned to the faulting instruction
+forever: a thread at 100% CPU that never delivers another signal, so a peer waiting for it (Wine's NtGetContextThread suspend)
+waits for ever.
+
+Track the stack level guest code runs at per thread (JITStackSP: the SP of the interrupted C++ context while a handler entered
+from it runs, else 0 = the dispatcher's ReturningStackLocation), save it in the context backup on handler entry, restore it at
+rt_sigreturn, and on the go-to-dispatcher-top path set the SP to the saved level when the interrupted code was not in the JIT.
+Handlers interrupted in the JIT, and rt_sigreturn without a RIP change (which resumes the syscall handler), are unchanged.
+Nested handlers keep the level of the handler they return into, so frames a still-pending outer sigreturn needs are not reused.
+
+tests/seccomp-trap now ends with 100000 trapped syscalls on a worker thread; it fails on the 0001-0020 build and passes with this.
+
+Base: FEX-2610 14c92681 + patches 0001-0020.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../LinuxEmulation/ArchHelpers/MContext.h     |  2 ++
+ .../LinuxSyscalls/SignalDelegator.cpp         |  7 +++++++
+ .../SignalDelegator/GuestFramesManagement.cpp | 21 +++++++++++++++++++
+ .../LinuxSyscalls/ThreadManager.h             |  5 +++++
+ 4 files changed, 35 insertions(+)
+
+diff --git a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
+index 42db7a70e..fb6ab8c14 100644
+--- a/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
++++ b/Source/Tools/LinuxEmulation/ArchHelpers/MContext.h
+@@ -45,6 +45,7 @@ struct X86ContextBackup {
+   bool FaultToTopAndGeneratedException;
+   uint64_t GuestSignalMask; ///< guest-visible signal mask at the time the guest handler was entered (restored at rt_sigreturn)
+   uint64_t SeccompTrapRIP; ///< non-zero when this frame is a SECCOMP_RET_TRAP SIGSYS: the RIP to enter the handler at (past the syscall)
++  uint64_t SavedJITStackSP; ///< host stack level the interrupted guest code ran at (0: the dispatcher's), restored at rt_sigreturn
+ 
+   // Guest state
+   int Signal;
+@@ -75,6 +76,7 @@ struct ArmContextBackup {
+   bool FaultToTopAndGeneratedException;
+   uint64_t GuestSignalMask; ///< guest-visible signal mask at the time the guest handler was entered (restored at rt_sigreturn)
+   uint64_t SeccompTrapRIP; ///< non-zero when this frame is a SECCOMP_RET_TRAP SIGSYS: the RIP to enter the handler at (past the syscall)
++  uint64_t SavedJITStackSP; ///< host stack level the interrupted guest code ran at (0: the dispatcher's), restored at rt_sigreturn
+ 
+   // Guest state
+   int Signal;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+index 960d3e6bd..c84da059f 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
+@@ -176,6 +176,7 @@ ArchHelpers::Context::ContextBackup* SignalDelegator::StoreThreadState(FEXCore::
+   Context->ClearedSyscallInfo = 0;
+   Context->GuestSignalMask = 0;
+   Context->SeccompTrapRIP = 0;
++  Context->SavedJITStackSP = 0;
+ 
+   // Store fault to top status and then reset it
+   Context->FaultToTopAndGeneratedException = Thread->CurrentFrame->SynchronousFaultData.FaultToTopAndGeneratedException;
+@@ -289,6 +290,8 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+     }
+   }
+ 
++  FEX::HLE::ThreadManager::GetStateObjectFromFEXCoreThread(Thread)->JITStackSP = Context->SavedJITStackSP;
++
+   // Reset the guest state
+   memcpy(&Thread->CurrentFrame->State, &Context->GuestState, sizeof(FEXCore::Core::CPUState));
+ 
+@@ -328,6 +331,7 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+   // the syscall (discarding the handler's return value). See SeccompEmulator for the kernel semantics.
+   ContextBackup->SeccompTrapRIP = ThreadObject->SeccompTrapRIP;
+   ThreadObject->SeccompTrapRIP = 0;
++  ContextBackup->SavedJITStackSP = ThreadObject->JITStackSP;
+ 
+   auto Frame = Thread->CurrentFrame;
+ 
+@@ -365,6 +369,9 @@ bool SignalDelegator::HandleDispatcherGuestSignal(FEXCore::Core::InternalThreadS
+     ContextBackup->InSyscallInfo = Thread->CurrentFrame->InSyscallInfo;
+     Thread->CurrentFrame->InSyscallInfo = 0;
+   } else {
++    // The guest handler runs below the interrupted C++ frames; that is the stack level the guest runs at until it returns.
++    ThreadObject->JITStackSP = ArchHelpers::Context::GetSp(ucontext);
++
+     // Interrupted outside of JIT code, typically in the C++ half of a syscall handler, where InSyscallInfo still says that all
+     // registers are spilled. The guest handler is going to run JIT code with live registers, so it must not inherit that: an SMC
+     // fault or a nested signal before the handler's own first syscall would skip spilling every register (the spill mask is
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+index 8073da305..8fc54ee19 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
+@@ -167,6 +167,13 @@ void SignalDelegator::RestoreFrame_x64(FEXCore::Core::InternalThreadState* Threa
+ 
+     // Hack! Go back to the top of the dispatcher top
+     // This is only safe inside the JIT rather than anything outside of it
++    // RestoreContext put back the host stack pointer of the interrupted code. When that was the C++ half of a syscall
++    // handler (a seccomp trap is raised from inside it), its frames are abandoned here, not resumed, so the dispatcher
++    // goes back to the stack level the interrupted guest code was running at: otherwise every such sigreturn leaks them
++    // and the host stack overflows after a few thousand signals.
++    if (!(Context->Flags & ArchHelpers::Context::ContextFlags::CONTEXT_FLAG_INJIT)) {
++      ArchHelpers::Context::SetSp(ucontext, Context->SavedJITStackSP ? Context->SavedJITStackSP : Frame->ReturningStackLocation);
++    }
+     ArchHelpers::Context::SetPc(ucontext, Config.AbsoluteLoopTopAddressFillSRA);
+     ArchHelpers::Context::SetFillSRASingleInst(ucontext, false);
+     // Set our state register to point to our guest thread data
+@@ -244,6 +251,13 @@ void SignalDelegator::RestoreFrame_ia32(FEXCore::Core::InternalThreadState* Thre
+ 
+     // Hack! Go back to the top of the dispatcher top
+     // This is only safe inside the JIT rather than anything outside of it
++    // RestoreContext put back the host stack pointer of the interrupted code. When that was the C++ half of a syscall
++    // handler (a seccomp trap is raised from inside it), its frames are abandoned here, not resumed, so the dispatcher
++    // goes back to the stack level the interrupted guest code was running at: otherwise every such sigreturn leaks them
++    // and the host stack overflows after a few thousand signals.
++    if (!(Context->Flags & ArchHelpers::Context::ContextFlags::CONTEXT_FLAG_INJIT)) {
++      ArchHelpers::Context::SetSp(ucontext, Context->SavedJITStackSP ? Context->SavedJITStackSP : Frame->ReturningStackLocation);
++    }
+     ArchHelpers::Context::SetPc(ucontext, Config.AbsoluteLoopTopAddressFillSRA);
+     ArchHelpers::Context::SetFillSRASingleInst(ucontext, false);
+     // Set our state register to point to our guest thread data
+@@ -323,6 +337,13 @@ void SignalDelegator::RestoreRTFrame_ia32(FEXCore::Core::InternalThreadState* Th
+ 
+     // Hack! Go back to the top of the dispatcher top
+     // This is only safe inside the JIT rather than anything outside of it
++    // RestoreContext put back the host stack pointer of the interrupted code. When that was the C++ half of a syscall
++    // handler (a seccomp trap is raised from inside it), its frames are abandoned here, not resumed, so the dispatcher
++    // goes back to the stack level the interrupted guest code was running at: otherwise every such sigreturn leaks them
++    // and the host stack overflows after a few thousand signals.
++    if (!(Context->Flags & ArchHelpers::Context::ContextFlags::CONTEXT_FLAG_INJIT)) {
++      ArchHelpers::Context::SetSp(ucontext, Context->SavedJITStackSP ? Context->SavedJITStackSP : Frame->ReturningStackLocation);
++    }
+     ArchHelpers::Context::SetPc(ucontext, Config.AbsoluteLoopTopAddressFillSRA);
+     ArchHelpers::Context::SetFillSRASingleInst(ucontext, false);
+     // Set our state register to point to our guest thread data
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+index ad4aa7854..61fd91aae 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/ThreadManager.h
+@@ -98,6 +98,11 @@ struct ThreadStateObject : public FEXCore::Allocator::FEXAllocOperators {
+   // in SeccompEmulator for the Linux semantics this reproduces.
+   uint64_t SeccompTrapRIP {};
+ 
++  // Host stack pointer that guest code currently runs at when it is not the dispatcher's own level: a guest signal handler
++  // entered from the C++ half of a syscall runs below that handler's frames. 0 means ReturningStackLocation. Lets rt_sigreturn
++  // drop abandoned syscall-handler frames instead of leaking them.
++  uint64_t JITStackSP {};
++
+   // personality emulation.
+   uint32_t persona {};
+ 
+-- 
+2.44.0
+

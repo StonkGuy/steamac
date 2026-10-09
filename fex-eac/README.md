@@ -13,10 +13,11 @@ the session never authenticates. The patched FEX passes the `ptrace` and signal-
 | 0002 | SMC hot pages |
 | 0007, 0008, 0010 | signal mask, syscall-info and seccomp/SIGSYS fidelity (0010 also stops a `SECCOMP_RET_TRAP` filter from letting the trapped syscall run) |
 | 0011–0020 | kernel-fidelity gaps a title or Wine can observe (debug registers, `/proc/<pid>/status`, `arch_prctl`, regsets, `restart_syscall`, the signal frame) |
-| 0003–0006, 0009 | accounting and profiling only |
+| 0022, 0023, 0025, 0026 | what a second title's anti-tamper bootstrapper observes: host stack per SIGSYS trap, reads of FEX's own shadow-stack guard pages, the single-step trap after `iretq`, a thread exiting on its signal alt stack |
+| 0003–0006, 0009, 0024 | accounting and profiling only |
 
-Required for VRChat: 0001, 0002 and 0007/0008. The rest (0003–0006, 0009) are accounting and profiling only.
-`build-fex.sh` applies every patch in `patches/` (0001–0020) and pins base commit `14c92681`. Patch 0021 (`pop r/m`) was withdrawn — it broke the normal path and hung the EAC launcher; see `patches/withdrawn/`.
+Required for VRChat: 0001, 0002 and 0007/0008. The rest (0003–0006, 0009, 0024) are accounting and profiling only.
+`build-fex.sh` applies every patch in `patches/` (0001–0026) and pins base commit `14c92681`. Patch 0021 (`pop r/m`) was withdrawn — it broke the normal path and hung the EAC launcher; see `patches/withdrawn/`.
 
 **Scope.** These patches do not try to make FEX a replica of native x86-64 Linux. Like upstream FEX, they make a
 behaviour exact only where real software observes it (the anti-cheat launcher, Wine, a title's own probes) and keep it

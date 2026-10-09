@@ -1,0 +1,137 @@
+From 73303f96878ae17749a10c2cd6d475ff2486309c Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 21:57:46 +0300
+Subject: [PATCH 25/25] JIT: raise the single-step trap on the target of an
+ IRETQ that loads TF, and never leave single-step mode through the lookup
+ caches
+
+Two places let a single-step trap land later than on x86:
+
+1. Writing TF=1 always produced the "blocked for one instruction" state, even when TF was already armed. x86 traps after
+   any instruction that began with TF set, so in Wine's syscall return for a caller that had TF set
+   (__wine_syscall_dispatcher_return, CONTEXT_CONTROL: "pushq flags; popfq; iretq", commented "make sure that if trap
+   flag is set the trap happens on the first instruction after iret") the trap belongs on the IRETQ target, before its
+   first instruction runs. FEX re-blocked TF at the IRETQ and trapped one instruction later. A write of TF=1 now keeps an
+   armed TF (packed 0b11) armed; only a 0->1 transition blocks for one instruction.
+
+2. Indirect exits (IRETQ, RET, JMP/CALL reg) used the call-ret stack and the L1 lookup cache with no TF check, so when TF
+   was set (loaded by that IRETQ, or the block was single-stepped) they jumped straight into code compiled without the
+   per-instruction check and the trap only came at the next dispatcher entry, instructions and returns later. POPF already
+   ends its block with a CheckTF exit. IRETQ now does too, and the indirect exit of a CheckTF branch or of a block compiled
+   with TF set goes through the dispatcher when TF is set (the call-ret stack is kept balanced).
+
+Consumer: an anti-tamper bootstrapper raises an access violation, sets TF from its handler, single-steps over a raw
+"syscall" (trapped by Wine's seccomp filter, returned through the IRETQ path above) and checks where
+EXCEPTION_SINGLE_STEP lands. On FEX it landed a few instructions later in another function, the check failed, and the
+title's crash reporter wrote a dump while the process waited forever.
+
+Cost: one ldrb+cbz on the exit of IRETQ (rare) and of single-stepped blocks; nothing on other code.
+
+tests/tf-iret (POPFQ/IRETQ TF placement, Wine's popfq+iretq return, single-step across call/ret into translated code):
+native x86-64 PASS; the 0001-0020 build fails checks 4 and 5; with this change PASS. tests/sigreturn-eflags and
+tests/signal-frame unchanged (PASS).
+
+Upstream FEX main has the same TF write (OpcodeDispatcher.h SetRFLAG), the same IRETOp exit and no TF check on indirect
+exits (BranchOps.cpp).
+
+Base: FEX-2610 14c92681 + patches 0001-0024.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../Source/Interface/Core/JIT/BranchOps.cpp   | 20 +++++++++++++++++++
+ FEXCore/Source/Interface/Core/JIT/JIT.cpp     |  1 +
+ FEXCore/Source/Interface/Core/JIT/JITClass.h  |  1 +
+ .../Interface/Core/OpcodeDispatcher.cpp       |  3 ++-
+ .../Source/Interface/Core/OpcodeDispatcher.h  |  7 +++++--
+ 5 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+index c2b1d8e28..c418630a8 100644
+--- a/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/BranchOps.cpp
+@@ -195,6 +195,26 @@ DEF_OP(ExitFunction) {
+     ARMEmitter::ForwardLabel SkipFullLookup;
+     auto RipReg = GetReg(Op->NewRIP);
+ 
++    if (Op->Hint == IR::BranchHint::CheckTF || CompilingWithTF) {
++      // TF may be set: an instruction that loaded it (IRETQ), or a single-stepped block. The call-ret stack and the L1
++      // cache would jump straight into code compiled without the per-instruction TF check, so the trap would only be raised
++      // at the next dispatcher entry, instructions later. Go through the dispatcher, which compiles single-step blocks.
++      ARMEmitter::ForwardLabel TFUnset;
++      ldrb(TMP1, STATE_PTR(CpuStateFrame, State.flags[X86State::RFLAG_TF_RAW_LOC]));
++      (void)cbz(ARMEmitter::Size::i32Bit, TMP1, &TFUnset);
++      if (Op->Hint == IR::BranchHint::Return) {
++        // Keep the call-ret stack balanced: drop the entry this return would have used.
++        add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x10);
++      } else if (Op->Hint == IR::BranchHint::Call) {
++        // An entry that never matches, so the matching return takes the full lookup.
++        stp<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::zr, ARMEmitter::XReg::zr, REG_CALLRET_SP, -0x10);
++      }
++      str(RipReg.X(), STATE, offsetof(FEXCore::Core::CpuStateFrame, State.rip));
++      ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.DispatcherLoopTop));
++      br(TMP2);
++      (void)Bind(&TFUnset);
++    }
++
+     if (Op->Hint == IR::BranchHint::Return) {
+       // First try to pop from the call-ret stack, otherwise follow the normal path (but ending in a ret)
+       ldp<ARMEmitter::IndexType::POST>(TMP1, TMP2, REG_CALLRET_SP, 0x10);
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index ef7e33299..bb0d111d8 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -886,6 +886,7 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+   this->DebugData = DebugData;
+   this->IR = IR;
+   RequiresFarARM64Jumps = false;
++  CompilingWithTF = CheckTF;
+   SSANodeMultiplier = 24;
+ 
+   // Prepare restart via long jump in case branch encoding fails.
+diff --git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+index 17e76910b..331b3c597 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -82,6 +82,7 @@ private:
+   // In the rare case when those assumptions are broken, FEX needs to safely restart the JIT.
+   RestartOptions RestartControl {};
+   bool RequiresFarARM64Jumps {};
++  bool CompilingWithTF {}; ///< the block being compiled is single-stepped (TF was set when it was compiled)
+   // Default to 6 instructions per SSA node.
+   uint32_t SSANodeMultiplier {24};
+ 
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+index 0f7a00eee..731f91292 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
+@@ -164,7 +164,8 @@ void OpDispatchBuilder::IRETOp(OpcodeArgs) {
+     StoreGPRRegister(X86State::REG_RSP, SP);
+   }
+ 
+-  ExitFunction(NewRIP);
++  // IRETQ may load TF: check it on the way out like POPF, so the trap is raised on the target (see BranchOps).
++  ExitFunction(NewRIP, BranchHint::CheckTF);
+   BlockSetRIP = true;
+ }
+ 
+diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+index 71766e010..b02dbdff8 100644
+--- a/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
++++ b/FEXCore/Source/Interface/Core/OpcodeDispatcher.h
+@@ -1875,8 +1875,11 @@ private:
+       // An exception should still be raised after an instruction that unsets TF, leave the unblocked bit set but unset
+       // the TF bit to cause such behaviour. The handling code at the start of the next block will then unset the
+       // unblocked bit before raising the exception.
+-      auto NewPackedTF =
+-        _Select(OpSize::i64Bit, OpSize::i64Bit, CondClass::EQ, Value, Constant(0), _And(OpSize::i32Bit, PackedTF, Constant(~1)), Constant(1));
++      // Setting TF blocks the trap for one instruction only when TF was clear: x86 traps after an instruction that began
++      // with TF set, so an instruction that rewrites an armed TF (packed 0b11; IRETQ right after the POPFQ that set it, as in
++      // Wine's syscall return) keeps the unblocked bit and traps on its target.
++      auto NewPackedTF = _Select(OpSize::i64Bit, OpSize::i64Bit, CondClass::EQ, Value, Constant(0), _And(OpSize::i32Bit, PackedTF, Constant(~1)),
++                                 _Select(OpSize::i64Bit, OpSize::i64Bit, CondClass::EQ, PackedTF, Constant(3), Constant(3), Constant(1)));
+       _StoreContextGPR(OpSize::i8Bit, NewPackedTF, ARRAY_OFFSETOF(FEXCore::Core::CPUState, flags, BitOffset));
+     } else {
+       _StoreContextGPR(OpSize::i8Bit, Value, ARRAY_OFFSETOF(FEXCore::Core::CPUState, flags, BitOffset));
+-- 
+2.44.0
+

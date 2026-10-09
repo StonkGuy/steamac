@@ -8,7 +8,7 @@ FEX or Proton. Not affiliated with FX GAMES, Valve, Epic or VRChat.
 
 | change | where | why | status |
 |---|---|---|---|
-| patched FEX-2610 (patches 0001–0020), `build-fex.sh`, `install-fex-tool.sh`, `guest-tune.sh` | [`fex-eac/`](../fex-eac/README.md) | Valve's FEX-2607 in Steam's compatibility tool fails EAC's ptrace injection and signal semantics ([eac-how-it-works.md](eac-how-it-works.md)) | built, tested (3 sessions) — **the verified setup** |
+| patched FEX-2610 (patches 0001–0026), `build-fex.sh`, `install-fex-tool.sh`, `guest-tune.sh` | [`fex-eac/`](../fex-eac/README.md) | Valve's FEX-2607 in Steam's compatibility tool fails EAC's ptrace injection and signal semantics ([eac-how-it-works.md](eac-how-it-works.md)) | built, tested (3 sessions) — **the verified setup** |
 | triple-buffered present | launcher (Swift) | replaces a `waitUntilCompleted()` per frame | experimental |
 | `--render-scale` (0.25–1.0) with MetalFX upscaling | launcher (Swift) | render below native and upscale, to move the frame-time cost off the GPU while keeping UI at real-world size | experimental (default stays 1.0 = unchanged) |
 | libkrun log level default `error` | launcher | less logging overhead | experimental |
