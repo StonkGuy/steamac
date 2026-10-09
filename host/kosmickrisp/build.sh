@@ -155,7 +155,7 @@
 #              kk_flush_pipeline called mtl_render_set_pipeline_state(enc, NULL); the -Db_ndebug=true build drops
 #              the assert that would have skipped it, and the following mtl_draw_indexed_primitives messages a nil
 #              Metal object - EXC_BAD_ACCESS at a low address from AGXMetal's drawIndexedPrimitives, the app-fork
-#              "VM crashed in the GPU stack" (see audit/APPFORK-CRASH.md). A failed state never becomes ready, so
+#              "VM crashed in the GPU stack". A failed state never becomes ready, so
 #              the draw is dropped and VK_ERROR_INVALID_SHADER_NV is set on the command buffer, as mode 2 already
 #              did. Not a replay: waiting would only delay the same drop.
 
