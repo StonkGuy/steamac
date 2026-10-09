@@ -1,0 +1,106 @@
+From 7d1e4a2b9c0f3e58471926a3b4c5d6e7f8091a2b Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Fri, 9 Oct 2026 07:10:00 +0300
+Subject: [PATCH] kk: drop a mode-1 draw whose async pipeline state failed
+
+MESA_KK_ASYNC_PIPELINES=1 (the shipped mode, never_wait == false) recorded
+a draw of a graphics program whose Metal render pipeline state had failed
+to build. kk_shader_async_draw_ok decided the draw from a single test,
+
+   if (async == NULL || p_atomic_read(&async->status) != KK_ASYNC_PENDING)
+      return KK_ASYNC_ACTION_RECORD;
+
+and KK_ASYNC_FAILED is not KK_ASYNC_PENDING, so a failed state was
+recorded. On that path pipe->gfx.render is still NULL (kk_async_pipeline_
+build returned false, or kk_async_pipeline_cleanup set FAILED with the
+state never published), and kk_flush_pipeline reads
+
+   mtl_render_pipeline_state *render = p_atomic_read(&gfx->pipe->gfx.render);
+   if (unlikely(render == NULL)) {
+      assert(kk_shader_async_pipeline(gfx->pipe) != NULL); /* -Db_ndebug=true */
+      return;
+   }
+   mtl_render_set_pipeline_state(enc, render);
+
+with render == NULL. -Db_ndebug=true drops the assert and returns without
+setting any pipeline state on the encoder; kk_dispatch_draw then calls
+mtl_draw_indexed_primitives on a render encoder with no pipeline, and
+AGXMetal's drawIndexedPrimitives: faults on a nil pipeline object inside
+the encoder (EXC_BAD_ACCESS at a low address, the "VM crashed in the GPU
+stack" frame). The earlier revision of this patch guarded the mode-2
+branch only (the never_wait test that already had its own FAILED guard),
+so the shipped mode 1 was left recording a failed state; this one guards
+the mode-1 branch.
+
+A failed state never becomes ready, so the draw is dropped and the
+failure reported on the command buffer (VK_ERROR_INVALID_SHADER_NV), the
+same as the mode-2 branch already did; a replay could not retry a build
+that will never happen.
+
+The status and pipe->gfx.render are two separate atomics: a READY status
+alone does not prove the handle read is not still NULL. Both are now read
+in the documented order (status, then handle) and a not-yet-visible handle
+takes the same waiting path as a pending compile (replay, then a fence
+wait that re-checks both).
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_shader.c | 36 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 31 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 2d26219..c82c12e 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -2638,12 +2638,37 @@ kk_shader_async_draw_ok(struct kk_cmd_buffer *cmd, struct kk_shader *program,
+       return KK_ASYNC_ACTION_DROP;
+    }
+ 
+-   if (async == NULL || p_atomic_read(&async->status) != KK_ASYNC_PENDING)
++   if (async == NULL)
+       return KK_ASYNC_ACTION_RECORD;
+ 
+-   /* The command queue's replay must not drop the draw a second time, and it
+-    * can wait: the compile was already paid for by the first recording of this
+-    * command buffer. */
++   const unsigned status = p_atomic_read(&async->status);
++
++   /* Mode 1: Metal could not build the state (it reports out of memory by
++    * returning nil) or the queue was gone before a worker could run the job, so
++    * pipe->gfx.render stays NULL for the rest of the program's life. Recording
++    * the draw would reach kk_flush_pipeline and set no pipeline state on the
++    * encoder, then dispatch with none -- a nil Metal render pipeline object in
++    * AGXMetal's drawIndexedPrimitives: (EXC_BAD_ACCESS at a low address). Drop
++    * it and report the failure, exactly as mode 2 already does; no replay could
++    * retry a build that will never happen. */
++   if (unlikely(status == KK_ASYNC_FAILED)) {
++      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_INVALID_SHADER_NV);
++      return KK_ASYNC_ACTION_DROP;
++   }
++
++   /* Ready and its handle is visible. The status and pipe->gfx.render are two
++    * separate atomics: a ready status alone does not prove the handle read is
++    * not still NULL, so both are read in the documented order (status, then
++    * handle) and a not-yet-visible handle takes the waiting path below, exactly
++    * like a pending compile. */
++   if (likely(status == KK_ASYNC_READY) &&
++       likely(p_atomic_read(&program->pipeline.gfx.render) != NULL))
++      return KK_ASYNC_ACTION_RECORD;
++
++   /* Still compiling, or ready but its handle is not visible to this thread
++    * yet. The command queue's replay must not drop the draw a second time, and
++    * it can wait: the compile was already paid for by the first recording of
++    * this command buffer. */
+    if (!cmd->replay) {
+       if (KK_DEBUG(ASYNC) && !*not_ready)
+          mesa_logi("kk: draw skipped: its pipeline's render pipeline state is "
+@@ -2659,7 +2684,8 @@ kk_shader_async_draw_ok(struct kk_cmd_buffer *cmd, struct kk_shader *program,
+     * the same. */
+    util_queue_fence_wait(&async->fence);
+ 
+-   if (unlikely(p_atomic_read(&async->status) != KK_ASYNC_READY)) {
++   if (unlikely(p_atomic_read(&async->status) != KK_ASYNC_READY ||
++                p_atomic_read(&program->pipeline.gfx.render) == NULL)) {
+       /* Metal could not build the state (it reports out of memory by returning
+        * nil) or the queue was gone before a worker could run the job. Nothing
+        * more can be done for this draw. */

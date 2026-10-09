@@ -1,0 +1,88 @@
+From 8f2e6d4a1c3b5e70928a1f4d6c7b8e9a0f1c2d3e Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Thu, 9 Oct 2026 09:30:00 +0300
+Subject: [PATCH] kk: bound the indirect-deref branch tree and spill large arrays
+
+nir_lower_indirect_derefs_to_if_else_trees lowered every indirect array
+access into a full if-else tree with no size bound (UINT32_MAX), i.e. one
+branch per array element.  Metal's MSL front end is super-linear in branch
+count: measured on an M2, a balanced 8k-leaf tree costs ~9 s and a 30k-leaf
+one ~44 s in MTLCompilerService, against ~7 ms for the same 80k accesses
+through a dynamically indexed "thread" array.  Titles that generate shaders
+per light / per morph (VRChat's world and mirror warming) hit this on the
+presenting thread, which is the multi-second menu-open and fast-turn
+freeze; the cost is repeated per pipeline because the MSL only reaches
+Metal's own cache on an identical source string.
+
+Bound the tree at a small leaf count (Apple's AGX uses 16) and spill the
+larger function-temp arrays to scratch first, at a 64 B threshold, so their
+dynamic index lowers to a flat scratch access instead of the tree.  Arrays
+at or under the thresholds keep the direct/ tree form; arrays over them
+become scratch loads/stores, which is the same dynamic index MSL already
+receives through the existing scratch path (nir_to_msl.c emits
+"thread uchar scratch[N]").  Cost is zero when unused: a shader with no
+indirect arrays runs one extra pass that finds nothing to spill.
+
+The nearby nir_lower_vars_to_scratch(32) only spilled arrays past 32 B (a
+handful of elements), too low to keep the big generated arrays out of the
+tree; the bound is what caps the tree itself.  MSL crashes on the 256-leaf
+dEQP-VK.graphicsfuzz.stable-binarysearch-tree case noted in the file, so a
+lower bound is strictly the smaller tree and the safe direction.
+
+shader_in/out stay in the modes: nir_to_msl emits those as direct
+load_input/store_output with a constant index, and KosmicKrisp never calls
+nir_lower_io_indirect_loads, so indirect access to them still has to be
+lowered here.
+
+Upstream state: KosmicKrisp at MESA_COMMIT passes UINT32_MAX here; this is
+genuinely absent behaviour, not a stock option.
+---
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -2486,6 +2486,15 @@
+ void
+ msl_preprocess_nir(struct nir_shader *nir)
+ {
++   /* A function-temp array past this size is spilled to scratch, so its
++    * dynamic index lowers to a flat scratch access rather than an unrolled
++    * branch tree (see the passes below).  A few float4s: under it the tree
++    * is small and the faster form. */
++#define KK_SCRATCH_SPILL_SIZE 64
++   /* Maximum array length lowered to an if-else tree.  Metal's front end is
++    * super-linear in leaf count (see the call site). */
++#define KK_INDIRECT_DEREF_MAX_LEN 16
++
+    /* First, inline away all the functions */
+    NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
+    NIR_PASS(_, nir, nir_lower_returns);
+@@ -2555,9 +2564,29 @@
+     * dEQP-VK.graphicsfuzz.stable-binarysearch-tree-nested-if-and-conditional */
+    NIR_PASS(_, nir, nir_lower_vars_to_scratch, 32,
+             glsl_get_natural_size_align_bytes, glsl_get_word_size_align_bytes);
++
++   /* Spill function-temp arrays big enough for an if-else tree to cost real
++    * Metal front-end time, so they take a dynamic index into the "thread"
++    * scratch MSL (a flat access whose build time is constant in the array
++    * length) instead of the tree below.  32 above only spills arrays past
++    * 32 B (a handful of elements), which leaves the big per-light and
++    * per-morph arrays of shader-generated titles to the tree. */
++   NIR_PASS(_, nir, nir_lower_vars_to_scratch, KK_SCRATCH_SPILL_SIZE,
++            glsl_get_natural_size_align_bytes, glsl_get_word_size_align_bytes);
++
++   /* Bound the tree: an unbounded one (UINT32_MAX) emits a branch per
++    * element and Metal's front end is super-linear in branch count (a full
++    * tree over a large array is tens of seconds of compile on the
++    * presenting thread: the VRChat menu-open / fast-turn freezes).  An
++    * array past the leaf bound stays dynamically indexed, small ones still
++    * tree.  shader_in/out stay in the modes: nir_to_msl emits those as
++    * direct load_input/store_output with a constant index, so indirect
++    * access to them still has to be lowered here.  The smaller of the two
++    * is the safe direction: MSL crashes on the 256-leaf case noted above,
++    * so a handful of leaves keeps every tree away from that. */
+    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
+             nir_var_function_temp | nir_var_shader_in | nir_var_shader_out,
+-            UINT32_MAX);
++            KK_INDIRECT_DEREF_MAX_LEN);
+ 
+    msl_nir_lower_subgroups(nir);
+ }

@@ -1,0 +1,76 @@
+From steamac <steamac@local>
+Date: Fri, 9 Oct 2026 21:40:00 +0300
+Subject: [PATCH] virtio-snd: start the capture unit outside the capture lock
+
+The capture start worker called AudioOutputUnitStart while holding the per-stream
+`capture` mutex (patch 0017 published the unit under that lock and started it
+inside the critical section). That call can block while the microphone is opened,
+and on a fresh process it also arms the macOS microphone permission prompt, which
+is not answered until the user clicks it. The pump thread takes `capture` every
+iteration of the device loop, and it does so while the loop holds `hosts`; the
+control-queue thread needs `hosts` to answer PREPARE/START/STOP. So a blocking
+AudioOutputUnitStart wedged the pump, the pump held `hosts`, and *every* virtio-snd
+control message timed out (PCM_PREPARE 0x103, PCM_RELEASE 0x102, PCM_START 0x104,
+PCM_STOP 0x105) the moment the guest started recording. In VRChat this showed up as
+a frozen game (main thread spinning) exactly when audio capture started, e.g. after a
+graphics/resolution change reinitialised the audio device.
+
+Start the unit before taking `capture` (the input callback reads the unit pointer
+lock-free from `shared.unit`, which is set first). Publish under the lock afterwards
+and, if a stop raced in while the unit was starting, stop it and publish nothing, so
+a stop still takes down a unit that was running. No AudioUnit call now runs under
+`capture`.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/devices/src/virtio/snd/audio_backends/coreaudio.rs | 40 +++++++++++++-------
+ 1 file changed, 26 insertions(+), 14 deletions(-)
+
+diff --git a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
+--- a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
++++ b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
+@@ -1295,13 +1295,9 @@
+         )?;
+         let mut unit = unit;
+         unit.initialize()?;
+-        // Publish under the capture lock: a stop on the control thread either takes the
+-        // published unit or, finding none while `starting` is set, leaves `stop_pending` for
+-        // us to see here. The input callback needs the unit pointer, so it is set before the
+-        // unit starts, not after.
+-        let mut slot = shared.capture.lock().unwrap();
++        // A stop that arrived before this worker ran (found no published unit and left
++        // `stop_pending`) wants no unit started at all.
+         if shared.stop_pending.swap(false, Ordering::AcqRel) {
+-            drop(slot);
+             return Ok(());
+         }
+         shared.capture_device.store(device, Ordering::Release);
+@@ -1313,10 +1309,28 @@
+                 staging: Vec::new(),
+             },
+         };
++        // The input callback needs the unit pointer before the unit starts producing; it reads
++        // it lock-free from `shared.unit`.
+         shared.unit.store(state.unit.au, Ordering::Release);
++        // Start the unit WITHOUT holding `capture`: AudioOutputUnitStart can block while the
++        // microphone is opened (a permission prompt, a slow input device), and the pump thread
++        // takes `capture` every iteration while it holds `hosts`, which the control thread needs
++        // to answer PREPARE/START/STOP. Holding `capture` here would wedge every virtio-snd
++        // control message once the guest starts recording.
+         if let Err(err) = state.unit.start() {
+             shared.unit.store(ptr::null_mut(), Ordering::Release);
+             return Err(err);
++        }
++        // Publish under the capture lock: a stop on the control thread either takes a
++        // previously published unit or, finding none while `starting` is set, leaves
++        // `stop_pending` for us to see here (that stop cannot stop a unit in `shared.unit`
++        // itself, so we do it). The unit is already running, so if a stop raced in, stop it.
++        let mut slot = shared.capture.lock().unwrap();
++        if shared.stop_pending.swap(false, Ordering::AcqRel) {
++            drop(slot);
++            state.unit.stop();
++            shared.unit.store(ptr::null_mut(), Ordering::Release);
++            return Ok(());
+         }
+         *slot = Some(state);
+         Ok(())

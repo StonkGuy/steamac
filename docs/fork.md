@@ -16,15 +16,22 @@ FEX or Proton. Not affiliated with FX GAMES, Valve, Epic or VRChat.
 | direct-to-display presentation, key releases never dropped, HID off the main thread, Retina EDID DPI, stall-indicator timer, pad-port lock, `framebufferOnly` restore, Clipboard-writer restart | launcher | findings of a code audit of 1.8.2 | experimental |
 | kernel parameter `virtio_snd.msg_timeout_ms=10000` | guest default | a slow microphone start otherwise trips a 1 s guest time-out and freezes the game ([eac-troubleshooting.md](eac-troubleshooting.md)) | workaround, built |
 | asynchronous capture start, no global lock across CoreAudio calls | libkrun patch 0017 | root cause of the microphone freeze | experimental |
+| start the capture unit **outside** the `capture` mutex | libkrun patch 0019 | `AudioOutputUnitStart` can block (microphone open / permission prompt) while holding a lock the snd pump takes every iteration, wedging *every* virtio-snd control message — the real cause of the microphone freeze | verified live |
 | copy only the damage owed to each frame buffer | libkrun patch 0018 | avoids copying the whole scanout per present | experimental |
-| opt-in asynchronous pipeline compilation (`MESA_KK_ASYNC_PIPELINES=1`, `=2` drops the draw) | KosmicKrisp patch 0041 | Venus exposes no `VK_EXT_graphics_pipeline_library` and KosmicKrisp compiles pipelines synchronously, blocking the frame | experimental. Set in the **launcher's** environment, not the guest launch options |
+| opt-in asynchronous pipeline compilation (`MESA_KK_ASYNC_PIPELINES=1`, `=2` drops the draw) | KosmicKrisp patch 0041 | Venus exposes no `VK_EXT_graphics_pipeline_library` and KosmicKrisp compiles pipelines synchronously, blocking the frame | **off — crashes the VM.** Live VRChat SIGSEGV in the render encoder; the drop-on-failed-state fix (0043) was tested live with the fixed dylib confirmed loaded and it still crashed (see `audit/APPFORK-CRASH.md` §7). Set in the **launcher's** environment, not the guest launch options |
 | 5 robustness fixes from the same audit (XFB bounds, `container_of` guard, minmax UAB scan, NULL plane layouts, sparse underflow) | KosmicKrisp patch 0042 | defensive fixes | experimental |
+| drop a draw whose async render pipeline state FAILED instead of recording it with a NULL state | KosmicKrisp patch 0043 | the mode-1 async path recorded the draw with `pipe->gfx.render == NULL` and called `mtl_render_set_pipeline_state(enc, NULL)` → the nil-Metal **VM crash** (`AGXMetal … drawIndexedPrimitives:`). Reachable only with `MESA_KK_ASYNC_PIPELINES=1` | experimental (async stays **off**) |
+| wire the Mesa on-disk shader cache (`disk_cache_create`) | KosmicKrisp patch 0044 | the FOSSILIZE/Mesa caches held headers only, so pipeline work repeated each run | experimental |
+| bound the indirect-deref branch tree (`nir_lower_indirect_derefs_to_if_else_trees`, threshold 16) | KosmicKrisp patch 0046 | bounds a compile-time blow-up that shows as a long synchronous-compile stall | experimental |
 
-The app-side changes (the launcher changes above, libkrun 0017/0018, KosmicKrisp 0041/0042) are **experimental**. In live
-VRChat tests the fork-built app crashed the VM twice (one run with `MESA_KK_ASYNC_PIPELINES=1`); the release steamac app
-with the same patched FEX works, and the cause is under investigation. Treat the release app plus `fex-eac/` as the
-recommended setup; each of these changes was built and adversarially re-verified in isolation, but the combined app is
-not. They are verified only on an M2 MacBook Air, 16 GB, macOS 27.0, with steamac 1.8.1/1.8.2. The launcher build is
+The app-side changes (the launcher changes above, libkrun 0017/0018/**0019**, KosmicKrisp 0041/0042) are **experimental**,
+except libkrun 0019, which is verified live (see below). In live
+VRChat tests the fork-built app with `MESA_KK_ASYNC_PIPELINES=1` crashed the VM (SIGSEGV in the render encoder,
+`AGXMetalG14G drawIndexedPrimitives:` ← `kk_draw`); the release steamac app with the same patched FEX works. The
+`KK_ASYNC_FAILED` fix (0043) was tested live with the fixed KosmicKrisp dylib confirmed loaded and **still crashed** —
+0043 is correct but not sufficient (see `audit/APPFORK-CRASH.md` §7). The async lever is therefore **off** in the
+fork-built app (synchronous KosmicKrisp, the same path as the release app). Treat the release app plus `fex-eac/` as the
+recommended setup; each change was built and adversarially re-verified in isolation, but the combined app is not. They are verified only on an M2 MacBook Air, 16 GB, macOS 27.0, with steamac 1.8.1/1.8.2. The launcher build is
 clean (`swift build -c release`, 0 warnings). One logging-only race remains open and is not claimed fixed: `hidInputs` is
 incremented on `hidQueue` and reset on the main thread.
 

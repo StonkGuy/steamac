@@ -149,6 +149,15 @@
 #              the check that drmFormatModifierPlaneCount is 1, so a guest explicit create info with no plane
 #              layouts read through NULL. kk_sparse.c (0031): page_count - first_page underflowed for a buffer view
 #              offset past the buffer, mapping texels beyond it.
+#   0043       steamac: MESA_KK_ASYNC_PIPELINES=1 recorded a draw whose async Metal render pipeline state had
+#              FAILED to build (kk_async_pipeline_build returned NULL, status KK_ASYNC_FAILED, pipe->gfx.render
+#              still NULL). kk_shader_async_draw_ok only special-cased PENDING/READY, so the draw was recorded and
+#              kk_flush_pipeline called mtl_render_set_pipeline_state(enc, NULL); the -Db_ndebug=true build drops
+#              the assert that would have skipped it, and the following mtl_draw_indexed_primitives messages a nil
+#              Metal object - EXC_BAD_ACCESS at a low address from AGXMetal's drawIndexedPrimitives, the app-fork
+#              "VM crashed in the GPU stack" (see audit/APPFORK-CRASH.md). A failed state never becomes ready, so
+#              the draw is dropped and VK_ERROR_INVALID_SHADER_NV is set on the command buffer, as mode 2 already
+#              did. Not a replay: waiting would only delay the same drop.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -380,6 +389,7 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0040 = steamac: base textures of image planes, subresource and texel buffer view textures in the residency set"
 	echo "  0041 = steamac: MESA_KK_ASYNC_PIPELINES builds a graphics pipeline's Metal render pipeline state on workers"
 	echo "  0042 = steamac: robustness fixes (XFB counter bounds, sparse container_of, minmax update-after-bind scan, sparse view underflow)"
+	echo "  0043 = steamac: drop a draw whose async render pipeline state failed instead of recording it with a NULL state"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."

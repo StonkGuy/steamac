@@ -1,0 +1,86 @@
+From 4a7b1c9e2d3f40516a7b8c9d0e1f2a3b4c5d6e7f Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Thu, 9 Oct 2026 06:30:00 +0300
+Subject: [PATCH] kk: wire the Mesa on-disk shader cache
+
+KosmicKrisp serialises each program's MSL into a blob
+(kk_shader_serialize / kk_program_deserialize) so that a vk_pipeline_cache
+hit can skip the NIR->MSL translation, but nothing ever created
+pdev->vk.disk_cache, so kk_shader_deserialize was dead code and every
+pipeline cache was in-memory only.  After a restart (or when the game
+reloads a cached pipeline set) the whole program re-runs NIR->MSL and the
+Metal source builds.
+
+Every other Mesa Vulkan driver creates this cache (anv, hk, tu, vn,
+v3dv); do the same here, namespaced by the driver-build UUID that
+kk_physical_device_init_pipeline_cache already computes into
+shaderBinaryUUID.  disk_cache_create handles MESA_SHADER_CACHE_DIR,
+_DISABLE and _MAX_SIZE.
+
+This is not a substitute for Metal's own cache: MTLCompilerService
+already reuses a compiled library for an identical MSL source string, so
+it does not remove the first Metal build of a shader.  It removes the
+CPU-side NIR->MSL work when a pipeline cache is reloaded, and makes the
+already-present serialise/deserialise path live.
+
+Measured on an M2 (macOS 27): a ~19k-leaf MSL shader (KosmicKrisp emits
+one leaf per unrolled indirect-deref array element, and a flat index
+switch over a large array is the worst case) costs ~9 s in
+MTLCompilerService; large indirect arrays are the outlier generator, and
+the fix for that is separate from this cache.
+
+Upstream state: KosmicKrisp at MESA_COMMIT has no disk_cache_create call;
+this is genuinely absent behaviour, not a stock option.
+---
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -20,6 +20,7 @@
+ #include "kosmickrisp/compiler/nir_to_msl.h"
+ 
+ #include "util/disk_cache.h"
++#include "util/hex.h"
+ #include "util/mesa-blake3.h"
+ #include "git_sha1.h"
+ 
+@@ -1003,6 +1004,29 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+    memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
+ }
+ 
++/* steamac: wire the Mesa on-disk shader cache, as every other Vulkan driver
++ * does (anv, hk, tu, vn, v3dv...).  KosmicKrisp serialises each program's MSL
++ * (kk_shader_serialize) so a pipeline cache can skip NIR->MSL on a hit, but
++ * nothing ever created vk.disk_cache, so that code was dead and every pipeline
++ * cache was in-memory only: after a restart the whole game re-runs NIR->MSL and
++ * the Metal compiles.  This does not replace Metal's own cache (MTLCompilerService
++ * already reuses its results on an identical MSL source string); it saves the
++ * CPU side of the work when the game reloads a pipeline cache.
++ *
++ * The env vars (MESA_SHADER_CACHE_DIR / _DISABLE / _MAX_SIZE) and the driver
++ * build UUID namespace come from disk_cache_create, exactly as elsewhere. */
++static void
++kk_physical_device_init_disk_cache(struct kk_physical_device *pdev)
++{
++#ifdef ENABLE_SHADER_CACHE
++   char driver_id[VK_UUID_SIZE * 2 + 1];
++   mesa_bytes_to_hex(driver_id, pdev->vk.properties.shaderBinaryUUID,
++                     VK_UUID_SIZE);
++   pdev->vk.disk_cache =
++      disk_cache_create("kosmickrisp", driver_id, 0);
++#endif
++}
++
+ static void
+ kk_physical_device_free_disk_cache(struct kk_physical_device *pdev)
+ {
+@@ -1219,6 +1243,7 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
+       goto fail_mtl_dev;
+ 
+    kk_physical_device_init_pipeline_cache(pdev);
++   kk_physical_device_init_disk_cache(pdev);
+ 
+    uint64_t sysmem_size_B = kk_get_sysmem_heap_size(pdev);
+    if (sysmem_size_B == 0) {
+-- 
+2.39.3
+
