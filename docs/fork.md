@@ -25,14 +25,7 @@ FEX or Proton. Not affiliated with FX GAMES, Valve, Epic or VRChat.
 | bound the indirect-deref branch tree (`nir_lower_indirect_derefs_to_if_else_trees`, threshold 16) | KosmicKrisp patch 0046 | bounds a compile-time blow-up that shows as a long synchronous-compile stall | experimental |
 | gate the async draw on the program the draw actually uses (not the bound VS) | KosmicKrisp patch 0047 | the gate watched the bound VS; when a reduction sampler bound the min/max companion (0029), the companion could be async on its own and the draw was recorded with a NULL render state → the surviving 0041 SIGSEGV. Also makes the flush/dispatch bails structural instead of `b_ndebug`-compiled-out asserts | verified live under `MESA_KK_ASYNC_PIPELINES=2` |
 
-The app-side changes (the launcher changes above, libkrun 0017/0018/**0019**, KosmicKrisp 0041/0042) are **experimental**,
-except libkrun 0019, which is verified live (see below). In live
-VRChat tests the fork-built app with `MESA_KK_ASYNC_PIPELINES=1` crashed the VM (SIGSEGV in the render encoder,
-`AGXMetalG14G drawIndexedPrimitives:` ← `kk_draw`); the release steamac app with the same patched FEX works. The
-`KK_ASYNC_FAILED` fix (0043) was tested live with the fixed KosmicKrisp dylib confirmed loaded and **still crashed** —
-0043 is correct but not sufficient (see `audit/APPFORK-CRASH.md` §7). The async lever is therefore **off** in the
-fork-built app (synchronous KosmicKrisp, the same path as the release app). Treat the release app plus `fex-eac/` as the
-recommended setup; each change was built and adversarially re-verified in isolation, but the combined app is not. They are verified only on an M2 MacBook Air, 16 GB, macOS 27.0, with steamac 1.8.1/1.8.2. The launcher build is
+The app-side changes (the launcher changes above, libkrun 0017/0018/**0019**, KosmicKrisp 0041/0042/0047) are **experimental**, except libkrun 0019, which is verified live. The async-pipeline crash seen with `MESA_KK_ASYNC_PIPELINES=1` (SIGSEGV in the render encoder under VRChat) is fixed by KosmicKrisp 0047, which gates the async draw on the program the draw uses rather than the bound VS. 0047 was verified live with `MESA_KK_ASYNC_PIPELINES=2` across several world loads; 0041 and 0043 alone did not fix it. Async stays **off** by default, and its stutter benefit is not yet measured. Treat the release app plus `fex-eac/` as the recommended setup; each change was built and adversarially re-verified in isolation, and the live runs of the combined app are listed above. They are verified only on an M2 MacBook Air, 16 GB, macOS 27.0, with steamac 1.8.1/1.8.2. The launcher build is
 clean (`swift build -c release`, 0 warnings). One logging-only race remains open and is not claimed fixed: `hidInputs` is
 incremented on `hidQueue` and reset on the main thread.
 
@@ -48,9 +41,7 @@ yet fix, including a full-frame scanout copy per present in libkrun.
 3. Ad-hoc sign the app with the entitlements of the release build.
 4. macOS treats the re-signed app as a new app: it asks again for microphone permission and keychain access.
 
-The libkrun 0017/0018 and KosmicKrisp 0041/0042 changes are separate components of the bundle. They are **experimental**:
-each passed its adversarial re-verification, but the combined app crashed the VM in live VRChat tests (see above). 0041
-remains opt-in at run time. Prefer the release app plus `fex-eac/`.
+The libkrun 0017/0018 and KosmicKrisp 0041/0042/0047 changes are separate components of the bundle. They are **experimental**: each passed its adversarial re-verification. The async-pipeline crash of the combined app is fixed by 0047 (see above). KosmicKrisp 0041 remains opt-in at run time (`MESA_KK_ASYNC_PIPELINES`, off by default). Prefer the release app plus `fex-eac/`.
 
 ## Documents
 

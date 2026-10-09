@@ -56,9 +56,7 @@ Three sessions, 2026-10-08, M2 MacBook Air 16 GB, macOS 27.0, steamac 1.8.1/1.8.
 The verified, recommended setup is the **release steamac app plus `fex-eac/` (patched FEX 0001–0020)**, which is built
 and tested (3 sessions). The app-side changes this fork builds into the launcher — libkrun 0017 (async capture start) and
 0018 (damage-only frame copy), KosmicKrisp 0041 (async pipelines) and 0042 (robustness fixes), and the launcher fixes
-(present, input, stall, render-scale) — are **experimental**: in live VRChat tests the fork-built app crashed the VM twice
-(one run with `MESA_KK_ASYNC_PIPELINES=1`), while the release steamac app with the same patched FEX works. The cause is
-under investigation; see [docs/fork.md](docs/fork.md) for the per-change status. Verified only on an M2 MacBook Air,
+(present, input, stall, render-scale) — are **experimental**: in live VRChat tests the fork-built app crashed the VM once with `MESA_KK_ASYNC_PIPELINES=1`, while the release steamac app with the same patched FEX works. That crash is fixed by KosmicKrisp 0047, which was verified live with `MESA_KK_ASYNC_PIPELINES=2`; async stays off by default. See [docs/fork.md](docs/fork.md) for the per-change status. Verified only on an M2 MacBook Air,
 16 GB, macOS 27.0; other Macs and macOS versions are untested. Anti-cheat that blocks VMs will not work, and a Steam
 update of the FEX tool overwrites it with Valve's build — re-run `sh install-fex-tool.sh`.
 
