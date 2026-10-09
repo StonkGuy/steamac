@@ -168,8 +168,8 @@
 #              faulting in AGXMetal's draw - the surviving 0041 SIGSEGV 0043 did not cover. Decide on the program
 #              the flush will read (kk_draw_async_action, the same kk_cmd_shader_pipeline resolve) and adopt it
 #              into gfx->pipe; make the flush and dispatch bails structural (command-buffer error, no dispatch
-#              without a render state) instead of asserts. Live-verified: VRChat world join, menu, settings and
-#              resolution changes under MESA_KK_ASYNC_PIPELINES=2, no SIGSEGV, no hang.
+#              without a render state) instead of asserts. Not yet live-verified: the recorded runs under
+#              MESA_KK_ASYNC_PIPELINES=2 predate this patch's build.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
