@@ -4,7 +4,8 @@
 VRChat — on an Apple silicon Mac.**
 
 It does this by replacing the FEX inside Steam's own FEX compatibility tool (Steam app 3127680) with a patched FEX-2610
-build (patches 0001–0020), plus launcher, stability and performance fixes. The EAC client is the stock one from the Proton EasyAntiCheat
+build (patches 0001–0020), plus launcher, stability and performance fixes that are **experimental** (see [Results](#results)).
+The EAC client is the stock one from the Proton EasyAntiCheat
 Runtime; nothing fakes, replays or short-circuits its result. Valve's SteamOS rootfs is unmodified — everything lives in
 the guest's home directory.
 
@@ -52,13 +53,14 @@ Three sessions, 2026-10-08, M2 MacBook Air 16 GB, macOS 27.0, steamac 1.8.1/1.8.
 | join → world | 86 s first run (cold shader cache), 32 s second run (warm caches + FEX DiskCache) |
 | frame rate, light world | ~26–30 fps steady at 1280×800, GPU-bound (see [docs/eac-performance.md](docs/eac-performance.md)) |
 
-`fex-eac/` is built and tested (3 sessions). The launcher's render scale (`--render-scale 0.25–1.0`, default 1.0) is
-built and does not change behaviour at the default. The libkrun and KosmicKrisp changes are in progress or
-experimental — libkrun 0017 (microphone freeze) and KosmicKrisp 0041/0042 are in progress, and libkrun 0018 (damage-only
-frame copy) is being revised after a verification found it leaves stale pixels; see [docs/fork.md](docs/fork.md) for
-the per-change status. Verified only on an M2 MacBook Air, 16 GB, macOS 27.0; other Macs and macOS versions are
-untested. Anti-cheat that blocks VMs will not work, and a Steam update of the FEX tool overwrites it with Valve's
-build — re-run `sh install-fex-tool.sh`.
+The verified, recommended setup is the **release steamac app plus `fex-eac/` (patched FEX 0001–0020)**, which is built
+and tested (3 sessions). The app-side changes this fork builds into the launcher — libkrun 0017 (async capture start) and
+0018 (damage-only frame copy), KosmicKrisp 0041 (async pipelines) and 0042 (robustness fixes), and the launcher fixes
+(present, input, stall, render-scale) — are **experimental**: in live VRChat tests the fork-built app crashed the VM twice
+(one run with `MESA_KK_ASYNC_PIPELINES=1`), while the release steamac app with the same patched FEX works. The cause is
+under investigation; see [docs/fork.md](docs/fork.md) for the per-change status. Verified only on an M2 MacBook Air,
+16 GB, macOS 27.0; other Macs and macOS versions are untested. Anti-cheat that blocks VMs will not work, and a Steam
+update of the FEX tool overwrites it with Valve's build — re-run `sh install-fex-tool.sh`.
 
 ## Documentation
 
