@@ -1,5 +1,5 @@
 # steamac: the launcher's virtio-console port "fx.clipboard" (the clipboard
 # shared with the Mac) is opened by the session user's fx-clipboard-agent.service.
-# The /dev/virtio-ports/fx.clipboard symlink comes from systemd's stock
-# 50-udev-default.rules.
-SUBSYSTEM=="virtio-ports", ATTR{name}=="fx.clipboard", MODE="0666"
+# Only that user (steamos) may open it. The /dev/virtio-ports/fx.clipboard
+# symlink comes from systemd's stock 50-udev-default.rules.
+SUBSYSTEM=="virtio-ports", ATTR{name}=="fx.clipboard", OWNER="steamos", GROUP="steamos", MODE="0660"

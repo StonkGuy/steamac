@@ -1,8 +1,8 @@
 # steamac: the launcher's virtio-console port "fx.progress" (guest -> host
-# progress messages for the FX Steam Launcher overlay) must be writable by the
-# session user's fx-progress-agent. The /dev/virtio-ports/fx.progress symlink
+# progress messages for the FX Steam Launcher overlay) must be writable by
+# the session user's fx-progress-agent (and nobody else). The /dev/virtio-ports/fx.progress symlink
 # itself comes from systemd's stock 50-udev-default.rules.
-SUBSYSTEM=="virtio-ports", ATTR{name}=="fx.progress", MODE="0666"
+SUBSYSTEM=="virtio-ports", ATTR{name}=="fx.progress", OWNER="steamos", GROUP="steamos", MODE="0660"
 # steamac: the launcher's port "fx.clock" (host -> guest wall-clock time after
 # a resume from suspend) is read by the root service fx-clock-sync.service;
 # the device node keeps the default root-only mode.
