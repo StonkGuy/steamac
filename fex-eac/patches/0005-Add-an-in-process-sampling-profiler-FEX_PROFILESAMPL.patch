@@ -66,10 +66,10 @@ index a6b7338c9..500e00158 100644
    LinuxSyscalls/Seccomp/SeccompEmulator.cpp
    LinuxSyscalls/Seccomp/BPFEmitter.cpp
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
-index e5eaa821a..d378b7b8c 100644
+index f6774cb63..1d21b4b1c 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
-@@ -541,6 +541,12 @@ bool FixupWaitStatus(pid_t Pid, int* Status) {
+@@ -539,6 +539,12 @@ bool FixupWaitStatus(pid_t Pid, int* Status) {
      return true;
    }
  

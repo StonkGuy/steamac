@@ -28,7 +28,7 @@ Base: FEX-2610 14c92681 + patches 0001-0010.
  2 files changed, 148 insertions(+), 11 deletions(-)
 
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
-index d378b7b8c..1e23ab8d0 100644
+index 1d21b4b1c..12cc5e178 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
 @@ -38,6 +38,75 @@ namespace {
@@ -107,7 +107,7 @@ index d378b7b8c..1e23ab8d0 100644
    constexpr uint16_t UserCodeSegment = 0x33;
    constexpr uint16_t UserStackSegment = 0x2b;
    constexpr uint64_t UserFlags = 0x246;
-@@ -387,6 +456,50 @@ namespace {
+@@ -385,6 +454,50 @@ namespace {
      return offsetof(SharedState, Regs) + Index * sizeof(uint64_t);
    }
  
@@ -158,7 +158,7 @@ index d378b7b8c..1e23ab8d0 100644
    Remote* FpState(pid_t Pid) {
      std::lock_guard lk(RemotesLock);
      Remote* R = Lookup(Pid);
-@@ -627,13 +740,24 @@ bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Res
+@@ -625,13 +738,24 @@ bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Res
  
    case PTRACE_PEEKUSER: {
      const uintptr_t Off = reinterpret_cast<uintptr_t>(Addr);
@@ -188,7 +188,7 @@ index d378b7b8c..1e23ab8d0 100644
      }
      *static_cast<uint64_t*>(Data) = V;
      *Result = 0;
-@@ -642,16 +766,28 @@ bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Res
+@@ -640,16 +764,28 @@ bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Res
  
    case PTRACE_POKEUSER: {
      const uintptr_t Off = reinterpret_cast<uintptr_t>(Addr);

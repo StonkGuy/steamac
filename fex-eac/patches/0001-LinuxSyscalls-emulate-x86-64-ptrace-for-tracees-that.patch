@@ -15,17 +15,20 @@ SIGTRAP|0x80 or the requested signal. Register writes are applied when the trace
 translated code, /proc/<pid>/exe of an exec()ed tracee reads back the guest binary, and PTRACE_DETACH switches the
 emulation off.
 
+As on Linux, orig_rax selects the syscall that runs after an entry stop; rax there is the -ENOSYS placeholder, so an
+unmodified GETREGS/SETREGS (or GETREGSET/SETREGSET) round trip leaves the syscall unchanged.
+
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  Source/Tools/LinuxEmulation/CMakeLists.txt    |   1 +
  .../LinuxSyscalls/FileManagement.cpp          |  31 +
- .../LinuxSyscalls/PtraceEmu.cpp               | 741 ++++++++++++++++++
+ .../LinuxSyscalls/PtraceEmu.cpp               | 739 ++++++++++++++++++
  .../LinuxEmulation/LinuxSyscalls/PtraceEmu.h  | 126 +++
  .../LinuxSyscalls/SignalDelegator.cpp         |  12 +
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  60 +-
  .../LinuxSyscalls/Syscalls/Info.cpp           |   9 +-
  .../LinuxSyscalls/Syscalls/Passthrough.cpp    |  11 +-
- 8 files changed, 983 insertions(+), 8 deletions(-)
+ 8 files changed, 981 insertions(+), 8 deletions(-)
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.h
 
@@ -106,10 +109,10 @@ index 71724606e..327a09d8d 100644
    uint64_t Result = -1;
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
 new file mode 100644
-index 000000000..e5eaa821a
+index 000000000..f6774cb63
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
-@@ -0,0 +1,741 @@
+@@ -0,0 +1,739 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -276,7 +279,7 @@ index 000000000..e5eaa821a
 +
 +  // Applies what the tracer wrote while we were stopped. Returns the syscall result the tracer forced at an
 +  // exit stop (or NoOverride).
-+  uint64_t ApplyTracerWrites(FEXCore::Core::CpuStateFrame* Frame, uint64_t Nr, bool Entry) {
++  uint64_t ApplyTracerWrites(FEXCore::Core::CpuStateFrame* Frame, bool Entry) {
 +    using namespace FEXCore::X86State;
 +    SharedState& S = *Current;
 +
@@ -315,16 +318,14 @@ index 000000000..e5eaa821a
 +      } else if (i == GsBase) {
 +        State.gs_cached = V;
 +      }
-+      if (i == Rax) {
-+        if (Entry) {
-+          State.gregs[REG_RAX] = V; // entry stop: rax carries the syscall number
-+        } else {
-+          Override = V; // exit stop: the tracer forges the syscall result
-+        }
++      if (i == Rax && !Entry) {
++        Override = V; // exit stop: the tracer forges the syscall result
 +      }
++      // At an entry stop rax is the -ENOSYS placeholder: writing it (a GETREGS/SETREGS round trip does) selects
++      // nothing. The syscall that runs is orig_rax, applied below.
 +      // cs/ss/eflags/ds/es/fs/gs and orig_rax (handled below) are accepted and ignored
 +    }
-+    if (Entry && (Dirty & (1ULL << OrigRax)) && S.Regs[OrigRax] != Nr) {
++    if (Entry && (Dirty & (1ULL << OrigRax))) {
 +      State.gregs[REG_RAX] = S.Regs[OrigRax]; // on Linux orig_rax selects the syscall that runs
 +    }
 +    S.DirtyMask = 0;
@@ -535,9 +536,9 @@ index 000000000..e5eaa821a
 +  }
 +  BuildRegs(Frame, Nr, true, 0, Regs);
 +  Stop(Nr, Args, true, 0, Regs);
-+  ApplyTracerWrites(Frame, Nr, true);
++  ApplyTracerWrites(Frame, true);
 +
-+  // The tracer may have rewritten rax/orig_rax: that is the syscall that must run.
++  // The tracer may have rewritten orig_rax: that is the syscall that must run.
 +  const uint64_t NewNr = Frame->State.gregs[FEXCore::X86State::REG_RAX];
 +  Previous.Open = true;
 +  Previous.Nr = NewNr;
@@ -549,7 +550,7 @@ index 000000000..e5eaa821a
 +  uint64_t Regs[NumUserRegs];
 +  BuildRegs(Frame, Nr, false, Result, Regs);
 +  Stop(Nr, Args, false, Result, Regs);
-+  const uint64_t Override = ApplyTracerWrites(Frame, Nr, false);
++  const uint64_t Override = ApplyTracerWrites(Frame, false);
 +  Previous.Open = false;
 +  return Override != NoOverride ? Override : Result;
 +}
@@ -599,7 +600,7 @@ index 000000000..e5eaa821a
 +  Stop(~0ULL, NoArgs, false, 0, Regs);
 +  Current->SignalNumber = 0;
 +
-+  const uint64_t Override = ApplyTracerWrites(Frame, ~0ULL, false);
++  const uint64_t Override = ApplyTracerWrites(Frame, false);
 +  if (Override != NoOverride) {
 +    Frame->State.gregs[FEXCore::X86State::REG_RAX] = Override;
 +  }

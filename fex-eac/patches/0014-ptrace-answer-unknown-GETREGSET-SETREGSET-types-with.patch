@@ -23,7 +23,7 @@ Base: FEX-2610 14c92681 + patches 0001-0010.
  1 file changed, 43 insertions(+), 1 deletion(-)
 
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
-index 1e23ab8d0..db5103cae 100644
+index 12cc5e178..ae708c6bc 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
 @@ -32,6 +32,11 @@ $end_info$
@@ -38,7 +38,7 @@ index 1e23ab8d0..db5103cae 100644
    // Layout of the x86-64 `struct user_regs_struct` (slot indices).
    enum UserReg : unsigned {
      R15, R14, R13, R12, Rbp, Rbx, R11, R10, R9, R8, Rax, Rcx, Rdx, Rsi, Rdi, OrigRax, Rip, Cs, Eflags, Rsp, Ss, FsBase, GsBase, Ds, Es, Fs, Gs,
-@@ -315,6 +320,10 @@ namespace {
+@@ -313,6 +318,10 @@ namespace {
      uintptr_t StaticAddr = 0;   // otherwise: address of the tracee image's static SharedState
      std::array<uint8_t, 512> FpRegs {}; // shadow of the tracee's x87/SSE state for NT_PRFPREG round trips
      bool FpValid = false;
@@ -49,7 +49,7 @@ index 1e23ab8d0..db5103cae 100644
    };
    std::mutex RemotesLock;
    std::unordered_map<pid_t, Remote> Remotes;
-@@ -500,6 +509,15 @@ namespace {
+@@ -498,6 +507,15 @@ namespace {
      return WriteWord(Pid, offsetof(SharedState, DebugRegs) + 7 * sizeof(uint64_t), Value) ? 0 : -ESRCH;
    }
  
@@ -65,7 +65,7 @@ index 1e23ab8d0..db5103cae 100644
    Remote* FpState(pid_t Pid) {
      std::lock_guard lk(RemotesLock);
      Remote* R = Lookup(Pid);
-@@ -873,7 +891,31 @@ bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Res
+@@ -871,7 +889,31 @@ bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Res
        *Result = 0;
        return true;
      }
