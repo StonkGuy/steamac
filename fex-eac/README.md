@@ -11,12 +11,13 @@ the session never authenticates. The patched FEX passes the `ptrace` and signal-
 |---|---|
 | 0001 | `ptrace` emulation |
 | 0002 | SMC hot pages |
+| 0004 | cheap code invalidation: an invalidated range that holds no translated code skips the per-thread cache walk (performance; without it, joins of 60+ s) |
 | 0007, 0008, 0010 | signal mask, syscall-info and seccomp/SIGSYS fidelity (0010 also stops a `SECCOMP_RET_TRAP` filter from letting the trapped syscall run) |
 | 0011–0020 | kernel-fidelity gaps a title or Wine can observe (debug registers, `/proc/<pid>/status`, `arch_prctl`, regsets, `restart_syscall`, the signal frame) |
 | 0022, 0023, 0025, 0026 | what a second title's anti-tamper bootstrapper observes: host stack per SIGSYS trap, reads of FEX's own shadow-stack guard pages, the single-step trap after `iretq`, a thread exiting on its signal alt stack |
-| 0003–0006, 0009, 0024 | accounting and profiling only |
+| 0003, 0005, 0006, 0009, 0024 | accounting and profiling only |
 
-Required for VRChat: 0001, 0002 and 0007/0008. The rest (0003–0006, 0009, 0024) are accounting and profiling only.
+Required for VRChat: 0001, 0002 and 0007/0008. 0004 is performance; 0003, 0005, 0006, 0009 and 0024 are accounting and profiling only.
 `build-fex.sh` applies every patch in `patches/` (0001–0026) and pins base commit `14c92681`. Patch 0021 (`pop r/m`) was withdrawn — it broke the normal path and hung the EAC launcher; see `patches/withdrawn/`.
 
 **Scope.** These patches do not try to make FEX a replica of native x86-64 Linux. Like upstream FEX, they make a
@@ -133,7 +134,7 @@ What it applies here differs from the research repo, because this guest is an aa
 FEX has a stock config option for the most common VM check, the hypervisor-present bit in CPUID leaf 1. It needs no
 script and no code from this repo:
 
-* `HideHypervisorBit` — `FEXCore/Source/Interface/Config/Config.json.in:701`, `bool`, default `false`, environment
+* `HideHypervisorBit` — `FEXCore/Source/Interface/Config/Config.json.in:655`, `bool`, default `false`, environment
   variable `FEX_HIDEHYPERVISORBIT` (FEX maps every option to `FEX_` + its uppercase enum name).
 * Setting it clears **only** leaf 1 `ECX[31]` (`CPUID.cpp:452`, `CPUID.cpp:494`). It does **not** hide the FEX
   hypervisor leaves: CPUID `0x40000000` still returns with signature `FEXIFEXIEMU` (`CPUID.cpp:968`, `CPUID.cpp:984`).
