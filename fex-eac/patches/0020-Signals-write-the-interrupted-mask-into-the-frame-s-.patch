@@ -1,4 +1,4 @@
-From 3b45ae9ad7eb23689e5c3ab95933cef03694bd25 Mon Sep 17 00:00:00 2001
+From e8e66fa7512a05d4c3ad2592eb5c8c1dc7cc3476 Mon Sep 17 00:00:00 2001
 From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
 Date: Thu, 8 Oct 2026 22:37:55 +0300
 Subject: [PATCH] Signals: write the interrupted mask into the frame's
@@ -17,16 +17,18 @@ interrupted mask.
 
 tests/signal-frame covers the field on delivery and both sigreturn paths (restore the interrupted mask; install a
 handler rewrite).
+
+The mask taken from the frame has SIGKILL and SIGSTOP removed, as the kernel's set_current_blocked() does.
 ---
- .../LinuxSyscalls/SignalDelegator.cpp             | 15 ++++++++++++---
- .../SignalDelegator/GuestFramesManagement.cpp     |  9 +++++++++
- 2 files changed, 21 insertions(+), 3 deletions(-)
+ .../LinuxSyscalls/SignalDelegator.cpp            | 16 +++++++++++++---
+ .../SignalDelegator/GuestFramesManagement.cpp    |  9 +++++++++
+ 2 files changed, 22 insertions(+), 3 deletions(-)
 
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index a9a7bf830..54910400c 100644
+index a9a7bf8..3c6c94e 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-@@ -273,9 +273,18 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
+@@ -273,9 +273,19 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr
      SigTrace::Log(ThreadObject->ThreadInfo.TID, SigTrace::SigReturn, 0, Thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RSP],
                    Context->GuestSignalMask);
      if (Type != RestoreType::TYPE_PAUSE && SignalMaskFix()) {
@@ -42,14 +44,15 @@ index a9a7bf830..54910400c 100644
 +      uint64_t NewGuestMask = Context->GuestSignalMask;
 +      if (Is64BitMode && Context->UContextLocation) {
 +        auto* GuestUContext = reinterpret_cast<FEXCore::x86_64::ucontext_t*>(Context->UContextLocation);
-+        NewGuestMask = GuestUContext->uc_sigmask.val[0];
++        // set_current_blocked() drops SIGKILL and SIGSTOP from whatever the frame holds: they can never be blocked.
++        NewGuestMask = GuestUContext->uc_sigmask.val[0] & ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1)));
 +      }
 +      ThreadObject->SignalInfo.CurrentSignalMask.Val = NewGuestMask;
        CheckForPendingSignals(ThreadObject);
      }
    }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
-index deba62c48..ad61b7b9b 100644
+index deba62c..ad61b7b 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
 @@ -604,6 +604,15 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
@@ -68,6 +71,3 @@ index deba62c48..ad61b7b9b 100644
    // Apparently RAX is always set to zero in case of badly misbehaving C applications and variadics.
    Frame->State.gregs[FEXCore::X86State::REG_RAX] = 0;
    Frame->State.gregs[FEXCore::X86State::REG_RDI] = Signal;
--- 
-2.44.0
-

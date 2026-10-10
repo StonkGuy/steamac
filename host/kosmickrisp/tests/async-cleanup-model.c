@@ -6,14 +6,17 @@
  * with the free. The code between the "kk_shader.c" markers is the driver's, with the `ran` flag the fix
  * adds; compile with -DOLD_CLEANUP to get the code before the fix.
  *
- *   clang -fsanitize=address -O1 -pthread async-cleanup-model.c -o m && ./m
- *   -> RESULT: PASS (fixed) / AddressSanitizer: heap-use-after-free (-DOLD_CLEANUP)
+ * The freed pipeline state is a page that is made inaccessible on free, so a late read faults at once
+ * (no sanitizer needed):
+ *   clang -O1 -pthread async-cleanup-model.c -o m && ./m
+ *   -> RESULT: PASS (fixed) / killed by SIGSEGV (-DOLD_CLEANUP)
  */
 #include <pthread.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 enum { KK_ASYNC_PENDING, KK_ASYNC_READY, KK_ASYNC_FAILED };
@@ -62,14 +65,14 @@ static void *queue_thread(void *p)
 int main(void)
 {
    for (int i = 0; i < 20; i++) {
-      struct kk_async_pipeline *async = calloc(1, sizeof(*async));
+      struct kk_async_pipeline *async = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
       struct kk_async_job *job = calloc(1, sizeof(*job));
       job->async = async;
       struct qjob q = {.job = job};
       pthread_t t; pthread_create(&t, NULL, queue_thread, &q);
       /* kk_shader_destroy: util_queue_drop_job returns as soon as the fence is signalled, then frees async */
       while (!__atomic_load_n(&q.fence, __ATOMIC_SEQ_CST)) sched_yield();
-      free(async);
+      mprotect(async, 4096, PROT_NONE); /* kk_async_pipeline_free */
       pthread_join(t, NULL);
    }
    printf("RESULT: PASS cleanup never touched async after the fence signal\n");

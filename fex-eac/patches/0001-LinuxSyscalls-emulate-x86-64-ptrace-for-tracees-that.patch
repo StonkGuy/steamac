@@ -1,8 +1,8 @@
-From faacebcf4c5017bcff9c9caf13dff61e6f45ab18 Mon Sep 17 00:00:00 2001
+From 8fc2ca25d34fa0254b4901def35a5a1aff8e3c89 Mon Sep 17 00:00:00 2001
 From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
 Date: Wed, 7 Oct 2026 01:52:21 +0300
-Subject: [PATCH 1/9] LinuxSyscalls: emulate x86-64 ptrace for tracees that
- also run under FEX
+Subject: [PATCH 1/9] LinuxSyscalls: emulate x86-64 ptrace for tracees that also
+ run under FEX
 
 Injector-style launchers (the Easy Anti-Cheat Linux launcher that Proton runs is the motivating case) drive their
 target with PTRACE_TRACEME / PTRACE_SYSCALL / GETREGSET / SETREGSET / POKE and expect the x86-64 view of it. When
@@ -15,25 +15,27 @@ SIGTRAP|0x80 or the requested signal. Register writes are applied when the trace
 translated code, /proc/<pid>/exe of an exec()ed tracee reads back the guest binary, and PTRACE_DETACH switches the
 emulation off.
 
-As on Linux, orig_rax selects the syscall that runs after an entry stop; rax there is the -ENOSYS placeholder, so an
-unmodified GETREGS/SETREGS (or GETREGSET/SETREGSET) round trip leaves the syscall unchanged.
+A failing PTRACE_TRACEME (the process is already traced, the usual anti-debug probe) publishes no state file and
+does not mark the process attached: the host call is made first and only a success creates /dev/shm/fex-ptrace-state-<pid>.
+When the tracer resumes an entry stop with PTRACE_CONT the syscall is no longer treated as open, since its exit stop is
+never reported; otherwise a later PTRACE_SYSCALL began with a stale exit stop.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  Source/Tools/LinuxEmulation/CMakeLists.txt    |   1 +
  .../LinuxSyscalls/FileManagement.cpp          |  31 +
- .../LinuxSyscalls/PtraceEmu.cpp               | 739 ++++++++++++++++++
+ .../LinuxSyscalls/PtraceEmu.cpp               | 745 ++++++++++++++++++
  .../LinuxEmulation/LinuxSyscalls/PtraceEmu.h  | 126 +++
  .../LinuxSyscalls/SignalDelegator.cpp         |  12 +
  .../LinuxEmulation/LinuxSyscalls/Syscalls.cpp |  60 +-
  .../LinuxSyscalls/Syscalls/Info.cpp           |   9 +-
  .../LinuxSyscalls/Syscalls/Passthrough.cpp    |  11 +-
- 8 files changed, 981 insertions(+), 8 deletions(-)
+ 8 files changed, 987 insertions(+), 8 deletions(-)
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.h
 
 diff --git a/Source/Tools/LinuxEmulation/CMakeLists.txt b/Source/Tools/LinuxEmulation/CMakeLists.txt
-index 715a8f132..a6b7338c9 100644
+index 715a8f1..a6b7338 100644
 --- a/Source/Tools/LinuxEmulation/CMakeLists.txt
 +++ b/Source/Tools/LinuxEmulation/CMakeLists.txt
 @@ -10,6 +10,7 @@ add_library(LinuxEmulation STATIC
@@ -45,7 +47,7 @@ index 715a8f132..a6b7338c9 100644
    LinuxSyscalls/Seccomp/SeccompEmulator.cpp
    LinuxSyscalls/Seccomp/BPFEmitter.cpp
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
-index 71724606e..327a09d8d 100644
+index 7172460..327a09d 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/FileManagement.cpp
 @@ -13,6 +13,7 @@ $end_info$
@@ -109,10 +111,10 @@ index 71724606e..327a09d8d 100644
    uint64_t Result = -1;
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
 new file mode 100644
-index 000000000..f6774cb63
+index 0000000..cd994de
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.cpp
-@@ -0,0 +1,739 @@
+@@ -0,0 +1,745 @@
 +// SPDX-License-Identifier: MIT
 +/*
 +$info$
@@ -540,7 +542,9 @@ index 000000000..f6774cb63
 +
 +  // The tracer may have rewritten orig_rax: that is the syscall that must run.
 +  const uint64_t NewNr = Frame->State.gregs[FEXCore::X86State::REG_RAX];
-+  Previous.Open = true;
++  // If the tracer resumed with PTRACE_CONT instead of PTRACE_SYSCALL the exit of this syscall is never reported, so
++  // it must not stay open: a later PTRACE_SYSCALL would start with a stale exit stop for it.
++  Previous.Open = Current->SyscallStops != 0;
 +  Previous.Nr = NewNr;
 +  std::copy(Args, Args + 6, Previous.Args);
 +  return NewNr;
@@ -675,9 +679,13 @@ index 000000000..f6774cb63
 +bool HandleRequest(int Request, pid_t Pid, void* Addr, void* Data, uint64_t* Result) {
 +  switch (Request) {
 +  case PTRACE_TRACEME:
-+    PublishSharedPage();
-+    Current->Attached = 1;
 +    *Result = HostPtrace(Request, Pid, Addr, Data);
++    if (*Result == 0) {
++      // Only a process that really became a tracee publishes its state: a failing PTRACE_TRACEME (already traced,
++      // the common anti-debug probe) has no tracer that would ever remove the /dev/shm file again.
++      PublishSharedPage();
++      Current->Attached = 1;
++    }
 +    return true;
 +
 +  case PTRACE_KILL:
@@ -854,7 +862,7 @@ index 000000000..f6774cb63
 +} // namespace FEX::HLE::PtraceEmu
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.h b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.h
 new file mode 100644
-index 000000000..cc09dacc3
+index 0000000..cc09dac
 --- /dev/null
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/PtraceEmu.h
 @@ -0,0 +1,126 @@
@@ -985,7 +993,7 @@ index 000000000..cc09dacc3
 +
 +} // namespace FEX::HLE::PtraceEmu
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index 6d6c899f7..ffc178e5a 100644
+index 6d6c899..ffc178e 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -8,6 +8,7 @@ $end_info$
@@ -1015,7 +1023,7 @@ index 6d6c899f7..ffc178e5a 100644
    auto SigInfo = *static_cast<siginfo_t*>(Info);
  
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
-index a7a432bbd..356ace239 100644
+index a7a432b..356ace2 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls.cpp
 @@ -15,6 +15,8 @@ $end_info$
@@ -1123,7 +1131,7 @@ index a7a432bbd..356ace239 100644
  
  #ifdef DEBUG_STRACE
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Info.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Info.cpp
-index 1b61282d3..96ed67331 100644
+index 1b61282..96ed673 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Info.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Info.cpp
 @@ -6,6 +6,7 @@ $end_info$
@@ -1154,7 +1162,7 @@ index 1b61282d3..96ed67331 100644
          Result = ::syscall(SYSCALL_DEF(ptrace), request, pid, addr, data);
          SYSCALL_ERRNO();
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
-index 11ff1635f..4e70474a8 100644
+index 11ff163..4e70474 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
 @@ -9,6 +9,7 @@ $end_info$
@@ -1182,6 +1190,3 @@ index 11ff1635f..4e70474a8 100644
      REGISTER_SYSCALL_IMPL_X64(semop, SyscallPassthrough3<SYSCALL_DEF(semop)>);
      REGISTER_SYSCALL_IMPL_X64(getrlimit, SyscallPassthrough2<SYSCALL_DEF(getrlimit)>);
      REGISTER_SYSCALL_IMPL_X64(getrusage, SyscallPassthrough2<SYSCALL_DEF(getrusage)>);
--- 
-2.55.0
-
