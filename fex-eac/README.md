@@ -73,7 +73,7 @@ Optionally run `sudo sh guest-tune.sh` to drop the gamescope MangoApp overlay la
 Steam > VRChat > Properties > Launch Options:
 
 ```
-env EAC_LAUNCHERDIR=$HOME/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/Roaming/EasyAntiCheat PROTON_EAC_RUNTIME='$HOME/.local/share/Steam/steamapps/common/Proton EasyAntiCheat Runtime' WINEDEBUG=-all PROTON_USE_XALIA=0 WINE_CPU_TOPOLOGY=16:0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3 %command%
+env EAC_LAUNCHERDIR=$HOME/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/Roaming/EasyAntiCheat PROTON_EAC_RUNTIME="$HOME/.local/share/Steam/steamapps/common/Proton EasyAntiCheat Runtime" WINEDEBUG=-all PROTON_USE_XALIA=0 WINE_CPU_TOPOLOGY=16:0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3 %command%
 ```
 
 `WINE_CPU_TOPOLOGY` reports 16 CPUs mapped onto the guest's 4 vCPUs; without it IL2CPP's thread pool sizes itself small and
