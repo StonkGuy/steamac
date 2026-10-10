@@ -23,7 +23,7 @@ handler rewrite).
  2 files changed, 21 insertions(+), 3 deletions(-)
 
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index 77e9baf94..960d3e6bd 100644
+index a9a7bf830..54910400c 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 @@ -273,9 +273,18 @@ void SignalDelegator::RestoreThreadState(FEXCore::Core::InternalThreadState* Thr

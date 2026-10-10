@@ -36,10 +36,10 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  6 files changed, 38 insertions(+), 7 deletions(-)
 
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index c84da059f..a38a9cdc8 100644
+index 53fb509d3..32ff77aaf 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-@@ -1167,23 +1167,41 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
+@@ -1171,23 +1171,41 @@ void SignalDelegator::RegisterTLSState(FEX::HLE::ThreadStateObject* Thread) {
    }
  }
  

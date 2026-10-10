@@ -11,18 +11,19 @@ faults inside its own host signal handler.
 Linux setup_rt_frame's copy faults, takes the Efault path and calls force_sigsegv(SIGSEGV, current): SIG_DFL is
 forced and the thread dies from SIGSEGV. Probe the whole frame span against the guest VMA table (the same table the
 SIGSEGV handler consults) before the first store, and on failure call ForceGuestSigSegv, which logs the bad SP once,
-restores SIG_DFL, cleans up and raises SIGSEGV.
+restores SIG_DFL, cleans up, unblocks SIGSEGV (the frame may be for a guest SIGSEGV, set up inside FEX's own SIGSEGV
+handler) and raises it.
 ---
- .../LinuxSyscalls/SignalDelegator.cpp         | 29 ++++++++
+ .../LinuxSyscalls/SignalDelegator.cpp         | 33 ++++++++++
  .../LinuxSyscalls/SignalDelegator.h           |  4 ++
  .../SignalDelegator/GuestFramesManagement.cpp | 66 +++++++++++++++++++
- 3 files changed, 99 insertions(+)
+ 3 files changed, 103 insertions(+)
 
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-index 22d9f7289..77e9baf94 100644
+index 22d9f7289..a9a7bf830 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator.cpp
-@@ -917,6 +917,35 @@ void SignalDelegator::UninstallHostHandler(int Signal) {
+@@ -917,6 +917,39 @@ void SignalDelegator::UninstallHostHandler(int Signal) {
    ::syscall(SYS_rt_sigaction, Signal, &SignalHandler.OldAction, nullptr, 8);
  }
  
@@ -47,7 +48,11 @@ index 22d9f7289..77e9baf94 100644
 +  FEX::HLE::_SyscallHandler->TM.CleanupForExit();
 +
 +  // Now die from SIGSEGV itself, so the parent sees a signal death (WTERMSIG == SIGSEGV), exactly as Linux reports
-+  // force_sigsegv. The host disposition is SIG_DFL, so raise() cannot re-enter FEX.
++  // force_sigsegv. The host disposition is SIG_DFL, so raise() cannot re-enter FEX. When the guest signal being set up
++  // is itself a SIGSEGV we are inside FEX's host SIGSEGV handler, where the kernel blocks SIGSEGV: unblock it, as
++  // force_sigsegv does, or the raise would stay pending and only this thread would exit.
++  uint64_t SegvMask = 1ULL << (SIGSEGV - 1);
++  ::syscall(SYS_rt_sigprocmask, SIG_UNBLOCK, &SegvMask, nullptr, 8);
 +  ::raise(SIGSEGV);
 +
 +  // Unreachable barring a blocked SIGSEGV: nothing has set up a guest frame to return into.
