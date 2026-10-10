@@ -30,9 +30,9 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  .../LinuxSyscalls/SignalDelegator.h           |  2 +
  .../LinuxSyscalls/SignalTrace.cpp             | 32 ++++++++++
  .../LinuxSyscalls/SignalTrace.h               | 63 +++++++++++++++++++
- .../LinuxSyscalls/Syscalls/Passthrough.cpp    | 43 +++++++++++--
+ .../LinuxSyscalls/Syscalls/Passthrough.cpp    | 49 +++++++++++++--
  .../LinuxSyscalls/x64/EPoll.cpp               |  5 ++
- 9 files changed, 212 insertions(+), 5 deletions(-)
+ 9 files changed, 218 insertions(+), 5 deletions(-)
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.cpp
  create mode 100644 Source/Tools/LinuxEmulation/LinuxSyscalls/SignalTrace.h
 
@@ -357,7 +357,7 @@ index 000000000..957143313
 +}
 +} // namespace FEX::HLE::SigTrace
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
-index 4e70474a8..45cf08548 100644
+index 4e70474a8..a021a4555 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/Syscalls/Passthrough.cpp
 @@ -10,6 +10,11 @@ $end_info$
@@ -399,39 +399,45 @@ index 4e70474a8..45cf08548 100644
    REGISTER_SYSCALL_IMPL(lseek, SyscallPassthrough3<SYSCALL_DEF(lseek)>);
    REGISTER_SYSCALL_IMPL(sched_yield, SyscallPassthrough0<SYSCALL_DEF(sched_yield)>);
    REGISTER_SYSCALL_IMPL(msync, SyscallPassthrough3<SYSCALL_DEF(msync)>);
-@@ -230,7 +251,11 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+@@ -230,7 +251,13 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
    REGISTER_SYSCALL_IMPL(getsockname, SyscallPassthrough3<SYSCALL_DEF(getsockname)>);
    REGISTER_SYSCALL_IMPL(getpeername, SyscallPassthrough3<SYSCALL_DEF(getpeername)>);
    REGISTER_SYSCALL_IMPL(socketpair, SyscallPassthrough4<SYSCALL_DEF(socketpair)>);
 -  REGISTER_SYSCALL_IMPL(kill, SyscallPassthrough2<SYSCALL_DEF(kill)>);
 +  REGISTER_SYSCALL_IMPL(kill, [](FEXCore::Core::CpuStateFrame* Frame, pid_t pid, int sig) -> uint64_t {
-+    SigTrace::Log(::syscall(SYS_gettid), SigTrace::Kill, sig, pid, 0);
++    if (SigTrace::Enabled()) {
++      SigTrace::Log(::syscall(SYS_gettid), SigTrace::Kill, sig, pid, 0);
++    }
 +    uint64_t Result = ::syscall(SYSCALL_DEF(kill), pid, sig);
 +    SYSCALL_ERRNO();
 +  });
    REGISTER_SYSCALL_IMPL(semget, SyscallPassthrough3<SYSCALL_DEF(semget)>);
    REGISTER_SYSCALL_IMPL(msgget, SyscallPassthrough2<SYSCALL_DEF(msgget)>);
    REGISTER_SYSCALL_IMPL(msgsnd, SyscallPassthrough4<SYSCALL_DEF(msgsnd)>);
-@@ -293,7 +318,11 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+@@ -293,7 +320,13 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
    REGISTER_SYSCALL_IMPL(fgetxattr, SyscallPassthrough4<SYSCALL_DEF(fgetxattr)>);
    REGISTER_SYSCALL_IMPL(flistxattr, SyscallPassthrough3<SYSCALL_DEF(flistxattr)>);
    REGISTER_SYSCALL_IMPL(fremovexattr, SyscallPassthrough2<SYSCALL_DEF(fremovexattr)>);
 -  REGISTER_SYSCALL_IMPL(tkill, SyscallPassthrough2<SYSCALL_DEF(tkill)>);
 +  REGISTER_SYSCALL_IMPL(tkill, [](FEXCore::Core::CpuStateFrame* Frame, pid_t tid, int sig) -> uint64_t {
-+    SigTrace::Log(::syscall(SYS_gettid), SigTrace::Kill, sig, tid, 0);
++    if (SigTrace::Enabled()) {
++      SigTrace::Log(::syscall(SYS_gettid), SigTrace::Kill, sig, tid, 0);
++    }
 +    uint64_t Result = ::syscall(SYSCALL_DEF(tkill), tid, sig);
 +    SYSCALL_ERRNO();
 +  });
    REGISTER_SYSCALL_IMPL(sched_setaffinity, SyscallPassthrough3<SYSCALL_DEF(sched_setaffinity)>);
    REGISTER_SYSCALL_IMPL(sched_getaffinity, SyscallPassthrough3<SYSCALL_DEF(sched_getaffinity)>);
    REGISTER_SYSCALL_IMPL(io_setup, SyscallPassthrough2<SYSCALL_DEF(io_setup)>);
-@@ -303,7 +332,11 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
+@@ -303,7 +336,13 @@ static void RegisterCommon(FEX::HLE::SyscallHandler* Handler) {
    REGISTER_SYSCALL_IMPL(remap_file_pages, SyscallPassthrough5<SYSCALL_DEF(remap_file_pages)>);
    REGISTER_SYSCALL_IMPL(timer_getoverrun, SyscallPassthrough1<SYSCALL_DEF(timer_getoverrun)>);
    REGISTER_SYSCALL_IMPL(timer_delete, SyscallPassthrough1<SYSCALL_DEF(timer_delete)>);
 -  REGISTER_SYSCALL_IMPL(tgkill, SyscallPassthrough3<SYSCALL_DEF(tgkill)>);
 +  REGISTER_SYSCALL_IMPL(tgkill, [](FEXCore::Core::CpuStateFrame* Frame, pid_t tgid, pid_t tid, int sig) -> uint64_t {
-+    SigTrace::Log(::syscall(SYS_gettid), SigTrace::Kill, sig, tid, tgid);
++    if (SigTrace::Enabled()) {
++      SigTrace::Log(::syscall(SYS_gettid), SigTrace::Kill, sig, tid, tgid);
++    }
 +    uint64_t Result = ::syscall(SYSCALL_DEF(tgkill), tgid, tid, sig);
 +    SYSCALL_ERRNO();
 +  });
