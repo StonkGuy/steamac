@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From b77d22e44e6c56240fda5b04fd0d790bd3ddf0dd Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 7 Oct 2026 12:10:33 +0300
 Subject: [PATCH] kk: sparse binding and residency with Metal 4 placement
@@ -53,7 +53,7 @@ Needs MTLDevice.supportsPlacementSparse (all Apple7 Macs and later).
  src/kosmickrisp/vulkan/kk_cmd_buffer.c        |  15 +
  src/kosmickrisp/vulkan/kk_device.c            |  18 +
  src/kosmickrisp/vulkan/kk_device.h            |   5 +
- src/kosmickrisp/vulkan/kk_device_memory.c     |   7 +
+ src/kosmickrisp/vulkan/kk_device_memory.c     |  12 +
  src/kosmickrisp/vulkan/kk_image.c             |  93 ++++-
  src/kosmickrisp/vulkan/kk_image.h             |  26 ++
  src/kosmickrisp/vulkan/kk_image_layout.c      |   6 +
@@ -64,7 +64,7 @@ Needs MTLDevice.supportsPlacementSparse (all Apple7 Macs and later).
  src/kosmickrisp/vulkan/kk_sparse.c            | 370 ++++++++++++++++++
  src/kosmickrisp/vulkan/kk_sparse.h            |  43 ++
  src/kosmickrisp/vulkan/meson.build            |   2 +
- 30 files changed, 900 insertions(+), 18 deletions(-)
+ 30 files changed, 905 insertions(+), 18 deletions(-)
  create mode 100644 src/kosmickrisp/vulkan/kk_sparse.c
  create mode 100644 src/kosmickrisp/vulkan/kk_sparse.h
 
@@ -660,17 +660,22 @@ index e3795ba..0e85bba 100644
  
  /* Required to create a sampler */
 diff --git a/src/kosmickrisp/vulkan/kk_device_memory.c b/src/kosmickrisp/vulkan/kk_device_memory.c
-index 1c979b0..01fcf21 100644
+index 1c979b0..8243030 100644
 --- a/src/kosmickrisp/vulkan/kk_device_memory.c
 +++ b/src/kosmickrisp/vulkan/kk_device_memory.c
-@@ -141,6 +141,13 @@ kk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
+@@ -141,6 +141,18 @@ kk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
  
        mem->bo->gpu = mtl_buffer_get_gpu_address(mem->bo->map);
        mem->bo->cpu = mtl_get_contents(mem->bo->map);
-+   } else if (BITFIELD_BIT(pAllocateInfo->memoryTypeIndex) &
-+              kk_device_physical(dev)->sparse_mem_types) {
++   } else if (dev->vk.enabled_features.sparseBinding &&
++              (BITFIELD_BIT(pAllocateInfo->memoryTypeIndex) &
++               kk_device_physical(dev)->sparse_mem_types)) {
 +      /* Sparse resources only accept these types (never imported from a host
-+       * pointer, so always a heap): their heaps must take 64 KiB pages. */
++       * pointer, so always a heap): their heaps must take 64 KiB pages. A
++       * device created without sparseBinding cannot make a sparse resource
++       * (VUID-VkBufferCreateInfo-flags-00918 and the image equivalent), so
++       * its allocations of the same type stay plain heaps instead of being
++       * rounded up to 64 KiB and made sparse-capable. */
 +      result = kk_alloc_sparse_bo(dev, &dev->vk.base, aligned_size, &mem->bo);
 +      if (result != VK_SUCCESS)
 +         goto fail_alloc;

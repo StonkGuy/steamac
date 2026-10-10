@@ -1,4 +1,4 @@
-From 047d16607997830d43bc7a4d525c298b17e2f4c0 Mon Sep 17 00:00:00 2001
+From 84a4e6ebae3ecf1936303d353bbf8523e50cfcde Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Thu, 8 Oct 2026 12:00:00 +0300
 Subject: [PATCH] kk: build a graphics pipeline's Metal render pipeline state
@@ -63,9 +63,9 @@ Generated-by: LLM
  src/kosmickrisp/vulkan/kk_device.c     |  30 ++
  src/kosmickrisp/vulkan/kk_device.h     |  26 ++
  src/kosmickrisp/vulkan/kk_queue.c      |   6 +-
- src/kosmickrisp/vulkan/kk_shader.c     | 408 ++++++++++++++++++++-----
- src/kosmickrisp/vulkan/kk_shader.h     |  85 ++++++
- 10 files changed, 527 insertions(+), 83 deletions(-)
+ src/kosmickrisp/vulkan/kk_shader.c     | 422 ++++++++++++++++++++-----
+ src/kosmickrisp/vulkan/kk_shader.h     |  85 +++++
+ 10 files changed, 541 insertions(+), 83 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 index f412d6b..f097d31 100644
@@ -321,7 +321,7 @@ index fe53f6f..913f4a6 100644
           VkResult result = rerecord_and_commit_cmd_buffer(queue, cmd_buffer);
           if (result != VK_SUCCESS)
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 503184f..f1c46a3 100644
+index 503184f..27192eb 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -844,6 +844,20 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
@@ -403,10 +403,6 @@ index 503184f..f1c46a3 100644
 -   ralloc_free((void *)data->entrypoint_name);
 -   ralloc_free((void *)data->code);
 +   kk_take_msl(&shader->msl_data[shader->info.stage]);
-+
-+   kk_take_msl(&shader->gs_main);
-+   kk_take_msl(&shader->gs_count);
-+   kk_take_msl(&shader->pre_gs);
  
 -   ralloc_free((void *)shader->gs_main.entrypoint_name);
 -   ralloc_free((void *)shader->gs_main.code);
@@ -414,12 +410,16 @@ index 503184f..f1c46a3 100644
 -   ralloc_free((void *)shader->gs_count.code);
 -   ralloc_free((void *)shader->pre_gs.entrypoint_name);
 -   ralloc_free((void *)shader->pre_gs.code);
++   kk_take_msl(&shader->gs_main);
++   kk_take_msl(&shader->gs_count);
++   kk_take_msl(&shader->pre_gs);
++
 +   if (async != NULL)
 +      kk_async_pipeline_free(async);
  
     if (shader->minmax)
        kk_shader_destroy(vk_dev, shader->minmax, pAllocator);
-@@ -1533,11 +1559,195 @@ gather_graphics_pipeline_create_info(
+@@ -1533,11 +1559,209 @@ gather_graphics_pipeline_create_info(
        vk_primitive_topology_to_mtl_primitive_topology_class(topology);
  }
  
@@ -512,6 +512,11 @@ index 503184f..f1c46a3 100644
 +struct kk_async_job {
 +   struct kk_device *dev;
 +   struct kk_async_pipeline *async;
++   /* Set by the worker before util_queue signals the fence. util_queue runs
++    * the cleanup callback AFTER that signal (u_queue.c), and the signal is
++    * what releases kk_shader_destroy to free the program and `async`. Once
++    * the job ran, cleanup must therefore not touch `async` any more. */
++   bool ran;
 +};
 +
 +static void
@@ -557,13 +562,15 @@ index 503184f..f1c46a3 100644
 +   const bool built = kk_async_pipeline_build(job->dev, async);
 +   p_atomic_set(&async->status,
 +                built ? (unsigned)KK_ASYNC_READY : (unsigned)KK_ASYNC_FAILED);
++   /* Last access to async by this job: the fence is signalled after return. */
++   job->ran = true;
 +}
 +
 +/* Called by util_queue when the job is dropped instead of run: the queue is
 + * being destroyed with it still queued, so no worker will run it. The job is
 + * left failed: only the worker builds the state, and a device that is shutting
 + * down has no draw left that could care. It is also called by the worker right
-+ * after the job ran, where the status check returns immediately.
++ * after the job ran, where it only frees the job.
 + *
 + * This is the job's only owner after util_queue_add_job: the queue stores the
 + * job pointer, not a copy (u_queue.c), so the allocation has to outlive the
@@ -573,10 +580,16 @@ index 503184f..f1c46a3 100644
 +kk_async_pipeline_cleanup(void *job_data, void *gdata, int thread_index)
 +{
 +   struct kk_async_job *job = job_data;
-+   struct kk_async_pipeline *async = job->async;
 +
-+   if (p_atomic_read(&async->status) == KK_ASYNC_PENDING)
-+      p_atomic_set(&async->status, (unsigned)KK_ASYNC_FAILED);
++   /* A job that ran has published its own status and the fence is already
++    * signalled, so kk_shader_destroy may have freed `async`: do not read it.
++    * A job that did not run (dropped from the queue) is cleaned up by its
++    * dropper, which still owns `async`. */
++   if (!job->ran) {
++      struct kk_async_pipeline *async = job->async;
++      if (p_atomic_read(&async->status) == KK_ASYNC_PENDING)
++         p_atomic_set(&async->status, (unsigned)KK_ASYNC_FAILED);
++   }
 +
 +   vk_free(&job->dev->vk.alloc, job);
 +}
@@ -600,6 +613,7 @@ index 503184f..f1c46a3 100644
 +
 +   job->dev = dev;
 +   job->async = async;
++   job->ran = false;
 +
 +   util_queue_add_job(&dev->pipeline_queue, job, &async->fence,
 +                      kk_async_pipeline_worker, kk_async_pipeline_cleanup,
@@ -617,7 +631,7 @@ index 503184f..f1c46a3 100644
     VkResult result = VK_SUCCESS;
     struct kk_pipeline_handles *pipe = &vs->pipeline;
     mesa_shader_stage vs_stage = MESA_SHADER_VERTEX;
-@@ -1586,78 +1796,52 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+@@ -1586,78 +1810,52 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
        }
     }
  
@@ -732,7 +746,7 @@ index 503184f..f1c46a3 100644
     return result;
  }
  
-@@ -2415,6 +2599,68 @@ kk_cmd_shader_pipeline(struct kk_cmd_buffer *cmd, struct kk_shader *shader,
+@@ -2415,6 +2613,68 @@ kk_cmd_shader_pipeline(struct kk_cmd_buffer *cmd, struct kk_shader *shader,
     return &program->pipeline;
  }
  
@@ -916,6 +930,3 @@ index 2ee4ed5..88e5556 100644
 +                                             bool *not_ready);
 +
  #endif /* KK_SHADER_H */
--- 
-2.39.5 (Apple Git-154)
-

@@ -1,7 +1,8 @@
-From 8f2e6d4a1c3b5e70928a1f4d6c7b8e9a0f1c2d3e Mon Sep 17 00:00:00 2001
+From 2dcce7b40973e0c34cecaf6c9e7a9dfbdd0060d6 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
-Date: Thu, 9 Oct 2026 09:30:00 +0300
-Subject: [PATCH] kk: bound the indirect-deref branch tree and spill large arrays
+Date: Fri, 9 Oct 2026 09:30:00 +0300
+Subject: [PATCH] kk: bound the indirect-deref branch tree and spill large
+ arrays
 
 nir_lower_indirect_derefs_to_if_else_trees lowered every indirect array
 access into a full if-else tree with no size bound (UINT32_MAX), i.e. one
@@ -29,17 +30,25 @@ tree; the bound is what caps the tree itself.  MSL crashes on the 256-leaf
 dEQP-VK.graphicsfuzz.stable-binarysearch-tree case noted in the file, so a
 lower bound is strictly the smaller tree and the safe direction.
 
-shader_in/out stay in the modes: nir_to_msl emits those as direct
-load_input/store_output with a constant index, and KosmicKrisp never calls
-nir_lower_io_indirect_loads, so indirect access to them still has to be
-lowered here.
+The bound applies to function_temp only. shader_in/out keep the full,
+unbounded tree in a call of their own: nir_to_msl emits those as
+load_input/store_output and reads the offset with nir_src_as_uint, so an
+indirect index into them cannot be expressed, and KosmicKrisp never calls
+nir_lower_io_indirect_loads. A single call with the bound would have left
+a dynamically indexed input/output array longer than 16 elements (geometry
+or tessellation per-vertex arrays, large varying arrays) unlowered.
 
 Upstream state: KosmicKrisp at MESA_COMMIT passes UINT32_MAX here; this is
 genuinely absent behaviour, not a stock option.
 ---
+ src/kosmickrisp/compiler/nir_to_msl.c | 37 +++++++++++++++++++++++++--
+ 1 file changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+index 875fdf9..dfa7834 100644
 --- a/src/kosmickrisp/compiler/nir_to_msl.c
 +++ b/src/kosmickrisp/compiler/nir_to_msl.c
-@@ -2486,6 +2486,15 @@
+@@ -2486,6 +2486,15 @@ kk_scalarize_filter(const nir_instr *instr, const void *data)
  void
  msl_preprocess_nir(struct nir_shader *nir)
  {
@@ -55,7 +64,7 @@ genuinely absent behaviour, not a stock option.
     /* First, inline away all the functions */
     NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
     NIR_PASS(_, nir, nir_lower_returns);
-@@ -2555,9 +2564,29 @@
+@@ -2555,9 +2564,33 @@ msl_preprocess_nir(struct nir_shader *nir)
      * dEQP-VK.graphicsfuzz.stable-binarysearch-tree-nested-if-and-conditional */
     NIR_PASS(_, nir, nir_lower_vars_to_scratch, 32,
              glsl_get_natural_size_align_bytes, glsl_get_word_size_align_bytes);
@@ -69,20 +78,25 @@ genuinely absent behaviour, not a stock option.
 +   NIR_PASS(_, nir, nir_lower_vars_to_scratch, KK_SCRATCH_SPILL_SIZE,
 +            glsl_get_natural_size_align_bytes, glsl_get_word_size_align_bytes);
 +
-+   /* Bound the tree: an unbounded one (UINT32_MAX) emits a branch per
-+    * element and Metal's front end is super-linear in branch count (a full
-+    * tree over a large array is tens of seconds of compile on the
-+    * presenting thread: the VRChat menu-open / fast-turn freezes).  An
++   /* shader_in/out are always lowered in full: nir_to_msl emits them as
++    * load_input/store_output and takes the offset with nir_src_as_uint, so an
++    * indirect index into them cannot be expressed and has to become an
++    * if-else tree here whatever the array length (as before this bound). */
++   NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
++            nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
++
++   /* Bound the tree for function_temp: an unbounded one (UINT32_MAX) emits a
++    * branch per element and Metal's front end is super-linear in branch
++    * count (a full tree over a large array is tens of seconds of compile on
++    * the presenting thread: the VRChat menu-open / fast-turn freezes).  An
 +    * array past the leaf bound stays dynamically indexed, small ones still
-+    * tree.  shader_in/out stay in the modes: nir_to_msl emits those as
-+    * direct load_input/store_output with a constant index, so indirect
-+    * access to them still has to be lowered here.  The smaller of the two
-+    * is the safe direction: MSL crashes on the 256-leaf case noted above,
-+    * so a handful of leaves keeps every tree away from that. */
++    * tree.  The smaller of the two is the safe direction: MSL crashes on the
++    * 256-leaf case noted above, so a handful of leaves keeps every tree away
++    * from that. */
     NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
-             nir_var_function_temp | nir_var_shader_in | nir_var_shader_out,
+-            nir_var_function_temp | nir_var_shader_in | nir_var_shader_out,
 -            UINT32_MAX);
-+            KK_INDIRECT_DEREF_MAX_LEN);
++            nir_var_function_temp, KK_INDIRECT_DEREF_MAX_LEN);
  
     msl_nir_lower_subgroups(nir);
  }
