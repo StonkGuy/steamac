@@ -92,10 +92,10 @@ index 960d3e6bd..c84da059f 100644
      // registers are spilled. The guest handler is going to run JIT code with live registers, so it must not inherit that: an SMC
      // fault or a nested signal before the handler's own first syscall would skip spilling every register (the spill mask is
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
-index 8073da305..8fc54ee19 100644
+index ad61b7b9b..4c91eb220 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
-@@ -167,6 +167,13 @@ void SignalDelegator::RestoreFrame_x64(FEXCore::Core::InternalThreadState* Threa
+@@ -177,6 +177,13 @@ void SignalDelegator::RestoreFrame_x64(FEXCore::Core::InternalThreadState* Threa
  
      // Hack! Go back to the top of the dispatcher top
      // This is only safe inside the JIT rather than anything outside of it
@@ -109,7 +109,7 @@ index 8073da305..8fc54ee19 100644
      ArchHelpers::Context::SetPc(ucontext, Config.AbsoluteLoopTopAddressFillSRA);
      ArchHelpers::Context::SetFillSRASingleInst(ucontext, false);
      // Set our state register to point to our guest thread data
-@@ -244,6 +251,13 @@ void SignalDelegator::RestoreFrame_ia32(FEXCore::Core::InternalThreadState* Thre
+@@ -254,6 +261,13 @@ void SignalDelegator::RestoreFrame_ia32(FEXCore::Core::InternalThreadState* Thre
  
      // Hack! Go back to the top of the dispatcher top
      // This is only safe inside the JIT rather than anything outside of it
@@ -123,7 +123,7 @@ index 8073da305..8fc54ee19 100644
      ArchHelpers::Context::SetPc(ucontext, Config.AbsoluteLoopTopAddressFillSRA);
      ArchHelpers::Context::SetFillSRASingleInst(ucontext, false);
      // Set our state register to point to our guest thread data
-@@ -323,6 +337,13 @@ void SignalDelegator::RestoreRTFrame_ia32(FEXCore::Core::InternalThreadState* Th
+@@ -333,6 +347,13 @@ void SignalDelegator::RestoreRTFrame_ia32(FEXCore::Core::InternalThreadState* Th
  
      // Hack! Go back to the top of the dispatcher top
      // This is only safe inside the JIT rather than anything outside of it

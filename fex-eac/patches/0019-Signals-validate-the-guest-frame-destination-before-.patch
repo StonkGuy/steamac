@@ -74,7 +74,7 @@ index 5d3ad1a07..047061455 100644
      // Get symbols from VDSO.
      VDSOPointers = FEX::VDSO::GetVDSOSymbols();
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
-index 8fb800215..444530e0a 100644
+index f51940f6a..deba62c48 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
 @@ -7,6 +7,7 @@ $end_info$
@@ -101,7 +101,7 @@ index 8fb800215..444530e0a 100644
  
  namespace FEX::HLE {
  constexpr uint32_t X86_SA_RESTORER = 0x04000000;
-@@ -387,9 +391,56 @@ void SignalDelegator::RestoreRTFrame_ia32(FEXCore::Core::InternalThreadState* Th
+@@ -397,9 +401,56 @@ void SignalDelegator::RestoreRTFrame_ia32(FEXCore::Core::InternalThreadState* Th
    }
  }
  
@@ -158,7 +158,7 @@ index 8fb800215..444530e0a 100644
  
    // Back up past the redzone, which is 128bytes
    // 32-bit doesn't have a redzone
-@@ -431,6 +482,21 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
+@@ -441,6 +492,21 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
    ContextBackup->UContextLocation = UContextLocation;
    ContextBackup->SigInfoLocation = SigInfoLocation;
  

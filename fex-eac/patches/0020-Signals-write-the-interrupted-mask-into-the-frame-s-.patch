@@ -49,10 +49,10 @@ index 77e9baf94..960d3e6bd 100644
      }
    }
 diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
-index 444530e0a..8073da305 100644
+index deba62c48..ad61b7b9b 100644
 --- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
 +++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SignalDelegator/GuestFramesManagement.cpp
-@@ -594,6 +594,15 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
+@@ -604,6 +604,15 @@ uint64_t SignalDelegator::SetupFrame_x64(FEXCore::Core::InternalThreadState* Thr
    guest_uctx->uc_stack.ss_sp = GuestStack->ss_sp;
    guest_uctx->uc_stack.ss_size = GuestStack->ss_size;
  
