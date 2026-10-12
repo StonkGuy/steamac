@@ -10,6 +10,8 @@
 
 #include <stdexcept>
 
+#include "vd/vd_wire.h"
+
 namespace vrhost::vd
 {
 void random_bytes(std::span<uint8_t> b)
@@ -24,32 +26,6 @@ AesKey AesKey::random()
 	random_bytes(k.key);
 	random_bytes(k.iv);
 	return k;
-}
-
-static std::optional<std::vector<uint8_t>> cbc_once(const AesKey & k, std::span<const uint8_t> in, bool encrypt)
-{
-	std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
-	if (not ctx or EVP_CipherInit_ex(ctx.get(), EVP_aes_256_cbc(), nullptr, k.key.data(), k.iv.data(), encrypt) != 1)
-		throw std::runtime_error("vd: AES init failed");
-	std::vector<uint8_t> out(in.size() + 16);
-	int n = 0, m = 0;
-	if (EVP_CipherUpdate(ctx.get(), out.data(), &n, in.data(), int(in.size())) != 1 or
-	    EVP_CipherFinal_ex(ctx.get(), out.data() + n, &m) != 1)
-		return std::nullopt;
-	out.resize(n + m);
-	return out;
-}
-
-std::vector<uint8_t> aes_wrap(const AesKey & k, std::span<const uint8_t> plain)
-{
-	return *cbc_once(k, plain, true);
-}
-
-std::optional<std::vector<uint8_t>> aes_unwrap(const AesKey & k, std::span<const uint8_t> wrapped)
-{
-	if (wrapped.empty() or wrapped.size() % 16)
-		return std::nullopt;
-	return cbc_once(k, wrapped, false);
 }
 
 CbcStream::CbcStream(const AesKey & k, bool encrypt) : ctx(EVP_CIPHER_CTX_new())
@@ -74,6 +50,45 @@ std::vector<uint8_t> CbcStream::update(std::span<const uint8_t> in)
 	if (EVP_CipherUpdate(static_cast<EVP_CIPHER_CTX *>(ctx), out.data(), &n, in.data(), int(in.size())) != 1)
 		throw std::runtime_error("vd: AES update failed");
 	out.resize(n);
+	return out;
+}
+
+std::vector<uint8_t> chunk_wrap(const AesKey & k, std::span<const std::vector<uint8_t>> payloads)
+{
+	CbcStream enc(k, true);
+	std::vector<uint8_t> out;
+	for (auto & p: payloads)
+	{
+		std::vector<uint8_t> chunk;
+		put_varint(chunk, uint32_t(p.size()));
+		chunk.insert(chunk.end(), p.begin(), p.end());
+		size_t pad = (16 - chunk.size() % 16) % 16;
+		chunk.resize(chunk.size() + pad);
+		random_bytes(std::span(chunk).last(pad));
+		auto c = enc.update(chunk);
+		out.insert(out.end(), c.begin(), c.end());
+	}
+	return out;
+}
+
+std::optional<std::vector<uint8_t>> chunk_unwrap(const AesKey & k, std::span<const uint8_t> in)
+{
+	if (in.empty() or in.size() % 16)
+		return std::nullopt;
+	CbcStream dec(k, false);
+	auto plain = dec.update(in);
+	std::vector<uint8_t> out;
+	size_t pos = 0;
+	while (pos < plain.size())
+	{
+		size_t used = 0;
+		auto len = get_varint(std::span(plain).subspan(pos), used);
+		if (not len or pos + used + *len > plain.size())
+			return std::nullopt;
+		out.insert(out.end(), plain.begin() + pos + used, plain.begin() + pos + used + *len);
+		size_t total = used + *len;
+		pos += total + (16 - total % 16) % 16;
+	}
 	return out;
 }
 
@@ -132,7 +147,7 @@ std::optional<std::vector<uint8_t>> rsa_encrypt(const std::string & xml, std::sp
 	std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> ctx(EVP_PKEY_CTX_new(pkey.get(), nullptr), EVP_PKEY_CTX_free);
 	size_t len = 0;
 	if (not ctx or EVP_PKEY_encrypt_init(ctx.get()) != 1 or
-	    EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_PADDING) != 1 or
+	    EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_OAEP_PADDING) != 1 or
 	    EVP_PKEY_encrypt(ctx.get(), nullptr, &len, data.data(), data.size()) != 1)
 		return std::nullopt;
 	std::vector<uint8_t> out(len);
@@ -179,7 +194,7 @@ std::optional<std::vector<uint8_t>> RsaKeyPair::decrypt(std::span<const uint8_t>
 	        EVP_PKEY_CTX_new(static_cast<EVP_PKEY *>(pkey), nullptr), EVP_PKEY_CTX_free);
 	size_t len = 0;
 	if (not ctx or EVP_PKEY_decrypt_init(ctx.get()) != 1 or
-	    EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_PADDING) != 1 or
+	    EVP_PKEY_CTX_set_rsa_padding(ctx.get(), RSA_PKCS1_OAEP_PADDING) != 1 or
 	    EVP_PKEY_decrypt(ctx.get(), nullptr, &len, in.data(), in.size()) != 1)
 		return std::nullopt;
 	std::vector<uint8_t> out(len);

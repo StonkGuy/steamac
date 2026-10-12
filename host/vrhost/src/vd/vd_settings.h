@@ -25,6 +25,12 @@ public:
 	std::optional<bool> boolean(const std::string & key) const;
 	std::optional<std::string> string(const std::string & key) const; // unescaped (\" \\ \/ only)
 	bool empty() const { return values.empty(); }
+	// Takes over every member of o (a change message carries one).
+	void merge(const Settings & o)
+	{
+		for (auto & [k, v]: o.values)
+			values[k] = v;
+	}
 
 	static std::string quote(const std::string &);
 

@@ -3,7 +3,7 @@
 
 #include "vd/vd_wire.h"
 
-#include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -11,38 +11,53 @@ namespace vrhost::vd
 {
 std::vector<uint8_t> encode_offer(const Offer & o)
 {
-	BeWriter w;
-	w.raw({reinterpret_cast<const uint8_t *>(o.rsa_public_xml.data()), o.rsa_public_xml.size()});
+	std::vector<uint8_t> out(o.rsa_public_xml.begin(), o.rsa_public_xml.end());
 	if (o.platform)
 	{
-		w.u16(*o.platform);
-		w.raw({reinterpret_cast<const uint8_t *>(o.account.data()), o.account.size()});
+		out.push_back(0);
+		out.push_back(*o.platform);
 	}
-	return w.out;
+	out.insert(out.end(), o.account.begin(), o.account.end());
+	return out;
 }
 
 std::optional<Offer> parse_offer(std::span<const uint8_t> b)
 {
-	std::string s(b.begin(), b.end());
-	if (not s.starts_with("<RSAKeyValue>"))
+	if (b.size() < offer_key_chars)
 		return std::nullopt;
-	auto end = s.find(rsa_key_end);
-	if (end == std::string::npos)
-		return std::nullopt;
-	end += strlen(rsa_key_end);
 	Offer o;
-	o.rsa_public_xml = s.substr(0, end);
-	if (s.size() >= end + 2)
+	o.rsa_public_xml.assign(b.begin(), b.begin() + offer_key_chars);
+	if (not o.rsa_public_xml.starts_with("<RSAKeyValue>") or not o.rsa_public_xml.ends_with("</RSAKeyValue>"))
+		return std::nullopt;
+	auto rest = b.subspan(offer_key_chars);
+	if (rest.size() >= 2 and rest[0] == 0)
 	{
-		o.platform = uint16_t(uint8_t(s[end]) << 8 | uint8_t(s[end + 1]));
-		o.account = s.substr(end + 2);
+		o.platform = rest[1];
+		rest = rest.subspan(2);
 	}
+	o.account.assign(rest.begin(), rest.end());
 	return o;
+}
+
+std::vector<uint8_t> wrap_offer(const AesKey & discovery, const Offer & o)
+{
+	std::vector<uint8_t> plain[] = {encode_offer(o)};
+	return chunk_wrap(discovery, plain);
+}
+
+std::optional<Offer> unwrap_offer(const AesKey & discovery, std::span<const uint8_t> d)
+{
+	if (d.size() <= offer_key_chars)
+		return std::nullopt;
+	auto plain = chunk_unwrap(discovery, d);
+	if (not plain)
+		return std::nullopt;
+	return parse_offer(*plain);
 }
 
 std::vector<uint8_t> encode_connect_now(const ConnectNow & c)
 {
-	std::vector<uint8_t> out(c.guid.begin(), c.guid.end());
+	std::vector<uint8_t> out(c.connection_id.begin(), c.connection_id.end());
 	out.push_back(c.platform);
 	return out;
 }
@@ -52,17 +67,9 @@ std::optional<ConnectNow> parse_connect_now(std::span<const uint8_t> b)
 	if (b.size() != connect_now_size)
 		return std::nullopt;
 	ConnectNow c;
-	std::copy_n(b.begin(), 16, c.guid.begin());
+	std::copy_n(b.begin(), 16, c.connection_id.begin());
 	c.platform = b[16];
 	return c;
-}
-
-std::string guid_text(const std::array<uint8_t, 16> & g)
-{
-	char s[40];
-	snprintf(s, sizeof s, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", g[0], g[1], g[2], g[3],
-	         g[4], g[5], g[6], g[7], g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]);
-	return s;
 }
 
 namespace
@@ -89,7 +96,7 @@ std::string unescape(std::string v)
 	return v;
 }
 
-// All texts of <name>..</name> in order.
+// Texts of every <name>..</name> (name may carry a prefix, e.g. "a:_Major"), in order.
 std::vector<std::string> elements(const std::string & xml, const std::string & name)
 {
 	std::vector<std::string> out;
@@ -111,60 +118,111 @@ std::string element(const std::string & xml, const std::string & name)
 	auto e = elements(xml, name);
 	return e.empty() ? "" : e.front();
 }
+
+const char * region_name(Region r)
+{
+	switch (r)
+	{
+		case Region::america_west: return "AmericaWest";
+		case Region::america_central: return "AmericaCentral";
+		case Region::europe: break;
+	}
+	return "Europe";
+}
 } // namespace
 
-// TODO(vd-live:record-schema): our own element names, DataContract style.
+// .NET DataContract XML: members in ordinal order of their names, booleans as true/false, byte arrays base64,
+// enums by name, System.Version by its private fields in the System namespace (VD-FACT(record-schema)).
 std::string encode_record(const ComputerRecord & r)
 {
 	auto e = [](const char * n, const std::string & v) { return std::string("<") + n + ">" + escape(v) + "</" + n + ">"; };
 	auto b = [](bool v) { return std::string(v ? "true" : "false"); };
-	std::string x = "<Computer>";
-	x += e("Id", r.id) + e("Name", r.name) + e("Description", r.description) + e("OS", r.os) + e("Version", r.version);
-	x += "<PrivateAddresses>";
-	for (auto & a: r.addresses)
-		x += e("Address", a);
-	x += "</PrivateAddresses>";
-	x += e("ControlPort", std::to_string(r.control_port)) + e("DataPort", std::to_string(r.data_port)) +
-	     e("VideoPort", std::to_string(r.video_port)) + e("AudioPort", std::to_string(r.audio_port)) +
-	     e("UdpPort", std::to_string(r.discovery_port));
-	x += e("AllowRemote", b(r.allow_remote)) + e("EncryptLocal", b(r.encrypt_local)) + e("EncryptRemote", b(r.encrypt_remote));
+	std::string x = std::string("<Computer xmlns=\"") + record_namespace +
+	                "\" xmlns:i=\"http://www.w3.org/2001/XMLSchema-instance\">";
+	x += e("AllowRemoteConnections", b(r.allow_remote));
+	x += e("ConnectionID", base64(r.connection_id));
+	x += e("Description", r.description);
+	x += e("EncryptLocalTraffic", b(r.encrypt_local));
+	x += e("EncryptRemoteTraffic", b(r.encrypt_remote));
+	x += e("ID", r.id);
+	x += e("IV", base64(r.channel_key.iv));
+	x += e("Key", base64(r.channel_key.key));
+	x += e("Name", r.name);
+	x += e("OS", r.os);
+	x += "<PrivateAdapters>";
+	for (auto & a: r.adapters)
+		x += "<NetworkAdapter>" + e("IPAddresString", a.ip) + e("IsGigabit", b(a.gigabit)) + e("IsUsb", b(a.usb)) +
+		     e("IsWireless", b(a.wireless)) + e("MACAddresString", a.mac) + "</NetworkAdapter>";
+	x += "</PrivateAdapters>";
+	x += e("Region", region_name(r.region));
+	x += "<StreamerVersion xmlns:a=\"http://schemas.datacontract.org/2004/07/System\">" +
+	     e("a:_Build", std::to_string(r.version[2])) + e("a:_Major", std::to_string(r.version[0])) +
+	     e("a:_Minor", std::to_string(r.version[1])) + e("a:_Revision", std::to_string(r.version[3])) + "</StreamerVersion>";
 	return x + "</Computer>";
 }
 
 std::optional<ComputerRecord> parse_record(const std::string & x)
 {
-	if (not x.starts_with("<Computer>"))
+	if (not x.starts_with("<Computer ") or x.find(record_namespace) == std::string::npos)
 		return std::nullopt;
 	ComputerRecord r;
-	r.id = element(x, "Id");
+	r.id = element(x, "ID");
 	r.name = element(x, "Name");
 	r.description = element(x, "Description");
 	r.os = element(x, "OS");
-	r.version = element(x, "Version");
-	r.addresses = elements(x, "Address");
-	auto port = [&](const char * n) { return uint16_t(atoi(element(x, n).c_str())); };
-	r.control_port = port("ControlPort");
-	r.data_port = port("DataPort");
-	r.video_port = port("VideoPort");
-	r.audio_port = port("AudioPort");
-	r.discovery_port = port("UdpPort");
-	r.allow_remote = element(x, "AllowRemote") == "true";
-	r.encrypt_local = element(x, "EncryptLocal") == "true";
-	r.encrypt_remote = element(x, "EncryptRemote") == "true";
+	r.version = {atoi(element(x, "a:_Major").c_str()), atoi(element(x, "a:_Minor").c_str()),
+	             atoi(element(x, "a:_Build").c_str()), atoi(element(x, "a:_Revision").c_str())};
+	for (auto & a: elements(x, "NetworkAdapter"))
+		r.adapters.push_back({.ip = element(a, "IPAddresString"),
+		                      .mac = element(a, "MACAddresString"),
+		                      .wireless = element(a, "IsWireless") == "true",
+		                      .gigabit = element(a, "IsGigabit") == "true",
+		                      .usb = element(a, "IsUsb") == "true"});
+	r.allow_remote = element(x, "AllowRemoteConnections") == "true";
+	r.encrypt_local = element(x, "EncryptLocalTraffic") == "true";
+	r.encrypt_remote = element(x, "EncryptRemoteTraffic") == "true";
+	auto id = unbase64(element(x, "ConnectionID"));
+	auto key = unbase64(element(x, "Key"));
+	auto iv = unbase64(element(x, "IV"));
+	if (not id or id->size() != 16 or not key or key->size() != 32 or not iv or iv->size() != 16)
+		return std::nullopt;
+	std::copy_n(id->begin(), 16, r.connection_id.begin());
+	std::copy_n(key->begin(), 32, r.channel_key.key.begin());
+	std::copy_n(iv->begin(), 16, r.channel_key.iv.begin());
+	auto region = element(x, "Region");
+	r.region = region == "AmericaWest" ? Region::america_west : region == "AmericaCentral" ? Region::america_central : Region::europe;
 	return r;
 }
 
-std::optional<std::vector<uint8_t>> encode_reply(const AesKey & discovery, const AesKey & session,
-                                                 const std::string & rsa_public_xml, const ComputerRecord & r)
+std::optional<std::vector<uint8_t>> encode_reply(const std::string & rsa_public_xml, const ComputerRecord & r)
 {
-	std::vector<uint8_t> k(session.key.begin(), session.key.end());
-	k.insert(k.end(), session.iv.begin(), session.iv.end());
+	AesKey wrapper = AesKey::random();
+	std::vector<uint8_t> k(wrapper.key.begin(), wrapper.key.end());
+	k.insert(k.end(), wrapper.iv.begin(), wrapper.iv.end());
 	auto out = rsa_encrypt(rsa_public_xml, k);
-	if (not out)
+	if (not out or out->size() != rsa_block_size)
 		return std::nullopt;
 	auto xml = encode_record(r);
-	auto rec = aes_wrap(discovery, {reinterpret_cast<const uint8_t *>(xml.data()), xml.size()});
+	std::vector<uint8_t> payload[] = {{xml.begin(), xml.end()}};
+	auto rec = chunk_wrap(wrapper, payload);
 	out->insert(out->end(), rec.begin(), rec.end());
 	return out;
+}
+
+std::optional<ComputerRecord> parse_reply(std::span<const uint8_t> d,
+                                          const std::function<std::optional<std::vector<uint8_t>>(std::span<const uint8_t>)> & rsa_decrypt)
+{
+	if (d.size() <= rsa_block_size)
+		return std::nullopt;
+	auto k = rsa_decrypt(d.first(rsa_block_size));
+	if (not k or k->size() != 48)
+		return std::nullopt;
+	AesKey wrapper;
+	std::copy_n(k->begin(), 32, wrapper.key.begin());
+	std::copy_n(k->begin() + 32, 16, wrapper.iv.begin());
+	auto xml = chunk_unwrap(wrapper, d.subspan(rsa_block_size));
+	if (not xml)
+		return std::nullopt;
+	return parse_record(std::string(xml->begin(), xml->end()));
 }
 } // namespace vrhost::vd

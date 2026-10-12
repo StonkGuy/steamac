@@ -23,11 +23,7 @@ struct AesKey
 
 void random_bytes(std::span<uint8_t>);
 
-// One discovery datagram, AES-256-CBC + PKCS#7 (TODO(vd-live:discovery-cipher)).
-std::vector<uint8_t> aes_wrap(const AesKey &, std::span<const uint8_t> plain);
-std::optional<std::vector<uint8_t>> aes_unwrap(const AesKey &, std::span<const uint8_t> wrapped);
-
-// A continuous AES-256-CBC chain without padding (one per channel and direction, TODO(vd-live:stream-cipher)).
+// A continuous AES-256-CBC chain without padding (one per channel and direction, VD-FACT(stream-cipher)).
 class CbcStream
 {
 public:
@@ -42,15 +38,21 @@ private:
 	void * ctx;
 };
 
+// The stream-chunk format on a byte buffer (discovery offer and reply, VD-FACT(discovery-cipher)): one CBC chain from
+// the IV over chunks of 7-bit varint length + payload + random padding to 16 bytes.
+std::vector<uint8_t> chunk_wrap(const AesKey &, std::span<const std::vector<uint8_t>> payloads);
+// All chunk payloads concatenated; nullopt when the buffer is not block aligned or a chunk length does not fit.
+std::optional<std::vector<uint8_t>> chunk_unwrap(const AesKey &, std::span<const uint8_t> wrapped);
+
 // RSA public key given as .NET XML text (<RSAKeyValue><Modulus>b64</Modulus><Exponent>b64</Exponent>...).
-// Encrypts with PKCS#1 v1.5 (TODO(vd-live:rsa-padding)); nullopt when the key does not parse.
+// Encrypts with OAEP (SHA-1, VD-FACT(rsa-padding)); nullopt when the key does not parse.
 std::optional<std::vector<uint8_t>> rsa_encrypt(const std::string & xml_public_key, std::span<const uint8_t> data);
 
 // Test peer side: a fresh key pair, its public half as XML, decryption.
 class RsaKeyPair
 {
 public:
-	explicit RsaKeyPair(int bits = 2048);
+	explicit RsaKeyPair(int bits = 1024);
 	~RsaKeyPair();
 	RsaKeyPair(const RsaKeyPair &) = delete;
 	RsaKeyPair & operator=(const RsaKeyPair &) = delete;

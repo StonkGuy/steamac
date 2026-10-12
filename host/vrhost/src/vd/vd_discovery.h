@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Virtual Desktop adapter: LAN discovery datagrams and the computer record (PROTOCOL.md sections 2 and 4). Pure
-// encode/decode, shared by VdSession and the test peer; the datagram cipher is in vd_crypto.h.
+// Virtual Desktop adapter: LAN discovery datagrams and the computer record (VD-FACT(discovery-cipher, connect-now,
+// offer-layout, rsa-padding, reply-layout, record-schema) in vd_assumptions.h). Pure encode/decode, shared by
+// VdSession and the test peer; the ciphers are in vd_crypto.h.
+//
+//   headset -> host  offer: chunk_wrap(discovery key, RSA key XML (243 chars) [+ 0x00 platform] + account)
+//   host -> headset  reply: RSA-OAEP(wrapper key + IV) (128 B) + chunk_wrap(wrapper key, record XML)
+//   headset -> host  connect now (plain, 17 B): record connection id + platform
+//   headset -> host  TCP to the fixed ports; channels use the record's Key/IV
 #pragma once
 
 #include "vd/vd_assumptions.h"
 #include "vd/vd_crypto.h"
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -16,71 +22,47 @@
 
 namespace vrhost::vd
 {
-// Shape 2: the headset's offer (after unwrapping): RSA public key XML + optional platform + account id.
 struct Offer
 {
-	std::string rsa_public_xml;
-	std::optional<uint16_t> platform;
+	std::string rsa_public_xml;      // exactly offer_key_chars
+	std::optional<uint8_t> platform; // absent: Oculus (0)
 	std::string account;
 };
-std::vector<uint8_t> encode_offer(const Offer &);
+std::vector<uint8_t> encode_offer(const Offer &); // plaintext
 std::optional<Offer> parse_offer(std::span<const uint8_t> plain);
+std::vector<uint8_t> wrap_offer(const AesKey & discovery, const Offer &);
+std::optional<Offer> unwrap_offer(const AesKey & discovery, std::span<const uint8_t> datagram);
 
-// Shape 1: "connect now" for the computer's current connection GUID.
 struct ConnectNow
 {
-	std::array<uint8_t, 16> guid{};
+	std::array<uint8_t, 16> connection_id{};
 	uint8_t platform = 0;
 };
 std::vector<uint8_t> encode_connect_now(const ConnectNow &);
-std::optional<ConnectNow> parse_connect_now(std::span<const uint8_t> plain);
+std::optional<ConnectNow> parse_connect_now(std::span<const uint8_t> datagram);
 
+struct NetAdapter
+{
+	std::string ip, mac; // mac: 12 upper-case hex digits, no separators (empty when unknown)
+	bool wireless = false, gigabit = false, usb = false;
+};
 struct ComputerRecord
 {
-	std::string id; // connection GUID, text form
-	std::string name, description, os = os_windows, version = streamer_version;
-	std::vector<std::string> addresses; // private addresses, numeric
-	uint16_t control_port = 0, data_port = 0, video_port = 0, audio_port = 0, discovery_port = 0;
-	bool encrypt_local = true, encrypt_remote = true, allow_remote = false;
+	std::string id, name, description;
+	std::string os = os_windows;
+	std::array<int, 4> version{streamer_version[0], streamer_version[1], streamer_version[2], streamer_version[3]};
+	std::vector<NetAdapter> adapters;
+	bool allow_remote = false, encrypt_local = true, encrypt_remote = true;
+	std::array<uint8_t, 16> connection_id{};
+	AesKey channel_key; // the key/IV of the TCP channels
+	Region region = Region::europe;
 };
 std::string encode_record(const ComputerRecord &);
 std::optional<ComputerRecord> parse_record(const std::string & xml);
 
-// Reply to an approved offer: RSA(session key + IV) then the record wrapped with the discovery key.
-std::optional<std::vector<uint8_t>> encode_reply(const AesKey & discovery, const AesKey & session,
-                                                 const std::string & rsa_public_xml, const ComputerRecord &);
-// Test peer: rsa_size = modulus bytes of its key.
-struct Reply
-{
-	AesKey session;
-	ComputerRecord record;
-};
-template <typename Decrypt>
-std::optional<Reply> parse_reply(const AesKey & discovery, std::span<const uint8_t> datagram, size_t rsa_size,
-                                 Decrypt && rsa_decrypt);
-
-std::string guid_text(const std::array<uint8_t, 16> &);
-
-// ---
-template <typename Decrypt>
-std::optional<Reply> parse_reply(const AesKey & discovery, std::span<const uint8_t> d, size_t rsa_size,
-                                 Decrypt && rsa_decrypt)
-{
-	if (d.size() <= rsa_size)
-		return std::nullopt;
-	std::optional<std::vector<uint8_t>> k = rsa_decrypt(d.first(rsa_size));
-	if (not k or k->size() != 48)
-		return std::nullopt;
-	Reply r;
-	std::copy_n(k->begin(), 32, r.session.key.begin());
-	std::copy_n(k->begin() + 32, 16, r.session.iv.begin());
-	auto rec = aes_unwrap(discovery, d.subspan(rsa_size));
-	if (not rec)
-		return std::nullopt;
-	auto parsed = parse_record(std::string(rec->begin(), rec->end()));
-	if (not parsed)
-		return std::nullopt;
-	r.record = *parsed;
-	return r;
-}
+// Reply to an approved offer (nullopt: the offer's RSA key is unusable or not 1024-bit).
+std::optional<std::vector<uint8_t>> encode_reply(const std::string & rsa_public_xml, const ComputerRecord &);
+// Test peer side.
+std::optional<ComputerRecord> parse_reply(std::span<const uint8_t> datagram,
+                                          const std::function<std::optional<std::vector<uint8_t>>(std::span<const uint8_t>)> & rsa_decrypt);
 } // namespace vrhost::vd

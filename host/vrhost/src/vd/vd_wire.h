@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Virtual Desktop adapter: wire encoding. Control-message integers are big-endian (BeWriter/BeReader); the struct
-// blobs (video format, frame metadata, tracking/input) are little-endian raw copies of a naturally aligned layout,
-// reproduced here as C++ structs with static_asserted sizes (Apple arm64 and the peer are both little-endian).
-// Layouts follow the field lists of the interoperability notes; offsets the notes leave open are pinned by
-// tests/test_vd_wire.cpp (see vd_assumptions.h).
+// blobs on the video channel are little-endian raw copies of a naturally aligned layout, reproduced here as C++
+// structs with static_asserted offsets (Apple arm64 and the peer are both little-endian). The tracking/input blob of
+// the data channel is decoded field by field at fixed offsets (TrackingSample). Layouts: VD-FACT(framedata-layout),
+// VD-FACT(eye-delivery) in vd_assumptions.h, pinned by tests/test_vd_wire.cpp.
 #pragma once
 
 #include "vd/vd_assumptions.h"
@@ -47,13 +47,14 @@ static_assert(sizeof(RenderPose) == 92);
 struct HapticVibration
 {
 	float amplitude = 0;
-	uint32_t packed = 0; // doubles as a cursor/fovea position in other modes; 0 here
+	int32_t fovea_x = 0, fovea_y = 0; // top-left of the fovea rectangle with foveated streaming; 0 here
 };
+static_assert(sizeof(HapticVibration) == 12);
 
 struct FrameMetadata
 {
 	int64_t timestamp_us = 0;
-	int64_t frame_index = 0;
+	int32_t frame_index = 0;
 	Source source = Source::vr;
 	uint8_t is_sync_frame = 0, is_hdr = 0;
 	float frame_time_ms = 0, game_time_ms = 0, encode_time_ms = 0;
@@ -72,65 +73,76 @@ struct SliceHeader
 };
 static_assert(sizeof(SliceHeader) == 16);
 
+struct Size2
+{
+	int32_t width = 0, height = 0;
+};
 struct Rect
 {
 	int32_t x = 0, y = 0, width = 0, height = 0;
 };
 struct StreamDesc
 {
-	int32_t width = 0, height = 0;
+	Size2 size;
 	Rect bounds;
 };
+// The full (newer) layout, 112 bytes; the VR producer sends its first 88 bytes (3 stream slots) under tag 2.
 struct VideoFormat
 {
 	Source source = Source::vr;
 	VideoCodec codec = VideoCodec::hevc;
-	float frame_rate = 0;
-	int32_t width = 0, height = 0; // primary frame size (= per-eye encode size)
+	int32_t frame_rate = 0;
+	Size2 frame_size;    // per-eye stream size
 	int32_t stream_count = 0;
-	StreamDesc stream[4];
+	Rect bounds;         // (0, 0, per-eye render size)  TODO(vd-live:bounds): meaning inferred
+	StreamDesc more[3];  // secondary (fovea size with foveated streaming), tertiary, quaternary
 };
-static_assert(sizeof(VideoFormat) == 120);
+static_assert(sizeof(VideoFormat) == 112);
 
-// Upstream (data channel).
-struct ControllerInput
+// --- data channel: tracking + input (decoded at fixed offsets) ---------------------------------------------------
+struct ControllerState // both controllers in one block
 {
-	uint32_t buttons = 0, touches = 0;
-	uint8_t trigger = 0, grip = 0; // 0..255
-	int16_t thumb_x = 0, thumb_y = 0; // -32767..32767
+	uint16_t buttons = 0, touches = 0;
+	uint8_t trigger[2]{}, grip[2]{}; // [left, right], 0..255
+	int16_t thumb_x[2]{}, thumb_y[2]{};
 };
-static_assert(sizeof(ControllerInput) == 16);
-
-struct RawInputState
-{
-	ControllerInput hand[2];
-	uint8_t pointer[16]{};  // TODO(vd-live:framedata-layout): pointer/mouse/gamepad sub-state sizes
-	uint8_t keyboard[24]{}; // RawKeyboardState is explicitly 24 bytes (notes)
-	uint8_t mouse[16]{};
-	uint8_t gamepad[16]{};
-	int32_t gamepad_model = 0;
-};
-static_assert(sizeof(RawInputState) == 108);
-
-struct TrackedDevice
+struct HeadPose
 {
 	Quat orientation;
-	Vec3 position, linear_velocity, angular_velocity;
-	uint8_t orientation_tracked = 0, position_tracked = 0;
-	float battery = 0;
+	Vec3 position, velocity, angular_velocity;
+	bool tracked = false, mounted = false;
+	int8_t battery = 0;
 };
-static_assert(sizeof(TrackedDevice) == 60);
-
-struct FrameData
+enum ControllerTracked : uint8_t
 {
-	int64_t frame_index = 0;
-	float latency_s = 0;
-	float floor_height = 0;
-	RawInputState input;
-	uint32_t lock_states = 0;
-	TrackedDevice head, controller[2];
+	controller_tracked = 1,
+	controller_hand_tracked = 2,
 };
-static_assert(sizeof(FrameData) == 312);
+struct ControllerPose
+{
+	Quat orientation;
+	Vec3 position, velocity, acceleration, angular_velocity;
+	uint8_t tracked = 0; // ControllerTracked flags
+	int8_t battery = 0;
+};
+struct TrackingSample
+{
+	int32_t frame_index = 0;
+	float latency_s = 0, floor_height = 0;
+	ControllerState input;
+	uint8_t lock_states = 0;
+	HeadPose head;
+	ControllerPose controller[2];
+	size_t size = frame_data_base; // decoded length: which feature blocks (hands, body, eye, face) were present
+};
+// Field offsets inside the decompressed struct (VD-FACT(framedata-layout)).
+namespace fd_off
+{
+inline constexpr size_t frame_index = 0, latency = 4, floor_height = 8, controller = 94, gamepad_model = 112,
+                        lock_states = 116, head = 120, left_controller = 176, right_controller = 244;
+}
+std::optional<TrackingSample> decode_tracking(std::span<const uint8_t> raw); // nullopt when shorter than the base
+std::vector<uint8_t> encode_tracking(const TrackingSample &, size_t size = frame_data_base); // test peer
 
 template <typename T>
 std::span<const uint8_t> bytes_of(const T & v)
@@ -187,15 +199,13 @@ void put_varint(std::vector<uint8_t> & out, uint32_t v);
 // Parses at b; returns the value and sets `used`, or nullopt when b ends inside the varint / it is too long.
 std::optional<uint32_t> get_varint(std::span<const uint8_t> b, size_t & used);
 
-struct PeerInfo
-{
-	std::vector<uint8_t> address; // 4 or 16 bytes
-	uint32_t port = 0;
-	bool encrypt = false;
-};
-std::vector<uint8_t> encode_peer_info(const PeerInfo &);
-
 // Control message: 1-byte type, u32 BE payload length, payload.
 std::vector<uint8_t> control_message(Msg, std::span<const uint8_t> payload);
-std::vector<uint8_t> setting_changed_payload(const std::string & name, const std::string & json_value);
+std::vector<uint8_t> control_message(Msg, const std::string & payload);
+// A settings change: {"name":json_value}.
+std::string setting_changed_payload(const std::string & name, const std::string & json_value);
+// Video channel messages.
+std::vector<uint8_t> video_format_message(const VideoFormat &); // tag 2 + 88 bytes
+std::vector<uint8_t> frame_message(const FrameMetadata &, std::span<const uint8_t> data);
+std::vector<uint8_t> slice_message(const SliceHeader &, std::span<const uint8_t> data);
 } // namespace vrhost::vd

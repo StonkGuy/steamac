@@ -109,6 +109,7 @@ add_library(vrhost-core STATIC
 	src/vd/vd_discovery.cpp
 	src/vd/vd_session.cpp
 	src/vd/vd_settings.cpp
+	src/vd/vd_streamer_key.cpp
 	src/vd/vd_wire.cpp
 	src/encoder/vt_encoder.mm
 	src/pattern/test_pattern.mm)
@@ -136,7 +137,7 @@ add_custom_command(TARGET steamac-vrhost POST_BUILD
 option(VRHOST_TESTS "Build the tests" ON)
 if(VRHOST_TESTS)
 enable_testing()
-foreach(t protocol annexb pose_history encoder loopback pacer crypto audio control vd_wire vd_loopback)
+foreach(t protocol annexb pose_history encoder loopback pacer crypto audio control vd_wire vd_loopback vd_key)
 	add_executable(test_${t} tests/test_${t}.cpp)
 	target_link_libraries(test_${t} PRIVATE vrhost-core)
 	add_test(NAME ${t} COMMAND test_${t})
@@ -147,7 +148,7 @@ target_sources(test_encoder PRIVATE tests/vt_decode.mm)
 target_sources(test_loopback PRIVATE tests/vt_decode.mm)
 set_source_files_properties(tests/vt_decode.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
 target_sources(test_vd_loopback PRIVATE tests/fake_vd_client.cpp tests/vt_decode.mm)
-set_tests_properties(encoder loopback control vd_wire vd_loopback PROPERTIES TIMEOUT 60)
+set_tests_properties(encoder loopback control vd_wire vd_loopback vd_key PROPERTIES TIMEOUT 60)
 # the test headset as a tool, for a running steamac-vrhost (docs/vr.md "Testing without a headset")
 add_executable(vrhost-test-headset tests/test_headset_tool.mm tests/fake_headset.cpp tests/vt_decode.mm)
 set_source_files_properties(tests/test_headset_tool.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)

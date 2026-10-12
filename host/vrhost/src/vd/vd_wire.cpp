@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "vd/vd_wire.h"
 
+#include <algorithm>
+
 namespace vrhost::vd
 {
 void BeWriter::u16(uint16_t v)
@@ -101,14 +103,6 @@ std::optional<uint32_t> get_varint(std::span<const uint8_t> b, size_t & used)
 	return std::nullopt;
 }
 
-std::vector<uint8_t> encode_peer_info(const PeerInfo & p)
-{
-	BeWriter w;
-	w.address(p.address, p.port);
-	w.u8(p.encrypt);
-	return w.out;
-}
-
 std::vector<uint8_t> control_message(Msg type, std::span<const uint8_t> payload)
 {
 	BeWriter w;
@@ -118,11 +112,165 @@ std::vector<uint8_t> control_message(Msg type, std::span<const uint8_t> payload)
 	return w.out;
 }
 
-std::vector<uint8_t> setting_changed_payload(const std::string & name, const std::string & json_value)
+std::vector<uint8_t> control_message(Msg type, const std::string & payload)
 {
-	BeWriter w;
-	w.str(name);
-	w.str(json_value);
-	return w.out;
+	return control_message(type, {reinterpret_cast<const uint8_t *>(payload.data()), payload.size()});
+}
+
+std::string setting_changed_payload(const std::string & name, const std::string & json_value)
+{
+	std::string q = "\"";
+	for (char c: name)
+	{
+		if (c == '"' or c == '\\')
+			q += '\\';
+		q += c;
+	}
+	return "{" + q + "\":" + json_value + "}";
+}
+
+std::vector<uint8_t> video_format_message(const VideoFormat & f)
+{
+	std::vector<uint8_t> out{tag_video_format_old};
+	auto b = bytes_of(f).first(video_format_old_size);
+	out.insert(out.end(), b.begin(), b.end());
+	return out;
+}
+
+std::vector<uint8_t> frame_message(const FrameMetadata & md, std::span<const uint8_t> data)
+{
+	std::vector<uint8_t> out{tag_frame};
+	auto b = bytes_of(md);
+	out.insert(out.end(), b.begin(), b.end());
+	out.insert(out.end(), data.begin(), data.end());
+	return out;
+}
+
+std::vector<uint8_t> slice_message(const SliceHeader & sh, std::span<const uint8_t> data)
+{
+	std::vector<uint8_t> out{tag_slice};
+	auto b = bytes_of(sh);
+	out.insert(out.end(), b.begin(), b.end());
+	out.insert(out.end(), data.begin(), data.end());
+	return out;
+}
+
+namespace
+{
+template <typename T>
+T get(std::span<const uint8_t> b, size_t off)
+{
+	T v;
+	memcpy(&v, b.data() + off, sizeof v);
+	return v;
+}
+template <typename T>
+void put(std::vector<uint8_t> & b, size_t off, const T & v)
+{
+	memcpy(b.data() + off, &v, sizeof v);
+}
+Quat get_quat(std::span<const uint8_t> b, size_t off)
+{
+	return {get<float>(b, off), get<float>(b, off + 4), get<float>(b, off + 8), get<float>(b, off + 12)};
+}
+Vec3 get_vec(std::span<const uint8_t> b, size_t off)
+{
+	return {get<float>(b, off), get<float>(b, off + 4), get<float>(b, off + 8)};
+}
+void put_quat(std::vector<uint8_t> & b, size_t off, const Quat & q)
+{
+	float v[4] = {q.x, q.y, q.z, q.w};
+	memcpy(b.data() + off, v, sizeof v);
+}
+void put_vec(std::vector<uint8_t> & b, size_t off, const Vec3 & p)
+{
+	float v[3] = {p.x, p.y, p.z};
+	memcpy(b.data() + off, v, sizeof v);
+}
+} // namespace
+
+std::optional<TrackingSample> decode_tracking(std::span<const uint8_t> b)
+{
+	if (b.size() < frame_data_base)
+		return std::nullopt;
+	TrackingSample s;
+	s.size = b.size();
+	s.frame_index = get<int32_t>(b, fd_off::frame_index);
+	s.latency_s = get<float>(b, fd_off::latency);
+	s.floor_height = get<float>(b, fd_off::floor_height);
+	size_t c = fd_off::controller;
+	s.input.buttons = get<uint16_t>(b, c);
+	s.input.touches = get<uint16_t>(b, c + 2);
+	s.input.trigger[0] = b[c + 4];
+	s.input.trigger[1] = b[c + 5];
+	s.input.grip[0] = b[c + 6];
+	s.input.grip[1] = b[c + 7];
+	s.input.thumb_x[0] = get<int16_t>(b, c + 8);
+	s.input.thumb_y[0] = get<int16_t>(b, c + 10);
+	s.input.thumb_x[1] = get<int16_t>(b, c + 12);
+	s.input.thumb_y[1] = get<int16_t>(b, c + 14);
+	s.lock_states = b[fd_off::lock_states];
+	size_t h = fd_off::head;
+	s.head.orientation = get_quat(b, h);
+	s.head.position = get_vec(b, h + 16);
+	s.head.velocity = get_vec(b, h + 28);
+	s.head.angular_velocity = get_vec(b, h + 40);
+	s.head.tracked = b[h + 52] != 0;
+	s.head.mounted = b[h + 53] != 0;
+	s.head.battery = int8_t(b[h + 54]);
+	for (int i = 0; i < 2; ++i)
+	{
+		size_t o = i ? fd_off::right_controller : fd_off::left_controller;
+		auto & p = s.controller[i];
+		p.orientation = get_quat(b, o);
+		p.position = get_vec(b, o + 16);
+		p.velocity = get_vec(b, o + 28);
+		p.acceleration = get_vec(b, o + 40);
+		p.angular_velocity = get_vec(b, o + 52);
+		p.tracked = b[o + 64];
+		p.battery = int8_t(b[o + 65]);
+	}
+	return s;
+}
+
+std::vector<uint8_t> encode_tracking(const TrackingSample & s, size_t size)
+{
+	std::vector<uint8_t> b(std::max(size, frame_data_base));
+	put(b, fd_off::frame_index, s.frame_index);
+	put(b, fd_off::latency, s.latency_s);
+	put(b, fd_off::floor_height, s.floor_height);
+	size_t c = fd_off::controller;
+	put(b, c, s.input.buttons);
+	put(b, c + 2, s.input.touches);
+	b[c + 4] = s.input.trigger[0];
+	b[c + 5] = s.input.trigger[1];
+	b[c + 6] = s.input.grip[0];
+	b[c + 7] = s.input.grip[1];
+	put(b, c + 8, s.input.thumb_x[0]);
+	put(b, c + 10, s.input.thumb_y[0]);
+	put(b, c + 12, s.input.thumb_x[1]);
+	put(b, c + 14, s.input.thumb_y[1]);
+	b[fd_off::lock_states] = s.lock_states;
+	size_t h = fd_off::head;
+	put_quat(b, h, s.head.orientation);
+	put_vec(b, h + 16, s.head.position);
+	put_vec(b, h + 28, s.head.velocity);
+	put_vec(b, h + 40, s.head.angular_velocity);
+	b[h + 52] = s.head.tracked;
+	b[h + 53] = s.head.mounted;
+	b[h + 54] = uint8_t(s.head.battery);
+	for (int i = 0; i < 2; ++i)
+	{
+		size_t o = i ? fd_off::right_controller : fd_off::left_controller;
+		auto & p = s.controller[i];
+		put_quat(b, o, p.orientation);
+		put_vec(b, o + 16, p.position);
+		put_vec(b, o + 28, p.velocity);
+		put_vec(b, o + 40, p.acceleration);
+		put_vec(b, o + 52, p.angular_velocity);
+		b[o + 64] = p.tracked;
+		b[o + 65] = uint8_t(p.battery);
+	}
+	return b;
 }
 } // namespace vrhost::vd

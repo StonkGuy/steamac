@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Virtual Desktop adapter on loopback against the test headset (fake_vd_client, written from the notes): discovery
-// with account approval (pairing window, refused stranger), session key + computer record, the four channels with the
-// AES wrapper, settings sync both ways (mobile in -> HeadsetInfo, refresh and render-divisor changes; streamer out),
-// VR video format, VideoToolbox HEVC frames per eye with FrameMetadata (pose, FOV, timing, IDR), ForceKeyFrame,
-// tracking + input up, haptics folded into the frame metadata, speaker audio down, microphone up, and the control
-// socket status through VdControl. Discovery key: random per run (never a real key).
+// Virtual Desktop adapter on loopback against the test headset (fake_vd_client, written from the evidence ledger):
+// discovery with account approval (pairing window, refused stranger, wrong key), the reply with the computer record
+// and channel key, connect-now, the four channels in the Streamer's order with the AES wrapper, the bandwidth probe,
+// settings sync both ways (user + mobile in -> HeadsetInfo: preset size, rate, IPD, FOV, codec, bitrate, SSW render
+// divisor; streamer out incl. ActiveCodec), the VR video format, VideoToolbox frames per eye with FrameMetadata (pose,
+// FOV, timing, IDR, tracking frame index), ForceKeyFrame, UpdateRequired / WakeUp / Recenter, host commands, tracking
+// + input up, haptics folded into the frame metadata, speaker audio down in 1152-byte packets, microphone up,
+// re-registration on reconnect, and the control socket status. Discovery key: random per run (never a real key).
 #include "check.h"
 #include "control/control_server.h"
 #include "fake_vd_client.h"
@@ -15,6 +17,7 @@
 #include <cmath>
 #include <csignal>
 #include <filesystem>
+#include <algorithm>
 #include <mutex>
 
 using namespace vrhost;
@@ -107,14 +110,20 @@ int main()
 	CHECK(session.pairing()); // nothing allowed yet: the first account may pair
 
 	// --- discovery: the pairing window admits one account, a stranger is refused, the owner comes back ---------
-	FakeVdOptions o{.discovery_port = ports.discovery, .discovery_key = disc, .account = "owner"};
+	FakeVdOptions o{.discovery_port = ports.discovery,
+	                .control_port = ports.control,
+	                .data_port = ports.data,
+	                .video_port = ports.video,
+	                .audio_port = ports.audio,
+	                .discovery_key = disc,
+	                .account = "owner"};
 	auto first = fake_vd_discover(o);
 	REQUIRE(first);
 	CHECK(not session.pairing());
-	CHECK(first->record.os == "Windows" and first->record.version == "1.34.22" and first->record.encrypt_local);
-	CHECK(first->record.control_port == ports.control and first->record.data_port == ports.data and
-	      first->record.video_port == ports.video and first->record.audio_port == ports.audio);
-	CHECK(first->record.addresses == std::vector<std::string>{"127.0.0.1"});
+	CHECK(first->os == "Windows" and first->version[0] == 1 and first->version[1] == 34 and first->version[2] == 22 and
+	      first->encrypt_local and first->encrypt_remote and not first->allow_remote and first->id.size() == 36);
+	CHECK(first->adapters.size() == 1 and first->adapters[0].ip == "127.0.0.1");
+	CHECK((first->channel_key.key != std::array<uint8_t, 32>{}));
 	FakeVdOptions stranger = o;
 	stranger.account = "stranger";
 	CHECK(not fake_vd_discover(stranger, 500));
@@ -122,6 +131,13 @@ int main()
 	FakeVdOptions wrong_key = o;
 	wrong_key.discovery_key = AesKey::random();
 	CHECK(not fake_vd_discover(wrong_key, 300));
+	fake_vd_connect_now(o, *first);
+	ComputerRecord stale = *first;
+	stale.connection_id[0] ^= 1;
+	fake_vd_connect_now(o, stale);
+	for (int i = 0; i < 50 and session.stats().connect_now == 0; ++i)
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	CHECK(session.stats().connect_now == 1); // only the current connection id counts
 
 	// --- control socket while waiting ------------------------------------------------------------------------
 	VdControl control(session);
@@ -185,42 +201,58 @@ int main()
 	});
 
 	// --- the session ----------------------------------------------------------------------------------------
-	FrameData fd;
-	fd.head.orientation_tracked = fd.head.position_tracked = 1;
-	fd.head.position = {0, 1.6f, 0};
-	fd.controller[1].orientation_tracked = fd.controller[1].position_tracked = 1;
-	fd.controller[1].position = {0.2f, 1.2f, -0.3f};
-	fd.input.hand[1].trigger = 204;
-	fd.input.hand[1].buttons = button_a;
-	fd.input.hand[0].thumb_y = -32767;
-	o.frame_data = fd;
+	TrackingSample ts;
+	ts.head.tracked = true;
+	ts.head.position = {0, 1.6f, 0};
+	ts.controller[1].tracked = controller_tracked;
+	ts.controller[1].position = {0.2f, 1.2f, -0.3f};
+	ts.input.trigger[1] = 204;
+	ts.input.buttons = button_a;
+	ts.input.thumb_y[0] = -32767;
+	o.tracking = ts;
+	o.tracking_size = frame_data_eye; // with the hand/body/eye blocks: the base still decodes
 	o.frames = 16;
-	o.force_key_frame_after = 6;
+	o.force_key_frame_after = 11; // well after the format change (the client runs a few frames behind)
+	o.extra_requests = true;
 	for (size_t i = 0; i < 480; ++i)
 		o.microphone.push_back(tone(i));
-	o.mobile_changes = {{"UseSpacewarp", "true"}, {"Framerate", "72"}};
-	auto r = run_fake_vd_client(o);
+	o.mobile_changes = {{"UseSpacewarp", "true"}};
+	o.user_changes = {{"VRFramerate", "72"}};
+	bool command_ok = false, bad_command = true;
+	auto r = run_fake_vd_client(o, [&] {
+		command_ok = session.send_command(Msg::toggle_performance_overlay);
+		bad_command = session.send_command(Msg::exit);
+	});
 	if (not r.error.empty())
 		fprintf(stderr, "fake client: %s\n", r.error.c_str());
 	CHECK(r.error.empty());
-	CHECK(r.peer_encrypt);
-	CHECK(r.streamer_settings.find("\"AllowMotionExtrapolation\":true") != std::string::npos and
-	      r.streamer_settings.find("\"VRAvailable\":true") != std::string::npos);
-	CHECK((r.streamer_changes == std::vector<std::pair<std::string, std::string>>{{"AllowMotionExtrapolation", "false"}}));
+	CHECK(session.stats().connect_now == 2);
+	CHECK(r.streamer_settings.find("\"HasVR\":true") != std::string::npos and
+	      r.streamer_settings.find("\"StreamingSource\":1") != std::string::npos and
+	      r.streamer_settings.find("\"ActiveCodec\":2") != std::string::npos and
+	      r.streamer_settings.find("\"AllowMotionExtrapolation\":true") != std::string::npos);
+	CHECK(std::ranges::find(r.streamer_changes, std::pair<std::string, std::string>{"AllowMotionExtrapolation", "false"}) != r.streamer_changes.end());
+	CHECK(r.bandwidth_probe == 0);
+	auto has = [&](Msg m) { return std::ranges::find(r.control_types, uint8_t(m)) != r.control_types.end(); };
+	CHECK(has(Msg::reload_streamer_settings) and has(Msg::update_unavailable) and has(Msg::computer_awaken) and
+	      has(Msg::toggle_performance_overlay));
+	CHECK(command_ok and not bad_command and session.stats().recenters == 1);
 
-	// video format: VR, HEVC, Quest 3 Low floor, two per-eye streams; re-sent when the headset changed its rate
+	// video format: VR, HEVC, Quest 3 "Low" stream size (user VRGraphicsQuality 0), two per-eye streams, the display
+	// rate; re-sent when the headset changed its rate
 	REQUIRE(not r.formats.empty());
 	auto & f0 = r.formats.front();
-	CHECK(f0.source == Source::vr and f0.codec == VideoCodec::hevc and f0.width == 1700 and f0.height == 1700 and
-	      f0.stream_count == 2 and f0.frame_rate == 90 and f0.stream[1].bounds.x == 1700);
+	CHECK(f0.source == Source::vr and f0.codec == VideoCodec::hevc and f0.frame_size.width == 1152 and
+	      f0.frame_size.height == 1216 and f0.stream_count == 2 and f0.frame_rate == 90 and f0.bounds.width == 1152 and
+	      f0.bounds.height == 1216);
 	CHECK(r.formats.size() == 2 and r.formats.back().frame_rate == 72);
 
-	// frames: both eyes decode, length-prefixed NALs, IDR first and again after ForceKeyFrame / the format change
+	// frames: both eyes decode, Annex-B (the default), IDR first and again after ForceKeyFrame / the format change
 	printf("frames %zu slices %zu decoded %d/%d idr %d/%d\n", r.frames.size(), r.slices.size(), r.decoded[0], r.decoded[1],
 	       r.idr[0], r.idr[1]);
 	CHECK(r.frames.size() >= 16 and r.slices.size() == r.frames.size());
 	CHECK(r.decoded[0] >= 14 and r.decoded[1] >= 14);
-	CHECK(r.length_prefix_errors == 0); // TODO(vd-live:annexb-default): length-prefixed unless UseAnnexB
+	CHECK(r.framing_errors == 0);
 	CHECK(r.idr[0] >= 3 and r.idr[0] == r.idr[1]);
 	CHECK(session.stats().idr_requests == 1);
 	REQUIRE(not r.frames.empty());
@@ -229,33 +261,38 @@ int main()
 	for (size_t i = 0; i < r.frames.size(); ++i)
 	{
 		auto & md = r.frames[i];
-		fields_ok = fields_ok and md.frame_index == int64_t(r.frames[0].frame_index + i) and md.source == Source::vr and
-		            md.render_width == 1700 and md.pose.has_valid_pose and md.pose.fov[0].left > 0 and md.pose.fov[0].up > 0;
+		fields_ok = fields_ok and md.source == Source::vr and md.render_width == 1152 and md.render_height == 1216 and
+		            md.pose.has_valid_pose and std::abs(md.pose.fov[0].left - 1.3f) < 1e-3f and
+		            std::abs(md.pose.fov[1].right - 1.3f) < 1e-3f and std::abs(md.pose.fov[0].down - 1.2f) < 1e-3f;
 		fields_ok = fields_ok and r.slices[i].timestamp_us == md.timestamp_us and r.slices[i].stream_index == 1;
 		if (i)
-			fields_ok = fields_ok and md.timestamp_us > r.frames[i - 1].timestamp_us;
+			fields_ok = fields_ok and md.timestamp_us > r.frames[i - 1].timestamp_us and md.frame_index >= r.frames[i - 1].frame_index;
 		if (md.haptic[1].amplitude > 0.69f and md.haptic[1].amplitude < 0.71f and md.haptic[0].amplitude == 0)
 			haptic_seen = true;
 	}
 	CHECK(fields_ok);
 	CHECK(haptic_seen);
+	// the frames echo the tracking sample they were rendered with (the client numbers them 1001, 1002, ...)
+	CHECK(r.frames.back().frame_index > 1001 and r.frames.back().frame_index <= 1000 + int(r.slices.size()));
 	// frame time: 90 Hz at first, then 72 Hz with the render divisor 2 (SSW on): 27.8 ms per rendered frame
 	CHECK(std::abs(r.frames.front().frame_time_ms - 11.11f) < 0.1f);
 	CHECK(std::abs(r.frames.back().frame_time_ms - 27.78f) < 0.1f);
 	CHECK(r.frames.back().encode_time_ms > 0 and r.frames.back().encode_time_ms < 100);
 
-	// head/controller pose and inputs reached the listener, in the guest's input table
+	// head/controller pose and inputs reached the listener, in the guest's input table; IPD + FOV from the headset
 	std::array<Pose, 2> eyes;
 	std::array<Fov, 2> fov;
 	session.views_at(now_ns(), eyes, fov);
-	CHECK(std::abs(eyes[1].position[0] - eyes[0].position[0] - 0.064f) < 1e-4f and fov[0].left < 0 and fov[0].up > 0);
 	{
 		std::lock_guard l(listener.m);
 		CHECK(listener.head and std::abs(listener.head->pose.position[1] - 1.6f) < 1e-4f and listener.head->position_valid);
-		CHECK(listener.right and std::abs(listener.right->pose.position[2] + 0.3f) < 1e-4f);
-		CHECK(listener.connected == 1 and listener.info.name == "Quest3" and listener.info.eye_width == 1700);
-		CHECK(listener.info.foveation == FoveationModel::none and listener.info.render_eye_width == 1700);
-		CHECK(listener.info.max_bitrate_bps == 200'000'000 and listener.info.bitrate_bps == 150'000'000);
+		CHECK(listener.right and std::abs(listener.right->pose.position[2] + 0.3f) < 1e-4f and listener.right->orientation_valid);
+		CHECK(listener.connected == 1 and listener.info.name == "Meta Quest 3" and listener.info.eye_width == 1152 and
+		      listener.info.eye_height == 1216);
+		CHECK(listener.info.foveation == FoveationModel::none and listener.info.render_eye_width == 1152);
+		CHECK(std::abs(listener.info.fov[0].left + std::atan(1.3f)) < 1e-4f and listener.info.fov[0].up > 0);
+		// 300 -> cap 200 -> measured bandwidth 150 -> halved while the headset had SSW off
+		CHECK(listener.info.max_bitrate_bps == 200'000'000 and listener.info.bitrate_bps == 75'000'000);
 		CHECK(listener.info.speaker and listener.info.speaker->channels == 2 and listener.info.microphone->rate == 48000);
 		CHECK(listener.tracking >= 5 * 10);
 		bool trigger = false, a = false, stick = false;
@@ -276,16 +313,28 @@ int main()
 	}
 	CHECK(session.render_divisor() == 2);
 
-	// a second session of the same account (reconnect), asking for Annex-B and H.264, without the audio channel
+	// a second session of the same account (reconnect: a new registration), length-prefixed NALs (UseAnnexB off),
+	// a headset without HEVC (H.264), 80 Hz, without the audio channel
 	{
-		FakeVdOptions o2{.discovery_port = ports.discovery, .discovery_key = disc, .account = "owner"};
-		o2.mobile_settings = R"({"HmdType":"Quest3","Framerate":80,"UseAnnexB":true,"VideoCodec":"H264"})";
+		FakeVdOptions o2 = o;
+		o2.tracking.reset();
+		o2.microphone.clear();
+		o2.mobile_changes.clear();
+		o2.user_changes.clear();
+		o2.extra_requests = false;
+		o2.force_key_frame_after = -1;
+		o2.user_settings = R"({"VRFramerate":80})";
+		o2.mobile_settings = R"({"HmdType":1000,"UseAnnexB":false,"Features":0})";
 		o2.frames = 3;
-		o2.annexb = true;
+		o2.annexb = false;
 		o2.audio = false;
 		auto r2 = run_fake_vd_client(o2);
-		CHECK(r2.error.empty() and r2.length_prefix_errors == 0 and r2.decoded[0] >= 2 and r2.decoded[1] >= 2);
-		CHECK(not r2.formats.empty() and r2.formats[0].codec == VideoCodec::h264 and r2.formats[0].frame_rate == 80);
+		CHECK(r2.error.empty() and r2.framing_errors == 0 and r2.decoded[0] >= 2 and r2.decoded[1] >= 2);
+		CHECK(not r2.formats.empty() and r2.formats[0].codec == VideoCodec::h264 and r2.formats[0].frame_rate == 80 and
+		      r2.formats[0].frame_size.width == 1408); // no quality in the user object: Medium
+		CHECK(std::ranges::find(r2.streamer_changes, std::pair<std::string, std::string>{"ActiveCodec", "1"}) != r2.streamer_changes.end());
+		CHECK(r2.record and r.record and r2.record->connection_id != r.record->connection_id and
+		      r2.record->channel_key.key != r.record->channel_key.key);
 		for (int i = 0; i < 100 and session.connected(); ++i)
 			std::this_thread::sleep_for(std::chrono::milliseconds(20));
 		std::lock_guard l(listener.m);
@@ -293,7 +342,7 @@ int main()
 	}
 
 	// speaker audio: a contiguous run of the tone (packets before the audio channel was up are dropped)
-	CHECK(r.speaker_packets > 0 and r.speaker.size() >= 960);
+	CHECK(r.speaker_packets > 0 and r.speaker.size() >= 960 and r.speaker_max_packet == int(speaker_packet_bytes));
 	bool speaker_ok = false;
 	for (size_t k = 0; k < 48000 and not speaker_ok and r.speaker.size() >= 960; ++k)
 	{

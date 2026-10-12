@@ -4,6 +4,7 @@
 #include "session/clock.h"
 #include "vd/vd_channel.h"
 #include "vd/vd_crypto.h"
+#include "vd/vd_settings.h"
 #include "vt_decode.h"
 #include "wivrn/annexb.h"
 
@@ -25,104 +26,91 @@ using namespace vrhost::vd;
 
 namespace
 {
-struct Discovery
+void send_datagram(const FakeVdOptions & o, std::span<const uint8_t> d, int fd)
 {
-	RsaKeyPair rsa{2048};
-	std::optional<Reply> reply;
-};
-
-void discover(const FakeVdOptions & o, int timeout_ms, Discovery & d)
-{
-	int fd = socket(AF_INET, SOCK_DGRAM, 0);
 	sockaddr_in to{};
 	to.sin_family = AF_INET;
 	to.sin_port = htons(o.discovery_port);
 	inet_pton(AF_INET, o.host.c_str(), &to.sin_addr);
-	auto offer = encode_offer({.rsa_public_xml = d.rsa.public_xml(), .platform = o.platform, .account = o.account});
-	auto wrapped = aes_wrap(o.discovery_key, offer);
-	sendto(fd, wrapped.data(), wrapped.size(), 0, (sockaddr *)&to, sizeof to);
+	sendto(fd, d.data(), d.size(), 0, (sockaddr *)&to, sizeof to);
+}
+
+std::optional<ComputerRecord> discover(const FakeVdOptions & o, int timeout_ms)
+{
+	RsaKeyPair rsa(1024);
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	auto offer = wrap_offer(o.discovery_key, {.rsa_public_xml = rsa.public_xml(), .platform = o.platform, .account = o.account});
+	send_datagram(o, offer, fd);
+	std::optional<ComputerRecord> r;
 	pollfd p{fd, POLLIN, 0};
 	if (poll(&p, 1, timeout_ms) == 1)
 	{
 		std::vector<uint8_t> buf(65536);
 		ssize_t n = recv(fd, buf.data(), buf.size(), 0);
 		if (n > 0)
-			d.reply = parse_reply(o.discovery_key, std::span(buf.data(), size_t(n)), d.rsa.size(),
-			                      [&](std::span<const uint8_t> b) { return d.rsa.decrypt(b); });
+			r = parse_reply(std::span(buf.data(), size_t(n)), [&](std::span<const uint8_t> b) { return rsa.decrypt(b); });
 	}
 	close(fd);
+	return r;
 }
 
-std::vector<uint8_t> str_bytes(const std::string & s)
+std::vector<uint8_t> tracking_packet(const TrackingSample & s, size_t size)
 {
-	return {s.begin(), s.end()};
-}
-
-std::vector<uint8_t> frame_data_packet(const FrameData & fd)
-{
-	auto raw = bytes_of(fd);
+	auto raw = encode_tracking(s, size);
 	std::vector<uint8_t> comp(LZ4_compressBound(int(raw.size())));
 	int n = LZ4_compress_default((const char *)raw.data(), (char *)comp.data(), int(raw.size()), int(comp.size()));
 	comp.resize(size_t(n));
-	int32_t sizes[2] = {n, int32_t(raw.size())};
 	uint64_t hash = XXH3_64bits(raw.data(), raw.size());
-	std::vector<uint8_t> out(16);
-	memcpy(out.data(), sizes, 8);
-	memcpy(out.data() + 8, &hash, 8);
+	std::vector<uint8_t> out(frame_data_prefix);
+	memcpy(out.data(), &n, 4);
+	memcpy(out.data() + 4, &hash, 8);
 	out.insert(out.end(), comp.begin(), comp.end());
 	return out;
 }
 } // namespace
 
-std::optional<Reply> fake_vd_discover(const FakeVdOptions & o, int timeout_ms)
+std::optional<ComputerRecord> fake_vd_discover(const FakeVdOptions & o, int timeout_ms)
 {
-	Discovery d;
-	discover(o, timeout_ms, d);
-	return d.reply;
+	return discover(o, timeout_ms);
 }
 
-FakeVdResult run_fake_vd_client(const FakeVdOptions & o)
+void fake_vd_connect_now(const FakeVdOptions & o, const ComputerRecord & r)
+{
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	send_datagram(o, encode_connect_now({.connection_id = r.connection_id, .platform = o.platform}), fd);
+	close(fd);
+}
+
+FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<void()> & after_first_frame)
 {
 	FakeVdResult r;
-	Discovery disc;
-	discover(o, 3000, disc);
-	if (not disc.reply)
+	r.record = discover(o, 3000);
+	if (not r.record)
 	{
 		r.error = "no discovery reply";
 		return r;
 	}
-	const Reply & reply = *disc.reply;
-	r.record = reply.record;
-	if (reply.record.addresses.empty())
+	const ComputerRecord & rec = *r.record;
+	if (rec.adapters.empty())
 	{
 		r.error = "record without address";
 		return r;
 	}
-	std::string addr = reply.record.addresses.front();
+	fake_vd_connect_now(o, rec);
+	std::string addr = rec.adapters.front().ip;
 	auto open = [&](uint16_t port) -> std::unique_ptr<Channel> {
 		int fd = connect_tcp(addr, port);
 		return fd < 0 ? nullptr : std::make_unique<Channel>(fd);
 	};
 
-	// control: PeerInfo both ways, then (maybe) encryption, then our settings
-	auto ctl = open(reply.record.control_port);
+	// control: always encrypted on the LAN
+	auto ctl = open(o.control_port);
 	if (not ctl)
 	{
 		r.error = "control connect failed";
 		return r;
 	}
-	ctl->send(encode_peer_info({.address = {127, 0, 0, 1}, .port = 0, .encrypt = true}));
-	uint8_t family = 0;
-	std::vector<uint8_t> rest;
-	if (not ctl->read_exact(&family, 1, 5000) or (family != 4 and family != 16) or
-	    (rest.resize(family + 5), not ctl->read_exact(rest.data(), rest.size(), 5000)))
-	{
-		r.error = "no host PeerInfo";
-		return r;
-	}
-	r.peer_encrypt = rest.back() != 0;
-	if (r.peer_encrypt)
-		ctl->encrypt(reply.session);
+	ctl->encrypt(rec.channel_key);
 	std::mutex rm;
 	std::thread control_reader([&] {
 		uint8_t hdr[5];
@@ -133,31 +121,45 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o)
 			if (n and not ctl->read_exact(payload.data(), n))
 				break;
 			std::lock_guard lock(rm);
+			r.control_types.push_back(hdr[0]);
+			std::string text(payload.begin(), payload.end());
 			if (Msg(hdr[0]) == Msg::reload_streamer_settings)
-				r.streamer_settings.assign(payload.begin(), payload.end());
+				r.streamer_settings = text;
 			else if (Msg(hdr[0]) == Msg::streamer_setting_changed)
 			{
-				BeReader br(payload);
-				auto name = br.str();
-				r.streamer_changes.push_back({name, br.str()});
+				Settings s;
+				if (s.parse(text))
+					for (auto & k: {key_active_codec, key_allow_extrapolation})
+						if (auto v = s.raw(k))
+							r.streamer_changes.push_back({k, *v});
 			}
 		}
 	});
-	ctl->send(control_message(Msg::reload_user_settings, str_bytes("{}")));
-	ctl->send(control_message(Msg::reload_mobile_settings, str_bytes(o.mobile_settings)));
+	ctl->send(control_message(Msg::reload_user_settings, o.user_settings));
+	ctl->send(control_message(Msg::reload_mobile_settings, o.mobile_settings));
 
-	auto data = open(reply.record.data_port);
-	auto video = open(reply.record.video_port);
-	auto audio = o.audio ? open(reply.record.audio_port) : nullptr;
+	// the Streamer's order: video, audio, data
+	auto video = open(o.video_port);
+	auto audio = o.audio ? open(o.audio_port) : nullptr;
+	auto data = open(o.data_port);
 	std::thread audio_reader;
 	if (not data or not video or (o.audio and not audio))
 		r.error = "channel connect failed";
 	else
 	{
-		if (reply.record.encrypt_local)
+		if (rec.encrypt_local)
 			for (Channel * c: {data.get(), video.get(), audio.get()})
 				if (c)
-					c->encrypt(reply.session);
+					c->encrypt(rec.channel_key);
+		uint8_t probe[4];
+		if (data->read_exact(probe, 4, 5000))
+		{
+			int32_t n = int32_t(uint32_t(probe[0]) << 24 | uint32_t(probe[1]) << 16 | uint32_t(probe[2]) << 8 | probe[3]);
+			r.bandwidth_probe = n;
+			std::vector<uint8_t> junk(size_t(std::max(n, 0)));
+			if (n > 0)
+				data->read_exact(junk.data(), junk.size(), 5000);
+		}
 		if (audio)
 			audio_reader = std::thread([&] {
 				int32_t n;
@@ -169,6 +171,7 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o)
 					std::lock_guard lock(rm);
 					r.speaker.insert(r.speaker.end(), pcm.begin(), pcm.end());
 					r.speaker_packets++;
+					r.speaker_max_packet = std::max(r.speaker_max_packet, n);
 				}
 			});
 
@@ -181,9 +184,9 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o)
 			bool start_code = bits.size() > 4 and bits[0] == 0 and bits[1] == 0 and bits[2] == 0 and bits[3] == 1;
 			if (o.annexb and start_code)
 				annexb.assign(bits.begin(), bits.end());
-			else if (o.annexb or bits.empty() or not annexb::append_length_prefixed(annexb, bits, 4))
+			else if (o.annexb or bits.empty() or start_code or not annexb::append_length_prefixed(annexb, bits, 4))
 			{
-				r.length_prefix_errors++;
+				r.framing_errors++;
 				return;
 			}
 			if (not o.decode or r.formats.empty())
@@ -207,10 +210,10 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o)
 				r.error = "video channel: nothing within 5 s";
 				break;
 			}
-			if (tag == tag_video_format)
+			if (tag == tag_video_format_old)
 			{
 				VideoFormat f;
-				if (not video->read_exact(&f, sizeof f, 5000))
+				if (not video->read_exact(&f, video_format_old_size, 5000))
 					break;
 				r.formats.push_back(f);
 				if (not mic_sent and not o.microphone.empty() and audio)
@@ -246,17 +249,29 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o)
 				if (sh.stream_index == 1)
 					decode(1, bits);
 				++complete;
-				if (o.frame_data)
+				if (o.tracking)
 				{
-					FrameData fd = *o.frame_data;
-					fd.frame_index = complete;
-					data->send(frame_data_packet(fd));
+					TrackingSample s = *o.tracking;
+					s.frame_index = 1000 + complete;
+					data->send(tracking_packet(s, o.tracking_size));
 				}
 				if (complete == o.force_key_frame_after)
-					ctl->send(control_message(Msg::force_key_frame, {}));
+					ctl->send(control_message(Msg::force_key_frame, std::string()));
 				if (complete == 1)
+				{
+					for (auto & [k, v]: o.user_changes)
+						ctl->send(control_message(Msg::user_setting_changed, setting_changed_payload(k, v)));
 					for (auto & [k, v]: o.mobile_changes)
 						ctl->send(control_message(Msg::mobile_setting_changed, setting_changed_payload(k, v)));
+					if (o.extra_requests)
+					{
+						ctl->send(control_message(Msg::update_required, std::string()));
+						ctl->send(control_message(Msg::wake_up_computer, std::string()));
+						ctl->send(control_message(Msg::recenter, std::string()));
+					}
+					if (after_first_frame)
+						after_first_frame();
+				}
 			}
 			else
 			{
@@ -266,7 +281,8 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o)
 		}
 		if (r.error.empty() and complete < o.frames)
 			r.error = "timeout after " + std::to_string(complete) + " frames";
-		ctl->send(control_message(Msg::disconnect, {}));
+		std::this_thread::sleep_for(std::chrono::milliseconds(50)); // let late control replies arrive
+		ctl->send(control_message(Msg::disconnect, std::string()));
 	}
 	for (Channel * c: {ctl.get(), data.get(), video.get(), audio.get()})
 		if (c)

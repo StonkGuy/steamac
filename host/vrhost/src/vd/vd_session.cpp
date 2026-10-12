@@ -22,9 +22,12 @@ static_assert(XXH_VERSION_NUMBER >= 800, "XXH3 needs xxHash >= 0.8 (lz4's bundle
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cmath>
+#include <fstream>
 #include <ifaddrs.h>
+#include <map>
 #include <mutex>
 #include <net/if.h>
+#include <net/if_dl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -47,12 +50,42 @@ enum Ch
 };
 const char * channel_name[] = {"control", "data", "video", "audio"};
 
-// TODO(vd-live:fov): Quest 3-like half-angles (radians) until the headset reports its own.
+// Until the headset reports its own (mobile FovLeft/FovRight): Quest 3-like half-angles, radians.
 constexpr std::array<Fov, 2> default_fov{Fov{-0.96f, 0.82f, 0.87f, -0.96f}, Fov{-0.82f, 0.96f, 0.87f, -0.96f}};
 
 FovPort to_fov_port(const Fov & f)
 {
 	return {std::tan(f.up), std::tan(-f.down), std::tan(-f.left), std::tan(f.right)};
+}
+
+std::optional<Fov> from_fov_json(const std::optional<std::string> & raw)
+{
+	Settings o;
+	if (not raw or not o.parse(*raw))
+		return std::nullopt;
+	auto up = o.number("UpTan"), down = o.number("DownTan"), left = o.number("LeftTan"), right = o.number("RightTan");
+	if (not up or not down or not left or not right or *up <= 0 or *down <= 0 or *left <= 0 or *right <= 0)
+		return std::nullopt;
+	return Fov{.left = -float(std::atan(*left)), .right = float(std::atan(*right)), .up = float(std::atan(*up)),
+	           .down = -float(std::atan(*down))};
+}
+
+std::string hmd_name(int32_t t)
+{
+	switch (HmdType(t))
+	{
+		case HmdType::quest: return "Oculus Quest";
+		case HmdType::quest2: return "Oculus Quest 2";
+		case HmdType::quest_pro: return "Meta Quest Pro";
+		case HmdType::quest3: return "Meta Quest 3";
+		case HmdType::quest3s: return "Meta Quest 3S";
+	}
+	return "Virtual Desktop headset (type " + std::to_string(t) + ")";
+}
+
+bool quest_family(int32_t t)
+{
+	return t >= int32_t(HmdType::quest) and t <= int32_t(HmdType::quest3s);
 }
 
 std::vector<uint8_t> length_prefixed(std::span<const uint8_t> annexb_stream)
@@ -78,21 +111,66 @@ std::string host_name()
 	return s.empty() ? "Mac" : s;
 }
 
-std::vector<std::string> private_addresses()
+// Private IPv4 adapters with their link-layer address (the record's PrivateAdapters).
+std::vector<NetAdapter> private_adapters(const std::vector<std::string> & only)
 {
-	std::vector<std::string> out;
+	std::vector<NetAdapter> out;
+	if (not only.empty())
+	{
+		for (auto & a: only)
+			out.push_back({.ip = a});
+		return out;
+	}
 	ifaddrs * list = nullptr;
 	if (getifaddrs(&list) != 0)
 		return out;
+	std::map<std::string, std::string> mac;
+	for (auto i = list; i; i = i->ifa_next)
+		if (i->ifa_addr and i->ifa_addr->sa_family == AF_LINK)
+		{
+			auto dl = (sockaddr_dl *)i->ifa_addr;
+			if (dl->sdl_alen != 6)
+				continue;
+			auto b = (const uint8_t *)LLADDR(dl);
+			char s[13];
+			snprintf(s, sizeof s, "%02X%02X%02X%02X%02X%02X", b[0], b[1], b[2], b[3], b[4], b[5]);
+			mac[i->ifa_name] = s;
+		}
 	for (auto i = list; i; i = i->ifa_next)
 		if (i->ifa_addr and i->ifa_addr->sa_family == AF_INET and (i->ifa_flags & IFF_UP) and not(i->ifa_flags & IFF_LOOPBACK))
 		{
 			char s[INET_ADDRSTRLEN];
 			inet_ntop(AF_INET, &((sockaddr_in *)i->ifa_addr)->sin_addr, s, sizeof s);
-			out.push_back(s);
+			out.push_back({.ip = s, .mac = mac[i->ifa_name]});
 		}
 	freeifaddrs(list);
 	return out;
+}
+
+// A stable computer id (the record's ID), kept next to the accounts file.
+std::string computer_id(const std::filesystem::path & dir)
+{
+	auto file = dir / "vd_computer_id";
+	std::string id;
+	if (std::ifstream in(file); in)
+		std::getline(in, id);
+	if (id.size() == 36)
+		return id;
+	std::array<uint8_t, 16> g;
+	random_bytes(g);
+	char s[40];
+	snprintf(s, sizeof s, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", g[0], g[1], g[2], g[3],
+	         g[4], g[5], (g[6] & 0x0f) | 0x40, g[7], (g[8] & 0x3f) | 0x80, g[9], g[10], g[11], g[12], g[13], g[14], g[15]);
+	std::error_code ec;
+	std::filesystem::create_directories(dir, ec);
+	if (std::ofstream o(file); o)
+		o << s << "\n";
+	return s;
+}
+
+std::vector<uint8_t> be32(int32_t v)
+{
+	return {uint8_t(uint32_t(v) >> 24), uint8_t(uint32_t(v) >> 16), uint8_t(uint32_t(v) >> 8), uint8_t(v)};
 }
 } // namespace
 
@@ -101,10 +179,14 @@ struct VdSession::impl
 	VdConfig cfg;
 	VdStats stats;
 	SessionListener * listener = nullptr;
-	AesKey session_key = AesKey::random();
-	std::array<uint8_t, 16> guid{};
 	AccountStore accounts;
+	std::string id;
 	std::atomic<bool> pairing{false};
+
+	// One "registration" (VD-FACT(record-schema)): channel key + connection id, renewed when a session ends.
+	std::mutex reg_mutex;
+	AesKey channel_key = AesKey::random();
+	std::array<uint8_t, 16> connection_id{};
 
 	int listen_fd[channel_count] = {-1, -1, -1, -1};
 	int udp_fd = -1;
@@ -118,15 +200,16 @@ struct VdSession::impl
 	std::array<std::shared_ptr<Channel>, channel_count> ch;
 	Settings user, mobile, streamer;
 	std::optional<HeadsetInfo> info;
-	bool annexb_out = false;
+	bool annexb_out = true;
 	std::atomic<bool> is_connected{false};
 	std::atomic<uint32_t> divisor{1};
-	std::atomic<float> refresh{90};
+	std::atomic<float> refresh{72};
+	float ipd = default_ipd_m;
+	std::array<Fov, 2> fov = default_fov;
 
 	std::mutex encode_mutex;
 	std::array<std::unique_ptr<VtEncoder>, 2> encoders;
 	std::atomic<bool> idr_pending{true};
-	int64_t wire_index = 0;
 	ns last_submit = 0;
 
 	std::mutex pace_mutex;
@@ -134,6 +217,12 @@ struct VdSession::impl
 	uint64_t frame_id = 0;
 
 	std::array<PoseHistory, size_t(Device::count)> history;
+	// VD-FACT(clock): FrameMetadata.frame_index echoes the tracking sample's index the frame was rendered with.
+	std::mutex index_mutex;
+	int32_t last_tracking_index = 0;
+	std::array<std::pair<ns, int32_t>, 16> view_index{}; // display time -> tracking index at views_at
+	size_t view_index_pos = 0;
+
 	std::mutex haptic_mutex;
 	std::array<float, 2> haptic_amp{};
 	std::array<ns, 2> haptic_until{};
@@ -144,15 +233,19 @@ struct VdSession::impl
 	        cfg(std::move(c)),
 	        accounts(cfg.accounts_file.empty() ? KnownKeys::default_dir() / "vd_accounts" : std::filesystem::path(cfg.accounts_file))
 	{
-		random_bytes(guid);
+		random_bytes(connection_id);
 		cfg.bitrate_bps = std::min(cfg.bitrate_bps, max_bitrate_bps);
 		if (not cfg.discovery_key)
-			cfg.encrypt_local = false; // the session key travels in the discovery reply
+			cfg.encrypt_local = false; // no record = no channel key for the headset
 		pairing = cfg.discovery_key and (cfg.pairing or accounts.list().empty());
 		divisor = cfg.spacewarp == VdConfig::Spacewarp::on ? 2 : 1;
+		// VD-FACT(settings-keys): the streamer object we own; members at their defaults may be omitted.
+		streamer.set(key_has_vr, true);
+		streamer.set_raw(key_streaming_source, std::to_string(int(Source::vr)));
+		streamer.set_raw(key_active_codec, std::to_string(int(VideoCodec::hevc)));
 		streamer.set(key_allow_extrapolation, true);
-		streamer.set(key_vr_available, true);
-		streamer.set("EncryptLocalTraffic", cfg.encrypt_local);
+		streamer.set(key_auto_bitrate, false);
+		streamer.set(key_can_launch_steamvr, false);
 	}
 
 	void log(const std::string & s)
@@ -168,19 +261,27 @@ struct VdSession::impl
 	}
 
 	// --- discovery ---------------------------------------------------------------------------------------------
-	ComputerRecord record() const
+	ComputerRecord record()
 	{
+		if (id.empty())
+			id = computer_id(accounts.file().parent_path()); // created on first use, next to the accounts
 		ComputerRecord r;
-		r.id = guid_text(guid);
+		r.id = id;
 		r.name = cfg.computer_name.empty() ? host_name() : cfg.computer_name;
-		r.addresses = cfg.addresses.empty() ? private_addresses() : cfg.addresses;
-		r.control_port = bound.control;
-		r.data_port = bound.data;
-		r.video_port = bound.video;
-		r.audio_port = bound.audio;
-		r.discovery_port = bound.discovery;
+		r.description = "steamac";
+		r.adapters = private_adapters(cfg.addresses);
 		r.encrypt_local = cfg.encrypt_local;
+		std::lock_guard lock(reg_mutex);
+		r.connection_id = connection_id;
+		r.channel_key = channel_key;
 		return r;
+	}
+
+	void renew_registration()
+	{
+		std::lock_guard lock(reg_mutex);
+		channel_key = AesKey::random();
+		random_bytes(connection_id);
 	}
 
 	void on_datagram()
@@ -191,20 +292,16 @@ struct VdSession::impl
 		ssize_t n = recvfrom(udp_fd, buf, sizeof buf, 0, (sockaddr *)&from, &from_len);
 		if (n <= 0 or not cfg.discovery_key)
 			return;
-		auto plain = aes_unwrap(*cfg.discovery_key, std::span(buf, size_t(n)));
-		if (not plain)
+		std::span<const uint8_t> d(buf, size_t(n));
+		if (auto c = parse_connect_now(d))
 		{
-			stats.bad_messages++;
-			return;
-		}
-		if (auto c = parse_connect_now(*plain))
-		{
-			// TODO(vd-live:connect-now): on the LAN the headset connects to us; nothing to start.
-			if (c->guid == guid)
+			// The headset is about to dial the fixed ports; the listeners are up already.
+			std::lock_guard lock(reg_mutex);
+			if (c->connection_id == connection_id)
 				stats.connect_now++;
 			return;
 		}
-		auto offer = parse_offer(*plain);
+		auto offer = unwrap_offer(*cfg.discovery_key, d);
 		if (not offer)
 		{
 			stats.bad_messages++;
@@ -223,7 +320,7 @@ struct VdSession::impl
 			log("discovery: new account allowed (pairing)");
 		}
 		accounts.allow(platform, offer->account);
-		auto reply = encode_reply(*cfg.discovery_key, session_key, offer->rsa_public_xml, record());
+		auto reply = encode_reply(offer->rsa_public_xml, record());
 		if (not reply)
 		{
 			stats.bad_messages++;
@@ -260,10 +357,14 @@ struct VdSession::impl
 			return;
 		tune_socket(fd, c == video);
 		auto chan = std::make_shared<Channel>(fd);
+		// VD-FACT(plain-framing): on the LAN the control channel is always encrypted, the others per the record.
+		if (cfg.discovery_key and (c == control or cfg.encrypt_local))
+		{
+			std::lock_guard lock(reg_mutex);
+			chan->encrypt(channel_key);
+		}
 		// One headset at a time: a new connection replaces the channel's previous one (its reader then ends without
 		// touching the session); a closing control channel ends the whole session.
-		if (c != control and cfg.encrypt_local)
-			chan->encrypt(session_key);
 		{
 			std::lock_guard lock(m);
 			if (ch[c])
@@ -274,7 +375,11 @@ struct VdSession::impl
 		switch (c)
 		{
 			case control: spawn([this, chan] { control_loop(chan); }); break;
-			case data: spawn([this, chan] { data_loop(chan); }); break;
+			case data:
+				// VD-FACT(channel-order): bandwidth probe of 0 bytes (we do not auto-adjust the bitrate).
+				chan->send(be32(0));
+				spawn([this, chan] { data_loop(chan); });
+				break;
 			case audio: spawn([this, chan] { audio_loop(chan); }); break;
 			case video: spawn([this, chan] { drain_loop(chan); }); break;
 			default: break;
@@ -314,7 +419,10 @@ struct VdSession::impl
 				any = true;
 			}
 		if (any)
+		{
 			log(std::string("vd: session dropped: ") + why);
+			renew_registration(); // like the Streamer re-registering: a new channel key and connection id
+		}
 		update_connection();
 	}
 
@@ -355,35 +463,25 @@ struct VdSession::impl
 		}
 	}
 
+	bool send_control(Msg type, const std::string & payload = {})
+	{
+		std::shared_ptr<Channel> c;
+		{
+			std::lock_guard lock(m);
+			c = ch[control];
+		}
+		return c and c->send(control_message(type, payload));
+	}
+
 	// --- control channel ---------------------------------------------------------------------------------------
 	void control_loop(std::shared_ptr<Channel> chan)
 	{
 		try
 		{
-			// PeerInfo exchange (TODO(vd-live:peer-info)): the headset's first, then ours, then encryption.
-			uint8_t family = 0;
-			if (not chan->read_exact(&family, 1, 10000) or (family != 4 and family != 16))
-				throw std::runtime_error("no PeerInfo");
-			std::vector<uint8_t> rest(family + 5);
-			if (not chan->read_exact(rest.data(), rest.size(), 10000))
-				throw std::runtime_error("short PeerInfo");
-			sockaddr_storage local{};
-			socklen_t len = sizeof local;
-			getsockname(chan->fd(), (sockaddr *)&local, &len);
-			PeerInfo mine{.port = bound.control, .encrypt = cfg.encrypt_local};
-			auto l6 = (sockaddr_in6 *)&local;
-			if (IN6_IS_ADDR_V4MAPPED(&l6->sin6_addr))
-				mine.address.assign(l6->sin6_addr.s6_addr + 12, l6->sin6_addr.s6_addr + 16);
-			else
-				mine.address.assign(l6->sin6_addr.s6_addr, l6->sin6_addr.s6_addr + 16);
-			if (not chan->send(encode_peer_info(mine)))
-				throw std::runtime_error("send PeerInfo");
-			if (cfg.encrypt_local)
-				chan->encrypt(session_key);
+			// VD-FACT(settings-payload): the Streamer publishes its object as soon as the control channel is up.
 			{
 				std::lock_guard lock(m);
-				auto json = streamer.to_json();
-				chan->send(control_message(Msg::reload_streamer_settings, {(const uint8_t *)json.data(), json.size()}));
+				chan->send(control_message(Msg::reload_streamer_settings, streamer.to_json()));
 			}
 			while (not quit)
 			{
@@ -426,30 +524,50 @@ struct VdSession::impl
 			case Msg::mobile_setting_changed:
 			case Msg::streamer_setting_changed: {
 				stats.settings_messages++;
-				BeReader r(payload);
-				std::string name = r.str(), value = r.str();
+				Settings change;
+				if (not change.parse(text))
+				{
+					stats.bad_messages++;
+					return;
+				}
 				std::lock_guard lock(m);
 				Settings & s = type == Msg::user_setting_changed ? user : type == Msg::mobile_setting_changed ? mobile : streamer;
-				s.set_raw(name, value);
+				s.merge(change);
 				break;
 			}
 			case Msg::force_key_frame:
 				stats.idr_requests++;
 				idr_pending = true;
 				return;
+			case Msg::restart_stream:
+				stats.idr_requests++;
+				resend_video_format();
+				return;
+			case Msg::recenter:
+				// The headset re-zeroes its own tracking space; the poses that follow carry it. Nothing to do here.
+				stats.recenters++;
+				log("vd: recenter");
+				return;
+			case Msg::update_required:
+				log("vd: the headset asks for a newer Streamer version (answered: no update available)");
+				send_control(Msg::update_unavailable);
+				return;
+			case Msg::wake_up_computer:
+				send_control(Msg::computer_awaken);
+				return;
 			case Msg::disconnect:
 			case Msg::exit:
 				drop_session("headset disconnected");
 				return;
-			default: // restart stream, recenter, the desktop features: accepted and ignored
+			default: // games list, SteamVR, boundary/skeleton data, desktop features: accepted and ignored
 				return;
 		}
-		if (type == Msg::reload_mobile_settings or type == Msg::mobile_setting_changed)
-			apply_mobile();
+		if (type != Msg::reload_streamer_settings and type != Msg::streamer_setting_changed)
+			apply_headset();
 	}
 
-	// Headset description from the mobile settings (TODO(vd-live:settings-keys), TODO(vd-live:preset-sizes)).
-	void apply_mobile()
+	// Headset description from its mobile + user settings (VD-FACT(settings-keys, preset-sizes, fov, ipd, bitrate)).
+	void apply_headset()
 	{
 		HeadsetInfo h;
 		uint32_t d;
@@ -459,34 +577,61 @@ struct VdSession::impl
 		bool format_changed;
 		{
 			std::lock_guard lock(m);
-			auto hmd = mobile.string(key_hmd_type);
-			h.name = hmd ? *hmd : "Virtual Desktop headset";
-			h.eye_width = cfg.width ? cfg.width : quest3_low_eye;
-			h.eye_height = cfg.height ? cfg.height : quest3_low_eye;
-			h.render_eye_width = h.eye_width; // no host foveation: the headset upscales the decoded stream
+			if (mobile.empty())
+				return; // the headset describes itself in its mobile object
+			int32_t hmd = int32_t(mobile.number(key_hmd_type).value_or(-1));
+			h.name = hmd_name(hmd);
+			int q = std::clamp(int(user.number(key_quality).value_or(int(Quality::medium))), int(Quality::potato),
+			                   int(Quality::unstoppable));
+			EyeSize stream = quest3_stream[q + 1];
+			if (not quest_family(hmd))
+				log("vd: headset type " + std::to_string(hmd) + " has no preset table here; using the Quest 3 sizes");
+			h.eye_width = cfg.width ? cfg.width : stream.width;
+			h.eye_height = cfg.height ? cfg.height : stream.height;
+			// The guest renders at the stream size and the headset upscales the decoded image (no host foveation).
+			h.render_eye_width = h.eye_width;
 			h.render_eye_height = h.eye_height;
 			h.foveation = FoveationModel::none;
-			h.refresh_rates = {72, 80, 90, 120};
-			float want = float(mobile.number(key_framerate).value_or(90));
-			h.preferred_refresh_rate = std::ranges::contains(h.refresh_rates, want) ? want : 90;
-			h.fov = default_fov;
-			auto codec = mobile.string(key_codec).value_or("HEVC");
-			h.codecs = codec == "H264" or codec == "H264Plus" ? std::vector{Codec::h264} : std::vector{Codec::hevc, Codec::h264};
+			h.refresh_rates = {72, 80, 90, 96, 100, 120};
+			int rate = int(user.number(key_framerate).value_or(0));
+			if (rate == 0)
+				rate = quest_family(hmd) ? 72 : 90;
+			h.preferred_refresh_rate = std::ranges::contains(h.refresh_rates, float(rate)) ? float(rate) : 72;
+			ipd = float(mobile.number(key_ipd).value_or(default_ipd_m));
+			fov = {from_fov_json(mobile.raw(key_fov_left)).value_or(default_fov[0]),
+			       from_fov_json(mobile.raw(key_fov_right)).value_or(default_fov[1])};
+			h.fov = fov;
+			auto features = mobile.number(key_features);
+			bool hevc = not features or (uint32_t(*features) & feature_hevc);
+			h.codecs = cfg.codec == VdConfig::CodecChoice::h264 or (cfg.codec == VdConfig::CodecChoice::automatic and not hevc)
+			                   ? std::vector{Codec::h264}
+			                   : std::vector{Codec::hevc, Codec::h264};
+			h.hand_tracking = features and (uint32_t(*features) & feature_hand_tracking);
+			h.eye_gaze = features and (uint32_t(*features) & feature_eye_tracking);
 			h.speaker = AudioFormat{speaker_channels, audio_rate};
 			h.microphone = AudioFormat{mic_channels, audio_rate};
 			h.max_bitrate_bps = max_bitrate_bps;
+			bool ssw_headset = mobile.boolean(key_spacewarp).value_or(false);
 			uint32_t bitrate = cfg.bitrate_bps;
-			if (auto mbps = mobile.number(key_bitrate); mbps and *mbps > 0)
-				bitrate = std::min(bitrate, uint32_t(std::min(*mbps * 1e6, double(max_bitrate_bps))));
+			if (auto bw = mobile.number(key_measured_bandwidth); bw and *bw > 0)
+				bitrate = std::min(bitrate, uint32_t(std::min(*bw, double(max_bitrate_bps))));
+			if (not ssw_headset)
+				bitrate /= 2; // VD-FACT(bitrate): the official producer halves the target while SSW is off
 			h.bitrate_bps = bitrate;
-			annexb_out = mobile.boolean(key_annexb).value_or(false);
-			bool ssw = cfg.spacewarp == VdConfig::Spacewarp::on or
-			           (cfg.spacewarp == VdConfig::Spacewarp::headset and mobile.boolean(key_spacewarp).value_or(false));
+			annexb_out = mobile.boolean(key_annexb).value_or(true);
+			bool ssw = cfg.spacewarp == VdConfig::Spacewarp::on or (cfg.spacewarp == VdConfig::Spacewarp::headset and ssw_headset);
 			d = ssw ? 2 : 1;
 			format_changed = info and (info->eye_width != h.eye_width or info->eye_height != h.eye_height or
 			                           info->codecs != h.codecs or info->preferred_refresh_rate != h.preferred_refresh_rate);
 			info = h;
 			v = ch[video];
+			std::string codec = std::to_string(int(h.codecs.front() == Codec::hevc ? VideoCodec::hevc : VideoCodec::h264));
+			if (streamer.raw(key_active_codec) != codec)
+			{
+				streamer.set_raw(key_active_codec, codec);
+				if (ch[control])
+					ch[control]->send(control_message(Msg::streamer_setting_changed, setting_changed_payload(key_active_codec, codec)));
+			}
 		}
 		refresh = h.preferred_refresh_rate;
 		divisor = d;
@@ -513,16 +658,25 @@ struct VdSession::impl
 		VideoFormat f;
 		f.source = Source::vr;
 		f.codec = h.codecs.front() == Codec::hevc ? VideoCodec::hevc : VideoCodec::h264;
-		f.frame_rate = h.preferred_refresh_rate; // TODO(vd-live:ssw-cadence): display rate, not the render rate
-		f.width = int32_t(h.eye_width);
-		f.height = int32_t(h.eye_height);
+		f.frame_rate = int32_t(h.preferred_refresh_rate); // VD-FACT(ssw-cadence): the display rate
+		f.frame_size = {int32_t(h.eye_width), int32_t(h.eye_height)};
 		f.stream_count = 2;
-		for (int e = 0; e < 2; ++e)
-			f.stream[e] = {f.width, f.height, {e * f.width, 0, f.width, f.height}};
-		std::vector<uint8_t> msg{tag_video_format};
-		auto b = bytes_of(f);
-		msg.insert(msg.end(), b.begin(), b.end());
-		v.send(msg);
+		f.bounds = {0, 0, int32_t(h.render_eye_width), int32_t(h.render_eye_height)};
+		v.send(video_format_message(f));
+	}
+
+	void resend_video_format()
+	{
+		std::optional<HeadsetInfo> h;
+		std::shared_ptr<Channel> v;
+		{
+			std::lock_guard lock(m);
+			h = info;
+			v = ch[video];
+		}
+		idr_pending = true;
+		if (h and v and is_connected)
+			send_video_format(*v, *h);
 	}
 
 	// Headset -> host on the video channel is only TCP ACKs; reading tells us when it closes.
@@ -534,36 +688,36 @@ struct VdSession::impl
 		channel_closed(video, chan);
 	}
 
-	// --- data channel: tracking + input up ---------------------------------------------------------------------
+	// --- data channel: tracking + input up (VD-FACT(framedata-prefix)) ----------------------------------------------
 	void data_loop(std::shared_ptr<Channel> chan)
 	{
 		try
 		{
+			std::vector<uint8_t> in, out(frame_data_face);
 			while (not quit)
 			{
-				uint8_t prefix[16];
-				if (not chan->read_exact(prefix, 16))
+				uint8_t prefix[frame_data_prefix];
+				if (not chan->read_exact(prefix, sizeof prefix))
 					break;
-				int32_t comp, raw;
+				int32_t comp;
 				uint64_t hash;
 				memcpy(&comp, prefix, 4);
-				memcpy(&raw, prefix + 4, 4);
-				memcpy(&hash, prefix + 8, 8);
-				if (comp <= 0 or raw <= 0 or comp > (1 << 20) or raw > (1 << 20))
-					throw std::runtime_error("bad FrameData sizes");
-				std::vector<uint8_t> in(static_cast<size_t>(comp)), out(static_cast<size_t>(raw));
+				memcpy(&hash, prefix + 4, 8);
+				if (comp <= 0 or comp > (1 << 20))
+					throw std::runtime_error("bad FrameData size");
+				in.resize(size_t(comp));
 				if (not chan->read_exact(in.data(), in.size()))
 					break;
-				int n = LZ4_decompress_safe((const char *)in.data(), (char *)out.data(), comp, raw);
-				if (n != raw or XXH3_64bits(out.data(), out.size()) != hash)
+				int n = LZ4_decompress_safe((const char *)in.data(), (char *)out.data(), comp, int(out.size()));
+				if (n <= 0 or XXH3_64bits(out.data(), size_t(n)) != hash)
 				{
 					stats.bad_messages++;
 					continue;
 				}
-				// The struct is sent truncated to the active feature set: shorter = base only, longer = extra blocks.
-				FrameData fd{};
-				memcpy(&fd, out.data(), std::min(out.size(), sizeof fd));
-				on_frame_data(fd);
+				if (auto s = decode_tracking(std::span(out.data(), size_t(n))))
+					on_tracking_sample(*s);
+				else
+					stats.bad_messages++;
 			}
 		}
 		catch (std::exception & e)
@@ -574,27 +728,36 @@ struct VdSession::impl
 		channel_closed(data, chan);
 	}
 
-	static TrackedPose tracked(Device d, const TrackedDevice & t, ns time)
+	static TrackedPose tracked(Device d, const Quat & o, const Vec3 & p, const Vec3 & v, const Vec3 & w, bool valid, ns time)
 	{
-		TrackedPose p{.device = d, .time = time};
-		p.pose.orientation = {t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w};
-		p.pose.position = {t.position.x, t.position.y, t.position.z};
-		p.linear_velocity = {t.linear_velocity.x, t.linear_velocity.y, t.linear_velocity.z};
-		p.angular_velocity = {t.angular_velocity.x, t.angular_velocity.y, t.angular_velocity.z};
-		p.orientation_valid = t.orientation_tracked;
-		p.position_valid = t.position_tracked;
-		return p;
+		TrackedPose t{.device = d, .time = time};
+		t.pose.orientation = {o.x, o.y, o.z, o.w};
+		t.pose.position = {p.x, p.y, p.z};
+		t.linear_velocity = {v.x, v.y, v.z};
+		t.angular_velocity = {w.x, w.y, w.z};
+		t.orientation_valid = t.position_valid = valid;
+		return t;
 	}
 
-	void on_frame_data(const FrameData & fd)
+	void on_tracking_sample(const TrackingSample & s)
 	{
-		ns t = now_ns(); // TODO(vd-live:clock): no clock sync in the notes; the sample time is the arrival time
+		ns t = now_ns(); // VD-FACT(clock): no clock sync; the sample time is the arrival time
+		{
+			std::lock_guard lock(index_mutex);
+			last_tracking_index = s.frame_index;
+		}
+		stats.last_latency_us = int32_t(s.latency_s * 1e6f);
+		auto & hd = s.head;
+		auto ctl = [&](Device d, int i) {
+			auto & c = s.controller[i];
+			return tracked(d, c.orientation, c.position, c.velocity, c.angular_velocity, c.tracked != 0, t);
+		};
 		std::array<TrackedPose, 5> poses{
-		        tracked(Device::head, fd.head, t),
-		        tracked(Device::left_grip, fd.controller[0], t),
-		        tracked(Device::left_aim, fd.controller[0], t), // TODO(vd-live:aim): aim = grip until an offset is known
-		        tracked(Device::right_grip, fd.controller[1], t),
-		        tracked(Device::right_aim, fd.controller[1], t),
+		        tracked(Device::head, hd.orientation, hd.position, hd.velocity, hd.angular_velocity, hd.tracked, t),
+		        ctl(Device::left_grip, 0),
+		        ctl(Device::left_aim, 0), // VD-FACT(aim): controllers carry one pose
+		        ctl(Device::right_grip, 1),
+		        ctl(Device::right_aim, 1),
 		};
 		for (auto & p: poses)
 			history[size_t(p.device)].add(p);
@@ -602,27 +765,29 @@ struct VdSession::impl
 		if (listener)
 			listener->on_tracking(poses);
 
+		// VD-FACT(button-bits): one bitfield for both controllers.
 		std::vector<InputValue> changed;
+		const ControllerState & c = s.input;
+		auto bit = [](uint16_t v, uint16_t b) { return (v & b) ? 1.f : 0.f; };
 		for (int hand = 0; hand < 2; ++hand)
 		{
-			const ControllerInput & c = fd.input.hand[hand];
-			auto bit = [](uint32_t v, uint32_t b) { return (v & b) ? 1.f : 0.f; };
+			bool r = hand == 1;
 			std::array<float, svr::count> v{};
-			v[svr::trigger_value] = c.trigger / 255.f;
-			v[svr::trigger_click] = bit(c.buttons, button_trigger);
-			v[svr::trigger_touch] = bit(c.touches, button_trigger);
-			v[svr::squeeze_value] = c.grip / 255.f;
-			v[svr::squeeze_click] = bit(c.buttons, button_grip);
-			v[svr::thumbstick_x] = std::clamp(c.thumb_x / 32767.f, -1.f, 1.f);
-			v[svr::thumbstick_y] = std::clamp(c.thumb_y / 32767.f, -1.f, 1.f);
-			v[svr::thumbstick_click] = bit(c.buttons, button_thumb);
-			v[svr::thumbstick_touch] = bit(c.touches, button_thumb);
-			v[svr::a_click] = bit(c.buttons, hand ? button_a : button_x);
-			v[svr::a_touch] = bit(c.touches, hand ? button_a : button_x);
-			v[svr::b_click] = bit(c.buttons, hand ? button_b : button_y);
-			v[svr::b_touch] = bit(c.touches, hand ? button_b : button_y);
-			v[hand ? svr::system_click : svr::menu_click] = bit(c.buttons, hand ? button_back : button_enter);
-			v[svr::thumbrest_touch] = bit(c.touches, button_thumbrest);
+			v[svr::trigger_value] = c.trigger[hand] / 255.f;
+			v[svr::trigger_click] = bit(c.buttons, r ? button_right_trigger : button_left_trigger);
+			v[svr::trigger_touch] = bit(c.touches, r ? touch_right_trigger : touch_left_trigger);
+			v[svr::squeeze_value] = c.grip[hand] / 255.f;
+			v[svr::squeeze_click] = bit(c.buttons, r ? button_right_grip : button_left_grip);
+			v[svr::thumbstick_x] = std::clamp(c.thumb_x[hand] / 32767.f, -1.f, 1.f);
+			v[svr::thumbstick_y] = std::clamp(c.thumb_y[hand] / 32767.f, -1.f, 1.f);
+			v[svr::thumbstick_click] = bit(c.buttons, r ? button_right_thumb : button_left_thumb);
+			v[svr::thumbstick_touch] = bit(c.touches, r ? touch_right_thumb : touch_left_thumb);
+			v[svr::a_click] = bit(c.buttons, r ? button_a : button_x);
+			v[svr::a_touch] = bit(c.touches, r ? touch_a : touch_x);
+			v[svr::b_click] = bit(c.buttons, r ? button_b : button_y);
+			v[svr::b_touch] = bit(c.touches, r ? touch_b : touch_y);
+			v[r ? svr::system_click : svr::menu_click] = bit(c.buttons, r ? button_back : button_enter);
+			v[svr::thumbrest_touch] = bit(c.touches, r ? touch_right_thumbrest : touch_left_thumbrest);
 			for (int i = 0; i < svr::count; ++i)
 			{
 				uint32_t id;
@@ -640,7 +805,7 @@ struct VdSession::impl
 		}
 	}
 
-	// --- audio channel -----------------------------------------------------------------------------------------
+	// --- audio channel (VD-FACT(audio-format)) ------------------------------------------------------------------
 	void audio_loop(std::shared_ptr<Channel> chan)
 	{
 		try
@@ -745,12 +910,22 @@ FrameTiming VdSession::next_frame_timing()
 
 bool VdSession::views_at(ns t, std::array<Pose, 2> & pose, std::array<Fov, 2> & fov)
 {
-	fov = default_fov;
+	float ipd;
+	{
+		std::lock_guard lock(p->m);
+		fov = p->fov;
+		ipd = p->ipd;
+	}
+	{
+		// remember which tracking sample this frame's views come from (FrameMetadata.frame_index)
+		std::lock_guard lock(p->index_mutex);
+		p->view_index[p->view_index_pos++ % p->view_index.size()] = {t, p->last_tracking_index};
+	}
 	auto head = p->history[size_t(Device::head)].at(t);
 	Pose h = head ? head->pose : Pose{};
 	for (int e = 0; e < 2; ++e)
 	{
-		Pose eye{.position = {(e ? 0.5f : -0.5f) * default_ipd_m, 0, 0}}; // TODO(vd-live:ipd)
+		Pose eye{.position = {(e ? 0.5f : -0.5f) * ipd, 0, 0}};
 		pose[e] = multiply(h, eye);
 	}
 	return head.has_value();
@@ -808,8 +983,14 @@ void VdSession::submit(const Frame & f)
 	ns now = now_ns();
 	ns period = ns(1e9 / p->refresh.load());
 	FrameMetadata md;
-	md.timestamp_us = f.display_time / 1000; // TODO(vd-live:clock): host clock
-	md.frame_index = p->wire_index++;
+	md.timestamp_us = now / 1000; // VD-FACT(clock): host microseconds, pairs the frame with its slice
+	{
+		std::lock_guard lock(p->index_mutex);
+		md.frame_index = p->last_tracking_index;
+		for (auto & [t, index]: p->view_index)
+			if (t == f.display_time)
+				md.frame_index = index;
+	}
 	md.source = Source::vr;
 	md.is_sync_frame = out[0].idr and out[1].idr;
 	md.frame_time_ms = float(d * period / 1e6);
@@ -830,22 +1011,16 @@ void VdSession::submit(const Frame & f)
 		for (int hand = 0; hand < 2; ++hand)
 			md.haptic[hand].amplitude = now < p->haptic_until[hand] ? p->haptic_amp[hand] : 0;
 	}
-	md.render_width = int32_t(h->eye_width);
-	md.render_height = int32_t(h->eye_height);
+	md.render_width = int32_t(h->render_eye_width);
+	md.render_height = int32_t(h->render_eye_height);
 
+	// VD-FACT(eye-delivery, annexb-default): eye 0 in the frame message, eye 1 as slice 1, same timestamp.
 	std::array<std::vector<uint8_t>, 2> bits;
 	for (int e = 0; e < 2; ++e)
 		bits[e] = annexb_out ? std::move(out[e].annexb) : length_prefixed(out[e].annexb);
 	md.data_size = int32_t(bits[0].size());
-	std::vector<uint8_t> frame{tag_frame};
-	auto mb = bytes_of(md);
-	frame.insert(frame.end(), mb.begin(), mb.end());
-	frame.insert(frame.end(), bits[0].begin(), bits[0].end());
-	SliceHeader sh{.timestamp_us = md.timestamp_us, .stream_index = 1, .data_size = int32_t(bits[1].size())};
-	std::vector<uint8_t> slice{tag_slice};
-	auto sb = bytes_of(sh);
-	slice.insert(slice.end(), sb.begin(), sb.end());
-	slice.insert(slice.end(), bits[1].begin(), bits[1].end());
+	auto frame = frame_message(md, bits[0]);
+	auto slice = slice_message({.timestamp_us = md.timestamp_us, .stream_index = 1, .data_size = int32_t(bits[1].size())}, bits[1]);
 	if (not v->send(frame) or not v->send(slice))
 		return;
 	p->stats.frames_sent++;
@@ -882,17 +1057,27 @@ void VdSession::send_audio(std::span<const int16_t> pcm)
 	}
 	if (not a or not p->is_connected)
 		return;
-	std::vector<uint8_t> msg(4 + pcm.size_bytes());
-	int32_t n = int32_t(pcm.size_bytes());
-	memcpy(msg.data(), &n, 4);
-	memcpy(msg.data() + 4, pcm.data(), pcm.size_bytes());
-	if (a->send(msg))
+	// VD-FACT(audio-format): LE i32 byte count + S16 PCM, in packets of at most 1152 bytes like the Streamer's.
+	auto bytes = std::span(reinterpret_cast<const uint8_t *>(pcm.data()), pcm.size_bytes());
+	while (not bytes.empty())
+	{
+		auto part = bytes.first(std::min<size_t>(bytes.size(), speaker_packet_bytes));
+		bytes = bytes.subspan(part.size());
+		std::vector<uint8_t> msg(4 + part.size());
+		int32_t n = int32_t(part.size());
+		memcpy(msg.data(), &n, 4);
+		memcpy(msg.data() + 4, part.data(), part.size());
+		if (not a->send(msg))
+			return;
 		p->stats.audio_packets++;
+	}
 }
 
 void VdSession::set_microphone(bool on)
 {
-	p->mic_on = on; // TODO(vd-live:audio-format): no microphone request message known; the headset always sends
+	// VD-FACT(audio-format): the headset sends its microphone per its own MicPassthrough setting; this only gates
+	// delivery to the listener.
+	p->mic_on = on;
 }
 
 VdSession::Ports VdSession::ports() const
@@ -950,6 +1135,27 @@ void VdSession::set_streamer_setting(const std::string & key, const std::string 
 	}
 	if (c)
 		c->send(control_message(Msg::streamer_setting_changed, setting_changed_payload(key, json_value)));
+}
+
+bool VdSession::send_command(Msg m)
+{
+	switch (m)
+	{
+		case Msg::enable_vr_passthrough:
+		case Msg::disable_vr_passthrough:
+		case Msg::toggle_vr_passthrough:
+		case Msg::toggle_hand_passthrough:
+		case Msg::toggle_desk_passthrough:
+		case Msg::toggle_performance_overlay:
+		case Msg::toggle_foveated_streaming:
+			break;
+		default:
+			return false;
+	}
+	if (not p->is_connected or not p->send_control(m))
+		return false;
+	p->stats.commands_sent++;
+	return true;
 }
 
 SessionControl::PairingState VdControl::pairing_state() const

@@ -18,6 +18,7 @@
 #include "session/clock.h"
 #include "session/session_control.h"
 #include "vd/vd_session.h"
+#include "vd/vd_streamer_key.h"
 #include "wivrn/annexb.h"
 #include "wivrn/known_keys.h"
 #include "wivrn/wivrn_control.h"
@@ -76,11 +77,12 @@ static void usage()
 	        "                      --no-low-latency-rc  --csv (one summary line)\n"
 	        "  --adapter wivrn|vd  headset protocol (default wivrn)\n"
 	        "  Virtual Desktop (--adapter vd; --size, --bitrate (max 200000000), --pair apply):\n"
-	        "  --vd-discovery-key-fd N  read the discovery key (32 + 16 bytes) from fd N at start; taken from the\n"
-	        "                      user's own installed Streamer by the caller, never stored or logged\n"
+	        "  (the discovery key is read at start from the user's own installed Virtual Desktop Streamer, kept in\n"
+	        "   memory only, never stored or logged)\n"
+	        "  --vd-discovery-key-fd N  take the discovery key (32 + 16 bytes) from fd N instead\n"
 	        "  --vd-ssw headset|on|off  render at half the display rate (headset synthesises frames); default: as the\n"
 	        "                      headset's spacewarp setting\n"
-	        "  --vd-no-encryption  plain TCP channels on the LAN\n");
+	        "  --vd-no-encryption  plain video/audio/data channels on the LAN (control stays encrypted)\n");
 }
 
 static CVPixelBufferRef make_nv12(uint32_t w, uint32_t h)
@@ -373,8 +375,7 @@ static Adapter make_vd(const VdOptions & o, uint32_t w, uint32_t h, uint32_t bit
 	             .spacewarp = o.spacewarp, .log = log_line};
 	if (o.discovery_key_fd >= 0)
 	{
-		// C1: the caller hands over the constant from the user's own installed Streamer; it lives only in memory.
-		// TODO(vd-live:key-source): an in-process reader of the installed Streamer instead of the fd hand-over.
+		// C1: the caller hands over the constant (48 bytes); it lives only in memory.
 		uint8_t k[48];
 		size_t got = 0;
 		while (got < sizeof k)
@@ -390,6 +391,15 @@ static Adapter make_vd(const VdOptions & o, uint32_t w, uint32_t h, uint32_t bit
 		std::copy_n(k + 32, 16, key.iv.begin());
 		memset(k, 0, sizeof k);
 		cfg.discovery_key = key;
+	}
+	else
+	{
+		// VD-FACT(key-source): read from the user's own installed Streamer at start-up; memory only, never logged.
+		auto r = vd::read_installed_streamer_key();
+		if (r.key)
+			cfg.discovery_key = r.key;
+		else
+			log_line("vd: discovery key not available (" + r.error + "); install the Virtual Desktop Streamer");
 	}
 	auto session = std::make_unique<VdSession>(std::move(cfg));
 	VdSession & s = *session;
