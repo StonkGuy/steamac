@@ -104,8 +104,10 @@ void VrPipeline::send_state(bool connected)
 	s.connected = connected;
 	if (auto info = connected ? session.headset() : std::nullopt)
 	{
-		s.eye_width = info->render_eye_width ? info->render_eye_width : info->eye_width;
-		s.eye_height = info->render_eye_height ? info->render_eye_height : info->eye_height;
+		// Without host foveation the compositor only converts, so the guest renders at the stream size (A2).
+		bool own_size = info->render_eye_width and info->foveation != FoveationModel::none;
+		s.eye_width = own_size ? info->render_eye_width : info->eye_width;
+		s.eye_height = own_size ? info->render_eye_height : info->eye_height;
 		s.refresh_hz = refresh ? refresh.load() : info->preferred_refresh_rate;
 		for (int e = 0; e < 2; e++)
 		{

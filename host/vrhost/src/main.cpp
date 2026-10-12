@@ -9,14 +9,18 @@
 //   --list-headsets [--json] / --unpair NAME / --unpair-all   manage paired headsets
 //   --control-socket PATH  status/pairing requests from the launcher (docs/vr-interfaces.md section 5)
 //   --audio-fd N           game audio / headset microphone via the VR audio region (docs/vr-interfaces.md section 6)
+//   --adapter wivrn|vd     headset protocol: WiVRn (default) or Virtual Desktop (private branch, personal use)
 #include "audio/audio_bridge.h"
 #include "control/control_server.h"
 #include "encoder/vt_encoder.h"
 #include "pattern/test_pattern.h"
 #include "pipeline/vr_pipeline.h"
 #include "session/clock.h"
+#include "session/session_control.h"
+#include "vd/vd_session.h"
 #include "wivrn/annexb.h"
 #include "wivrn/known_keys.h"
+#include "wivrn/wivrn_control.h"
 #include "wivrn/wivrn_session.h"
 
 #include <CoreVideo/CoreVideo.h>
@@ -30,12 +34,14 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <string>
 #include <memory>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 using namespace vrhost;
@@ -67,7 +73,14 @@ static void usage()
 	        "  --codec hevc|h264   self-test codec (default hevc)\n"
 	        "  --bitrate BPS       total bitrate (default 50000000)\n"
 	        "  self-test tuning:   --layout eyes|serial|sbs  --prioritize-speed  --max-frame-delay N  --qp N\n"
-	        "                      --no-low-latency-rc  --csv (one summary line)\n");
+	        "                      --no-low-latency-rc  --csv (one summary line)\n"
+	        "  --adapter wivrn|vd  headset protocol (default wivrn)\n"
+	        "  Virtual Desktop (--adapter vd; --size, --bitrate (max 200000000), --pair apply):\n"
+	        "  --vd-discovery-key-fd N  read the discovery key (32 + 16 bytes) from fd N at start; taken from the\n"
+	        "                      user's own installed Streamer by the caller, never stored or logged\n"
+	        "  --vd-ssw headset|on|off  render at half the display rate (headset synthesises frames); default: as the\n"
+	        "                      headset's spacewarp setting\n"
+	        "  --vd-no-encryption  plain TCP channels on the LAN\n");
 }
 
 static CVPixelBufferRef make_nv12(uint32_t w, uint32_t h)
@@ -229,6 +242,15 @@ public:
 	void on_disconnected() override { printf("disconnected\n"); }
 };
 
+// The session of the chosen headset protocol, its pairing/status surface and its periodic report line.
+struct Adapter
+{
+	std::unique_ptr<VrSession> session;
+	std::unique_ptr<SessionControl> control;
+	std::function<void()> announce;  // listening/pairing banner, once after start
+	std::function<void()> report;    // stream counters, every 5 s
+};
+
 static std::filesystem::path pin_file()
 {
 	return KnownKeys::default_dir() / "pin";
@@ -286,13 +308,13 @@ static void write_pin(const std::string & pin)
 }
 
 // The launcher's status/pairing socket, when asked for (never fatal: the host serves without it).
-static std::unique_ptr<ControlServer> make_control(WivrnSession & session)
+static std::unique_ptr<ControlServer> make_control(SessionControl & control)
 {
 	if (g_control_socket.empty())
 		return nullptr;
 	try
 	{
-		return std::make_unique<ControlServer>(g_control_socket, session,
+		return std::make_unique<ControlServer>(g_control_socket, control,
 		                                       ControlServer::Hooks{
 		                                               .pipeline_latency_ms = [] { return g_pipeline_p50_ms.load(); },
 		                                               .pin_changed = write_pin,
@@ -305,13 +327,97 @@ static std::unique_ptr<ControlServer> make_control(WivrnSession & session)
 	}
 }
 
-static int testpattern(WivrnConfig cfg)
+static void log_line(const std::string & s)
 {
-	cfg.log = [](const std::string & s) {
-		printf("[vrhost] %s\n", s.c_str());
-		fflush(stdout);
+	printf("[vrhost] %s\n", s.c_str());
+	fflush(stdout);
+}
+
+static Adapter make_wivrn(WivrnConfig cfg, bool link)
+{
+	cfg.log = log_line;
+	auto session = std::make_unique<WivrnSession>(cfg);
+	WivrnSession & s = *session;
+	Adapter a;
+	a.control = std::make_unique<WivrnControl>(s);
+	a.announce = [&s, cfg] {
+		printf("listening on port %d, protocol %016" PRIx64 " (WiVRn v26.9)%s\n", s.port(), WivrnSession::protocol_version(),
+		       cfg.advertise ? ", advertised as _wivrn._tcp" : "");
+		announce_pairing(s, cfg);
 	};
-	WivrnSession session(cfg);
+	if (not link)
+		a.report = [&s] {
+			static ns last_report = now_ns();
+			auto & st = s.stats();
+			printf("frames %" PRIu64 " idr %" PRIu64 " (requests %" PRIu64 ") feedback %" PRIu64 " tracking %" PRIu64
+			       " last encode %.2f ms, headset decode %.2f ms, %.1f Mbit/s\n",
+			       st.frames_sent.load(), st.idr_sent.load(), st.idr_requests.load(), st.feedback.load(), st.tracking.load(),
+			       st.last_encode_ns / 1e6, st.last_feedback_decode_ns / 1e6,
+			       st.bytes_sent * 8 / 1e6 / ((now_ns() - last_report) / 1e9));
+			last_report = now_ns();
+		};
+	a.session = std::move(session);
+	return a;
+}
+
+struct VdOptions
+{
+	int discovery_key_fd = -1;
+	VdConfig::Spacewarp spacewarp = VdConfig::Spacewarp::headset;
+	bool encrypt = true;
+};
+
+static Adapter make_vd(const VdOptions & o, uint32_t w, uint32_t h, uint32_t bitrate, bool pair)
+{
+	VdConfig cfg{.encrypt_local = o.encrypt, .pairing = pair, .bitrate_bps = bitrate, .width = w, .height = h,
+	             .spacewarp = o.spacewarp, .log = log_line};
+	if (o.discovery_key_fd >= 0)
+	{
+		// C1: the caller hands over the constant from the user's own installed Streamer; it lives only in memory.
+		// TODO(vd-live:key-source): an in-process reader of the installed Streamer instead of the fd hand-over.
+		uint8_t k[48];
+		size_t got = 0;
+		while (got < sizeof k)
+		{
+			ssize_t n = read(o.discovery_key_fd, k + got, sizeof k - got);
+			if (n <= 0)
+				throw std::runtime_error("--vd-discovery-key-fd: expected 48 bytes");
+			got += size_t(n);
+		}
+		close(o.discovery_key_fd);
+		vd::AesKey key;
+		std::copy_n(k, 32, key.key.begin());
+		std::copy_n(k + 32, 16, key.iv.begin());
+		memset(k, 0, sizeof k);
+		cfg.discovery_key = key;
+	}
+	auto session = std::make_unique<VdSession>(std::move(cfg));
+	VdSession & s = *session;
+	Adapter a;
+	a.control = std::make_unique<VdControl>(s);
+	a.announce = [&s] {
+		auto p = s.ports();
+		printf("listening on ports %u/%u/%u/%u, discovery %u (Virtual Desktop adapter, LAN)\n", p.control, p.data, p.video,
+		       p.audio, p.discovery);
+		printf("%s\n", s.pairing() ? "pairing: the next new headset account is allowed"
+		                           : "pairing off (--pair or the launcher to allow a new headset account)");
+	};
+	a.report = [&s] {
+		static ns last_report = now_ns();
+		auto & st = s.stats();
+		printf("frames %" PRIu64 " idr %" PRIu64 " (requests %" PRIu64 ") tracking %" PRIu64 " inputs %" PRIu64
+		       " render divisor %u, last encode %.2f ms, %.1f Mbit/s\n",
+		       st.frames_sent.load(), st.idr_sent.load(), st.idr_requests.load(), st.tracking.load(), st.inputs.load(),
+		       s.render_divisor(), st.last_encode_ns / 1e6, st.bytes_sent * 8 / 1e6 / ((now_ns() - last_report) / 1e9));
+		last_report = now_ns();
+	};
+	a.session = std::move(session);
+	return a;
+}
+
+static int testpattern(Adapter & adapter)
+{
+	VrSession & session = *adapter.session;
 	PatternSource src;
 	vra_region * audio_region = nullptr;
 	std::unique_ptr<AudioBridge> audio;
@@ -333,10 +439,9 @@ static int testpattern(WivrnConfig cfg)
 		tone_thread = std::thread(tone_writer, tone_region.get(), std::ref(tone_quit));
 	}
 	session.start(audio ? static_cast<SessionListener *>(audio.get()) : &src);
-	auto control = make_control(session);
-	printf("steamac-vrhost: listening on port %d, protocol %016" PRIx64 " (WiVRn v26.9)%s\n", session.port(),
-	       WivrnSession::protocol_version(), cfg.advertise ? ", advertised as _wivrn._tcp" : "");
-	announce_pairing(session, cfg);
+	auto control = make_control(*adapter.control);
+	printf("steamac-vrhost: ");
+	adapter.announce();
 	fflush(stdout);
 
 	TestPattern pattern;
@@ -376,11 +481,7 @@ static int testpattern(WivrnConfig cfg)
 		session.submit(f);
 		if (now_ns() - last_report > 5'000'000'000)
 		{
-			auto & s = session.stats();
-			printf("frames %" PRIu64 " idr %" PRIu64 " (requests %" PRIu64 ") feedback %" PRIu64 " tracking %" PRIu64
-			       " last encode %.2f ms, headset decode %.2f ms, %.1f Mbit/s\n",
-			       s.frames_sent.load(), s.idr_sent.load(), s.idr_requests.load(), s.feedback.load(), s.tracking.load(),
-			       s.last_encode_ns / 1e6, s.last_feedback_decode_ns / 1e6, s.bytes_sent * 8 / 1e6 / ((now_ns() - last_report) / 1e9));
+			adapter.report();
 			if (audio)
 				printf("audio speaker packets %" PRIu64 " frames %" PRIu64 " discarded %" PRIu64 " mic frames %" PRIu64 "\n",
 				       audio->stats().speaker_packets.load(), audio->stats().speaker_frames.load(),
@@ -404,24 +505,21 @@ static int testpattern(WivrnConfig cfg)
 	return 0;
 }
 
-// Game frames: VR link -> compositor -> WiVRn session. Ends on SIGTERM/SIGINT or when steamac-vm closes the link.
-static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_socket, const std::string & mach_name,
-                      int audio_fd)
+static int accept_link(int & link_fd, const std::string & link_socket)
 {
-	cfg.log = [](const std::string & s) {
-		printf("[vrhost] %s\n", s.c_str());
-		fflush(stdout);
-	};
-	if (link_fd < 0)
-	{
-		printf("steamac-vrhost: waiting for the VR link on %s\n", link_socket.c_str());
-		fflush(stdout);
-		while (link_fd < 0 and not g_quit)
-			link_fd = VrLinkServer::accept_one(link_socket, 1000);
-		if (link_fd < 0)
-			return 0;
-	}
-	WivrnSession session(cfg);
+	if (link_fd >= 0)
+		return 1;
+	printf("steamac-vrhost: waiting for the VR link on %s\n", link_socket.c_str());
+	fflush(stdout);
+	while (link_fd < 0 and not g_quit)
+		link_fd = VrLinkServer::accept_one(link_socket, 1000);
+	return link_fd >= 0;
+}
+
+// Game frames: VR link -> compositor -> headset session. Ends on SIGTERM/SIGINT or when steamac-vm closes the link.
+static int serve_link(Adapter & adapter, int link_fd, const std::string & mach_name, int audio_fd)
+{
+	VrSession & session = *adapter.session;
 	VrPipeline pipeline(session, link_fd, mach_name);
 	vra_region * audio_region = nullptr;
 	std::unique_ptr<AudioBridge> audio;
@@ -433,11 +531,9 @@ static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_soc
 		audio = std::make_unique<AudioBridge>(audio_region, session, &pipeline);
 	}
 	session.start(audio ? static_cast<SessionListener *>(audio.get()) : &pipeline); // state / input / audio to the guest
-	auto control = make_control(session);
-	printf("steamac-vrhost: VR link fd %d, mach name %s, listening on port %d, protocol %016" PRIx64 " (WiVRn v26.9)%s\n",
-	       link_fd, mach_name.c_str(), session.port(), WivrnSession::protocol_version(),
-	       cfg.advertise ? ", advertised as _wivrn._tcp" : "");
-	announce_pairing(session, cfg);
+	auto control = make_control(*adapter.control);
+	printf("steamac-vrhost: VR link fd %d, mach name %s, ", link_fd, mach_name.c_str());
+	adapter.announce();
 	fflush(stdout);
 	ns last_report = now_ns();
 	while (not g_quit and not pipeline.peer_closed())
@@ -446,7 +542,7 @@ static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_soc
 		nanosleep(&ts, nullptr);
 		if (now_ns() - last_report > 5'000'000'000)
 		{
-			auto & s = session.stats();
+			auto s = adapter.control->counters();
 			auto & ps = pipeline.stats();
 			auto l = pipeline.take_latency();
 			auto q = [](const std::vector<double> & v, double p) { return v.empty() ? 0.0 : pct(v, p); };
@@ -454,10 +550,10 @@ static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_soc
 			printf("link frames %" PRIu64 " submitted %" PRIu64 " (no headset %" PRIu64 ") sent %" PRIu64 " idr %" PRIu64
 			       " | ms p50/p99: submit->copied %.2f/%.2f copied->host %.3f/%.3f host->sent %.2f/%.2f total %.2f/%.2f"
 			       " compositor GPU %.2f | last encode %.2f, headset decode %.2f\n",
-			       ps.received.load(), ps.submitted.load(), ps.no_headset.load(), s.frames_sent.load(), s.idr_sent.load(),
+			       ps.received.load(), ps.submitted.load(), ps.no_headset.load(), s.frames_sent, s.idr_sent,
 			       q(l.submit_to_copied, .5), q(l.submit_to_copied, .99), q(l.copied_to_received, .5),
 			       q(l.copied_to_received, .99), q(l.received_to_sent, .5), q(l.received_to_sent, .99), q(l.total, .5),
-			       q(l.total, .99), q(l.compose_gpu, .5), s.last_encode_ns / 1e6, s.last_feedback_decode_ns / 1e6);
+			       q(l.total, .99), q(l.compose_gpu, .5), s.last_encode_ns / 1e6, s.last_decode_ns / 1e6);
 			fflush(stdout);
 			last_report = now_ns();
 		}
@@ -497,6 +593,9 @@ int main(int argc, char ** argv)
 	SelftestOptions st;
 	int link_fd = -1;
 	std::string mach_name, link_socket;
+	std::string adapter_name = "wivrn";
+	VdOptions vd_opts;
+	bool bitrate_given = false;
 	for (int i = 1; i < argc; ++i)
 	{
 		std::string a = argv[i];
@@ -594,7 +693,28 @@ int main(int argc, char ** argv)
 		else if (a == "--csv")
 			st.csv = true;
 		else if (a == "--bitrate")
+		{
 			cfg.bitrate_bps = std::stoul(next());
+			bitrate_given = true;
+		}
+		else if (a == "--adapter")
+		{
+			adapter_name = next();
+			if (adapter_name != "wivrn" and adapter_name != "vd")
+			{
+				usage();
+				return 2;
+			}
+		}
+		else if (a == "--vd-discovery-key-fd")
+			vd_opts.discovery_key_fd = std::stoi(next());
+		else if (a == "--vd-ssw")
+		{
+			auto m = next();
+			vd_opts.spacewarp = m == "on" ? VdConfig::Spacewarp::on : m == "off" ? VdConfig::Spacewarp::off : VdConfig::Spacewarp::headset;
+		}
+		else if (a == "--vd-no-encryption")
+			vd_opts.encrypt = false;
 		else if (a == "--codec")
 			st.enc.codec = next() == "h264" ? EncoderConfig::Codec::h264 : EncoderConfig::Codec::hevc;
 		else
@@ -663,7 +783,13 @@ int main(int argc, char ** argv)
 					                         : WivrnConfig::Encryption::enabled;
 				cfg.width = w;
 				cfg.height = h;
-				return mode == link ? serve_link(cfg, link_fd, link_socket, mach_name, g_audio_fd) : testpattern(cfg);
+				if (mode == link and not accept_link(link_fd, link_socket))
+					return 0;
+				{
+					Adapter adapter = adapter_name == "vd" ? make_vd(vd_opts, w, h, bitrate_given ? cfg.bitrate_bps : VdConfig{}.bitrate_bps, pair)
+					                                       : make_wivrn(cfg, mode == link);
+					return mode == link ? serve_link(adapter, link_fd, mach_name, g_audio_fd) : testpattern(adapter);
+				}
 			case none:
 				usage();
 				return 2;

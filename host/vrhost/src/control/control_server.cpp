@@ -2,8 +2,7 @@
 #include "control/control_server.h"
 
 #include "session/clock.h"
-#include "wivrn/known_keys.h"
-#include "wivrn/wivrn_session.h"
+#include "session/session_control.h"
 
 #include <cerrno>
 #include <cinttypes>
@@ -37,8 +36,8 @@ std::string ControlServer::json_string(const std::string & s)
 	return out + "\"";
 }
 
-ControlServer::ControlServer(std::string path_, WivrnSession & s, Hooks h) :
-        path(std::move(path_)), session(s), hooks(std::move(h))
+ControlServer::ControlServer(std::string path_, SessionControl & c, Hooks h) :
+        path(std::move(path_)), control(c), hooks(std::move(h))
 {
 	sockaddr_un a{};
 	a.sun_family = AF_UNIX;
@@ -114,10 +113,10 @@ std::string ControlServer::handle(const std::string & req)
 	if (req == "pair on" or req == "pair off")
 	{
 		bool on = req == "pair on";
-		if (not session.set_pairing(on))
-			return error("encryption is disabled: no pairing");
+		if (not control.set_pairing(on))
+			return error(control.protocol() == "wivrn" ? "encryption is disabled: no pairing" : "pairing not available");
 		if (hooks.pin_changed)
-			hooks.pin_changed(session.pin());
+			hooks.pin_changed(control.pin());
 		return status();
 	}
 	if (req == "unpair-all" or req.starts_with("unpair "))
@@ -125,7 +124,7 @@ std::string ControlServer::handle(const std::string & req)
 		std::string name = req == "unpair-all" ? "" : req.substr(7);
 		if (req != "unpair-all" and name.empty())
 			return error("unpair: no name");
-		KnownKeys(session.known_keys_file()).remove(name);
+		control.unpair(name);
 		return headsets();
 	}
 	return error("unknown request");
@@ -135,7 +134,7 @@ std::string ControlServer::headsets()
 {
 	std::string out = "{\"v\":" + std::to_string(protocol_version) + ",\"headsets\":[";
 	bool first = true;
-	for (auto & k: KnownKeys(session.known_keys_file()).list())
+	for (auto & k: control.paired())
 	{
 		out += first ? "" : ",";
 		first = false;
@@ -146,10 +145,9 @@ std::string ControlServer::headsets()
 
 std::string ControlServer::status()
 {
-	using Enc = WivrnConfig::Encryption;
-	const auto & s = session.stats();
+	auto c = control.counters();
 	ns now = now_ns();
-	uint64_t bytes = s.bytes_sent.load();
+	uint64_t bytes = c.bytes_sent;
 	if (last_sample_ns and now - last_sample_ns > 100'000'000)
 		last_mbps = (bytes - last_bytes) * 8.0 / ((now - last_sample_ns) / 1e9) / 1e6;
 	if (not last_sample_ns or now - last_sample_ns > 100'000'000)
@@ -157,16 +155,20 @@ std::string ControlServer::status()
 		last_sample_ns = now;
 		last_bytes = bytes;
 	}
+	VrSession & session = control.session();
 	auto info = session.connected() ? session.headset() : std::nullopt;
-	Enc enc = session.encryption();
-	std::string pin = session.pin();
-	const char * state = info ? "connected" : enc == Enc::pairing ? "pairing" : "waiting";
+	const char * state = info ? "connected" : control.pairing_state() == SessionControl::PairingState::pairing ? "pairing" : "waiting";
 	char num[512];
 	std::string out = "{\"v\":" + std::to_string(protocol_version) + ",\"state\":\"" + state + "\"";
-	out += ",\"port\":" + std::to_string(session.port());
-	out += ",\"bonjour\":" + json_string(session.advertised_name());
-	out += std::string(",\"encryption\":\"") + (enc == Enc::disabled ? "disabled" : enc == Enc::pairing ? "pairing" : "enabled") + "\"";
-	out += ",\"pin\":" + json_string(pin);
+	out += ",\"adapter\":" + json_string(control.protocol());
+	for (auto & p: control.params())
+	{
+		out += ",\"" + p.key + "\":";
+		if (auto i = std::get_if<int64_t>(&p.value))
+			out += std::to_string(*i);
+		else
+			out += json_string(std::get<std::string>(p.value));
+	}
 	if (info)
 	{
 		std::string rates;
@@ -188,8 +190,8 @@ std::string ControlServer::status()
 	snprintf(num, sizeof num,
 	         ",\"stream\":{\"frames\":%" PRIu64 ",\"bitrate_mbps\":%.1f,\"target_mbps\":%.1f,\"encode_ms\":%.2f,"
 	         "\"decode_ms\":%.2f,\"pipeline_ms\":%.2f}}",
-	         s.frames_sent.load(), last_mbps, session.bitrate_bps() / 1e6, s.last_encode_ns / 1e6,
-	         s.last_feedback_decode_ns / 1e6, pipeline);
+	         c.frames_sent, last_mbps, control.bitrate_bps() / 1e6, c.last_encode_ns / 1e6, c.last_decode_ns / 1e6,
+	         pipeline);
 	return out + num;
 }
 } // namespace vrhost

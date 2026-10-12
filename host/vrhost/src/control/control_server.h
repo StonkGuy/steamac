@@ -2,6 +2,7 @@
 // Status/pairing control socket of steamac-vrhost (`--control-socket PATH`), for the launcher's VR panel.
 // Contract: docs/vr-interfaces.md section 5. AF_UNIX SOCK_STREAM, one request line per connection, one JSON
 // object line back, then close. Requests: "status", "headsets", "pair on", "pair off", "unpair NAME", "unpair-all".
+// Adapter-neutral: it talks to the session through SessionControl (WiVRn, Virtual Desktop, ...).
 #pragma once
 
 #include <atomic>
@@ -12,8 +13,7 @@
 
 namespace vrhost
 {
-class WivrnSession;
-class KnownKeys;
+class SessionControl;
 
 class ControlServer
 {
@@ -23,7 +23,7 @@ public:
 		std::function<double()> pipeline_latency_ms;      // game frame submit → sent, p50 (0 = unknown)
 		std::function<void(const std::string &)> pin_changed; // new PIN ("" = pairing off), e.g. for --show-pin
 	};
-	ControlServer(std::string path, WivrnSession &, Hooks = {});
+	ControlServer(std::string path, SessionControl &, Hooks = {});
 	~ControlServer();
 	ControlServer(const ControlServer &) = delete;
 	ControlServer & operator=(const ControlServer &) = delete;
@@ -36,7 +36,7 @@ public:
 
 private:
 	std::string path;
-	WivrnSession & session;
+	SessionControl & control;
 	Hooks hooks;
 	int fd = -1;
 	std::atomic<bool> quit{false};
