@@ -35,8 +35,8 @@ machine; nothing here changes that.
 ## GPU tests
 
 The macOS runners are virtual machines whose GPU is a paravirtual Metal device. It lacks features that every
-Apple-silicon Mac has (mesh shaders, which MoltenVK's geometry shaders use; Metal 4 for KosmicKrisp). When the
-workflow finds that device, it sets `MVK_SKIP_REPRO=1` (`host/moltenvk/build.sh`: the probe still runs, the repros
+Apple-silicon Mac has (mesh shaders, which MoltenVK's geometry shaders use; Metal 4 for KosmicKrisp). On a
+GitHub-hosted runner the workflow therefore sets `MVK_SKIP_REPRO=1` (`host/moltenvk/build.sh`: the probe still runs, the repros
 do not) and `KK_SKIP_HOST_TESTS=1` (`host/kosmickrisp/build.sh`). Before a DMG is published, the skipped suites
 run on a Mac against the dylibs inside it:
 
