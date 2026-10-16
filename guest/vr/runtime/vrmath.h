@@ -78,6 +78,17 @@ inline vr::TrackedDevicePose_t to_openvr(const svr_pose &p, bool connected) {
   return t;
 }
 
+// GetProjectionRaw tangents from an OpenXR-style FOV (radians: left, right, up, down; left/down negative). SteamVR
+// returns pfTop = tan(down) (negative) and pfBottom = tan(up): "top" and "bottom" are the bottom and top planes of a
+// y-up view (OpenComposite XrHMD::GetProjectionRaw does the same, from SteamVR's numbers), which is what
+// projection() below (Valve's ComposeProjection) needs to put the up edge at NDC y = +1.
+inline void raw_tangents(const float fov[4], float *l, float *r, float *t, float *b) {
+  if (l) *l = std::tan(fov[0]);
+  if (r) *r = std::tan(fov[1]);
+  if (t) *t = std::tan(fov[3]);
+  if (b) *b = std::tan(fov[2]);
+}
+
 // OpenVR projection from raw tangents (GetProjectionRaw values), D3D convention as SteamVR returns it.
 inline vr::HmdMatrix44_t projection(float l, float r, float t, float b, float zn, float zf) {
   vr::HmdMatrix44_t m{};

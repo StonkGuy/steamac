@@ -18,6 +18,9 @@
 * Known macOS difference not shimmed: `UDP::receive_from_raw()` sizes its buffer with
   `recvfrom(MSG_PEEK | MSG_TRUNC)`, which returns the datagram length on Linux and 0 on macOS. steamac-vrhost does not
   call it (the handshake peeks the sender with `recvfrom(MSG_PEEK)` and lets `UDP::receive()` read and decrypt).
+* macOS reports the IPv4 sender of a datagram on the dual-stack (AF_INET6) stream socket as a `sockaddr_in`, where Linux
+  gives a v4-mapped `sockaddr_in6`; the handshake maps it before comparing it with the control socket's peer
+  (`stream_sender()` in `src/wivrn/wivrn_session.cpp`, loopback test case 8).
 * Protocol hash of this tree: `fc26e619b7ab80f8` (`steamac-vrhost --protocol`, pinned in `tests/test_protocol.cpp`).
   WiVRn `master` at `bc3e374` (2026-10-11) has no packet/serialization change since v26.9 (comment-only diff).
 

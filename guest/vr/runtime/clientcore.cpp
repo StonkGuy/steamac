@@ -54,7 +54,9 @@ class ClientCore : public IVRClientCore {
     if (type == vr::VRApplication_Utility || type == vr::VRApplication_Background) {
       // tools may run without a headset; they still get the interfaces
     }
-    return Runtime::get().init(type);
+    vr::EVRInitError e = Runtime::get().init(type);
+    if (e == vr::VRInitError_None) input_startup_info(startup);  // after the hello: the controller type picks the bindings
+    return e;
   }
   void Cleanup() override { Runtime::get().shutdown(); }
   vr::EVRInitError IsInterfaceVersionValid(const char *v) override {

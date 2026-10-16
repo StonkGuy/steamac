@@ -12,6 +12,7 @@
 #include "session/clock.h"
 #include "wivrn/wivrn_session.h"
 
+#include <atomic>
 #include <csignal>
 #include <fcntl.h>
 #include <future>
@@ -316,6 +317,60 @@ int main()
 		srv.wait_disconnect();
 		auto unknown = run_fake_headset({.port = port, .frames = 5, .timeout_ms = 3000});
 		CHECK(unknown.handshake_state == "pairing_disabled");
+	}
+	{
+		// 7. the headset leaves while the host's audio, haptics and microphone paths are sending: the failed send must
+		// not escape on those threads (the receive loop handles the disconnect, as for video shards)
+		Server srv({.encryption = WivrnConfig::Encryption::disabled});
+		std::atomic<bool> done{false};
+		std::atomic<int> sends_after_close{0};
+		std::atomic<bool> closed{false};
+		// back to back from two threads: the first send after the headset's reset fails, before the receive loop has
+		// dropped the connection
+		auto send_loop = [&] {
+			std::vector<int16_t> pcm(96, 1000);
+			for (bool mic = false; not done; mic = not mic)
+			{
+				srv.session.send_audio(pcm);
+				srv.session.haptics(Device::left_grip, 0.01f, 160, 0.5f);
+				srv.session.set_microphone(mic);
+				if (closed)
+					sends_after_close++;
+			}
+		};
+		std::thread sender(send_loop), sender2(send_loop);
+		auto r = run_fake_headset({.port = srv.session.port(), .frames = 10});
+		closed = true; // the fake headset's sockets are closed when it returns
+		CHECK(r.error.empty() and r.decoded[0] >= 10);
+		srv.wait_disconnect();
+		// keep sending into the dead connection's teardown window and beyond
+		for (int i = 0; i < 200 and sends_after_close < 50; ++i)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		done = true;
+		sender.join();
+		sender2.join();
+		CHECK(sends_after_close >= 50 and not srv.session.connected());
+	}
+	{
+		// 8. an IPv4 headset (the dual-stack listener sees a v4-mapped peer): its UDP stream handshake must be taken as
+		// from the control peer (macOS reports the IPv4 sender of the AF_INET6 stream socket as a sockaddr_in), with
+		// encryption off and with PIN pairing after the user took a while to type the PIN
+		Server srv({.encryption = WivrnConfig::Encryption::disabled});
+		auto r = run_fake_headset({.port = srv.session.port(), .host = "127.0.0.1", .frames = 10, .timeout_ms = 15000});
+		print("ipv4", r);
+		CHECK(r.error.empty() and r.handshake_state == "encryption_disabled" and r.control_shards == 0);
+		CHECK(r.decoded[0] >= 10 and r.decoded[1] >= 10);
+		srv.wait_disconnect();
+	}
+	{
+		Server srv({.encryption = WivrnConfig::Encryption::pairing, .pin = "271828", .known_keys_file = keys_file});
+		auto r = run_fake_headset({.port = srv.session.port(), .host = "127.0.0.1", .pin_delay_ms = 1500, .frames = 10,
+		                           .timeout_ms = 15000, .pin = "271828"});
+		print("ipv4 pairing", r);
+		CHECK(r.error.empty() and r.handshake_state == "pin_needed" and r.encrypted and r.control_shards == 0);
+		CHECK(r.decoded[0] >= 10 and r.decoded[1] >= 10);
+		CHECK(srv.session.stats().paired == 1);
+		srv.wait_disconnect();
 	}
 	std::filesystem::remove_all(dir_template);
 	test_audio();

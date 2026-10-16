@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Process-wide runtime state behind the OpenVR interfaces: host link, frame clock, poses, events, submits.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -48,6 +49,15 @@ class Runtime {
   int64_t last_vsync_guest() const;
   uint32_t frames_presented() const { return frames_presented_; }
 
+  // Which pose APIs the app uses and what they answered, summarised in one info line every ~5 s (a live run shows
+  // whether e.g. the head pose the app reads is valid and moving). Relaxed counters: no cost beyond an increment.
+  struct PoseStats {
+    std::atomic<uint32_t> wait{0}, wait_fail{0}, last_poses{0}, last_pose_index{0}, abs_pose{0}, abs_seated{0},
+        pose_action{0}, pose_action_inactive{0}, connected_query{0}, connected_false_hmd{0};
+  };
+  PoseStats &pose_stats() { return pose_stats_; }
+  void note_render_head(const vr::TrackedDevicePose_t &p);
+
   // input snapshot (the frame's)
   float input(int hand, int id) const;
   uint32_t profile() const;
@@ -77,13 +87,24 @@ class Runtime {
   mutable std::mutex m_;
   std::unique_ptr<Transport> transport_;
   svr_hello_rep hello_{};
+  bool hello_view_ = false;  // hello_ carries a connected headset's eye size / FOV / IPD
   svr_frame_rep latest_{};  // newest snapshot
   svr_frame_rep frame_{};   // snapshot of the frame being rendered
   int64_t clock_offset_ = 0;  // guest = host + offset
   int64_t last_vsync_ = 0;
   uint32_t frames_presented_ = 0;
+  PoseStats pose_stats_;
+  int64_t stats_logged_ = 0;
+  float stats_head_min_[3] = {1e9f, 1e9f, 1e9f}, stats_head_max_[3] = {-1e9f, -1e9f, -1e9f};
+  uint32_t stats_head_invalid_ = 0;
   svr_wmtvr_submit pending_{};
   bool pending_eye_[2] = {};
+  // diagnostics: the last logged submit geometry per eye and head pose flags (logged when they change)
+  struct SubmitGeometry {
+    uint32_t width, height, format, array_size, slice, x, y, w, h, flags;
+  };
+  SubmitGeometry logged_geometry_[2] = {};
+  uint32_t logged_head_flags_ = ~0u;
   bool pending_valid_ = false;
   std::deque<vr::VREvent_t> events_;
   bool connected_[kDeviceCount] = {};

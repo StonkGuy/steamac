@@ -11,6 +11,7 @@
 #include "compositor/vrlink_server.h"
 #include "session/vr_session.h"
 
+#include <array>
 #include <functional>
 
 #include <atomic>
@@ -83,6 +84,7 @@ private:
 	VrSession & session;
 	std::mutex m;
 	uint32_t w = 0, h = 0;
+	std::array<uint32_t, 6> last_geometry{}; // eye image sizes, format, flags of the last frame (logged on change)
 	std::unique_ptr<SessionEncoderSink> sink;
 	std::unique_ptr<CompositorBridge> bridge;
 	PipelineStats st;

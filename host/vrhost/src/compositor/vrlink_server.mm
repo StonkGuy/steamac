@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include <cmath>
 #include "vrlink_server.h"
 #include "vrlink.h"
 
@@ -310,13 +311,24 @@ CompositorBridge::CompositorBridge(uint32_t out_w, uint32_t out_h, EyeEncoderSin
 {
 }
 
+void CompositorBridge::eye_offsets(const LinkFrame & f, float eye_x[2])
+{
+	// The eye positions are in stage space; their distance does not depend on where the head looks, their stage x
+	// difference does (0 at 90 degrees yaw), and the foveation centre must not move with the head.
+	float d2 = 0;
+	for (int i = 4; i < 7; i++)
+		d2 += (f.pose[1][i] - f.pose[0][i]) * (f.pose[1][i] - f.pose[0][i]);
+	float half = std::sqrt(d2) / 2;
+	eye_x[0] = -half;
+	eye_x[1] = half;
+}
+
 void CompositorBridge::operator()(const LinkFrame & f)
 {
 	CVPixelBufferRef out[2] = {encoder.acquire(0), encoder.acquire(1)};
 	FoveationParams params[2];
-	// eye x from the per-eye positions (stage space; the difference is what matters for convergence)
-	float mid = (f.pose[0][4] + f.pose[1][4]) / 2;
-	float eye_x[2] = {f.pose[0][4] - mid, f.pose[1][4] - mid};
+	float eye_x[2];
+	eye_offsets(f, eye_x);
 	int64_t t0 = now_ns();
 	bool ok = out[0] && out[1] && compositor.compose(f.eye, f.fov, eye_x, out, params);
 	int64_t t1 = now_ns();

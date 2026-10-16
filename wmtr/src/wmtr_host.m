@@ -148,6 +148,9 @@ static const char *const call_name[WMTR_NCALLS] = {
 static _Atomic uint64_t cs_count[WMTR_NCALLS], cs_sync[WMTR_NCALLS], cs_ns[WMTR_NCALLS];
 /* executor sleeps (ring empty after the spin) and kicks (a client woke it): rows 200/201, class 9 */
 static _Atomic uint64_t cs_sleeps, cs_kicks;
+/* the process's VR link, for rows 210-213 (class 9): frames in count, the stage's cumulative time in exec_ns */
+static _Atomic(struct wmtr_vr *) cs_vr;
+static const char *const cs_vr_stage[WMTR_VR_STAGES] = {"_vr_submit_to_encoded", "_vr_encoded_to_rendered", "_vr_copy", "_vr_copied_to_sent"};
 static FILE *cs_file;
 static pthread_mutex_t cs_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -165,7 +168,25 @@ callstats_dump(void) {
   }
   fprintf(cs_file, "%llu,200,_executor_sleeps,9,%llu,0,0\n%llu,201,_kicks,9,%llu,0,0\n", (unsigned long long)t,
           (unsigned long long)atomic_load(&cs_sleeps), (unsigned long long)t, (unsigned long long)atomic_load(&cs_kicks));
+  struct wmtr_vr *vr = atomic_load(&cs_vr);
+  if (vr) {
+    struct wmtr_vr_stats v;
+    wmtr_vr_get_stats(vr, &v);
+    for (int i = 0; i < WMTR_VR_STAGES; i++)
+      fprintf(cs_file, "%llu,%d,%s,9,%llu,0,%llu\n", (unsigned long long)t, 210 + i, cs_vr_stage[i],
+              (unsigned long long)v.stage_frames, (unsigned long long)v.stage_ns[i]);
+    fprintf(cs_file, "%llu,214,_vr_dropped,9,%llu,0,0\n", (unsigned long long)t, (unsigned long long)v.dropped);
+  }
   fflush(cs_file);
+  pthread_mutex_unlock(&cs_lock);
+}
+
+/* the VR link the snapshots report: `now` replaces it, `was` is forgotten before its owner destroys it */
+static void
+callstats_vr(struct wmtr_vr *was, struct wmtr_vr *now) {
+  pthread_mutex_lock(&cs_lock);
+  if (now) atomic_store(&cs_vr, now);
+  else if (was && atomic_load(&cs_vr) == was) atomic_store(&cs_vr, NULL);
   pthread_mutex_unlock(&cs_lock);
 }
 
@@ -575,6 +596,12 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     if (lid) push_event(h, lid, 0);
     return STATUS_SUCCESS;
   }
+  case 17: { /* encodeSignalEvent: with a VR link, the time is kept for the exporter's stage split */
+    struct wmtr_vr *vr = atomic_load(&h->vr);
+    if (vr) wmtr_vr_note_signal(vr, ((struct unixcall_generic_obj_obj_uint64_noret *)params)->arg0,
+                                ((struct unixcall_generic_obj_obj_uint64_noret *)params)->arg1);
+    break;
+  }
   case 146: /* WMTVRSubmit: the executor's VR exporter (not DXMT's unix side, which has no VR host) */
     return wmtr_vr_submit(atomic_load(&h->vr), &((struct unixcall_wmtvr_submit *)params)->info);
   case 112: case 113: case 115: case 117: case 119: if (h->ops->map_path) {
@@ -795,6 +822,7 @@ vr_shared_release(struct wmtr_vr *vr) {
   pthread_mutex_lock(&shared_vr_lock);
   if (vr && vr == shared_vr && shared_vr_users && !--shared_vr_users) {
     shared_vr = NULL;
+    callstats_vr(vr, NULL);
     wmtr_vr_destroy(vr);
   }
   pthread_mutex_unlock(&shared_vr_lock);
@@ -830,11 +858,11 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   if (vf && *vf && vm && *vm) {
     /* steamac-vm (same process) holds the socketpair end and spawned steamac-vrhost with the other one */
     struct wmtr_vr *vr = vr_shared_link(vf, vm);
-    if (vr) { atomic_store(&h->vr, vr); h->owns_vr = 2; } /* shared link ref held until destroy */
+    if (vr) { atomic_store(&h->vr, vr); h->owns_vr = 2; callstats_vr(NULL, vr); } /* shared link ref held until destroy */
   } else if (vs && *vs && vm && *vm) {
     struct wmtr_vr *vr = wmtr_vr_connect(vs, vm);
     LOG(vr ? 1 : 0, "VR link %s (%s, %s)\n", vr ? "connected" : "failed", vs, vm);
-    if (vr) { atomic_store(&h->vr, vr); h->owns_vr = 1; }
+    if (vr) { atomic_store(&h->vr, vr); h->owns_vr = 1; callstats_vr(NULL, vr); }
   }
   pthread_create(&h->thread, &a, executor, h);
   return h;
@@ -842,6 +870,7 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
 
 void
 wmtr_host_set_vr(struct wmtr_host *h, struct wmtr_vr *vr) {
+  callstats_vr(atomic_load(&h->vr), vr);
   atomic_store(&h->vr, vr);
 }
 
@@ -882,7 +911,7 @@ wmtr_host_destroy(struct wmtr_host *h) {
   if (h->owns_vr) {
     struct wmtr_vr *vr = atomic_exchange(&h->vr, NULL);
     if (h->owns_vr == 2) vr_shared_release(vr);
-    else wmtr_vr_destroy(vr);
+    else { callstats_vr(vr, NULL); wmtr_vr_destroy(vr); }
     h->owns_vr = 0;
   }
 }

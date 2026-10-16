@@ -1,0 +1,205 @@
+From 0d14d6e0402e175d196e5e02cf3c6ea639a6b506 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Fri, 16 Oct 2026 11:54:16 +0300
+Subject: [PATCH] rutabaga_gfx(macos): wmtr: release an arena blob's memory on
+ detach
+
+A wmtr arena blob is POSIX shared memory mapped three times: by the VMM
+for the guest (host mapping + Hypervisor.framework stage-2) and by this
+context for the executor. When the guest closes its last handle the
+kernel detaches the resource, then unmaps (the VMM drops the stage-2
+mapping) and unrefs it (the VMM drops its mapping and the fd), but the
+context kept its own mapping and the blob table entry until the process
+ended. The shared memory therefore stayed alive and charged to the VMM's
+phys_footprint after the guest let go of it.
+
+detach() now forgets the blob (the executor no longer resolves it) and
+overlays the context's mapping with fresh anonymous memory, so the shm
+object is freed once the VMM's unref closes the fd. The address range is
+kept reserved rather than unmapped: a guest that releases a blob it still
+uses gets zeros on the host side instead of a fault in the executor. The
+ring blob (0) is left alone. The wmtr client (steamac wmtr) only releases
+an arena blob with no live range and no host buffer in it: idle blobs
+beyond a warm reserve after a load peak. Cost: only on detach; nothing
+changes for clients that never release blobs.
+
+Upstream state: wmtr is steamac's own context type (patch 0021); stock
+libkrun v1.19.6 has no equivalent.
+
+Test: wmtr::tests::detach_releases_the_blob_memory (no host library or
+GPU): a 64 MiB blob filled through the executor's view must leave the
+process footprint after detach + unref, stop resolving, the ring must
+survive a detach, and the number can be created again. Before: FAIL
+(footprint 65 -> 65 MiB).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/rutabaga_gfx/src/wmtr.rs | 123 ++++++++++++++++++++++++++++++++++-
+ 1 file changed, 122 insertions(+), 1 deletion(-)
+
+diff --git a/src/rutabaga_gfx/src/wmtr.rs b/src/rutabaga_gfx/src/wmtr.rs
+index e86fcb6..a9c5e24 100644
+--- a/src/rutabaga_gfx/src/wmtr.rs
++++ b/src/rutabaga_gfx/src/wmtr.rs
+@@ -189,7 +189,10 @@ pub struct WmtrContext {
+     shared: Arc<Shared>,
+     ops: Box<WmtrHostOps>,
+     pending: BTreeMap<u8, (u32, u64)>,
++    /// Every address range this context mapped (unmapped when the context goes).
+     maps: Vec<(usize, u64)>,
++    /// resource id -> (blob number, address, size) of the arena blobs the guest still holds.
++    resource_blobs: BTreeMap<u32, (u32, usize, u64)>,
+ }
+ 
+ // SAFETY: the raw pointers are only host addresses of mappings this context owns.
+@@ -241,6 +244,7 @@ impl RutabagaContext for WmtrContext {
+         };
+         self.shared.blobs.lock().unwrap().insert(blob, (ptr, size));
+         self.maps.push((ptr, size));
++        self.resource_blobs.insert(resource_id, (blob, ptr, size));
+         // SAFETY: fd is a fresh descriptor we own.
+         let os_handle = unsafe { SafeDescriptor::from_raw_descriptor(fd) };
+         Ok(RutabagaResource {
+@@ -305,7 +309,41 @@ impl RutabagaContext for WmtrContext {
+ 
+     fn attach(&mut self, _resource: &mut RutabagaResource) {}
+ 
+-    fn detach(&mut self, _resource: &RutabagaResource) {}
++    /// The guest closed its last handle of a blob. The client only does that for an arena blob with
++    /// no live range and no buffer left (an idle blob trimmed after a load peak), so the executor
++    /// no longer needs it: forget the blob and drop this process's mapping of the shared memory.
++    /// The VMM's unmap and unref that follow release the rest, so the pages leave the footprint.
++    /// The address range is overlaid with fresh anonymous memory instead of unmapped: a guest that
++    /// releases a blob it still uses gets zeros on the host side, never a fault in the executor.
++    fn detach(&mut self, resource: &RutabagaResource) {
++        let Some(&(blob, ptr, size)) = self.resource_blobs.get(&resource.resource_id) else {
++            return;
++        };
++        if blob == 0 {
++            return; // the ring lives as long as the executor
++        }
++        self.resource_blobs.remove(&resource.resource_id);
++        {
++            let mut blobs = self.shared.blobs.lock().unwrap();
++            if blobs.get(&blob) == Some(&(ptr, size)) {
++                blobs.remove(&blob);
++            }
++        }
++        // SAFETY: replaces this context's own mapping of the blob, which nothing else refers to.
++        let p = unsafe {
++            libc::mmap(
++                ptr as *mut c_void,
++                size as usize,
++                libc::PROT_READ | libc::PROT_WRITE,
++                libc::MAP_ANON | libc::MAP_PRIVATE | libc::MAP_FIXED,
++                -1,
++                0,
++            )
++        };
++        if p == libc::MAP_FAILED {
++            error!("wmtr: cannot release blob {blob} ({size} bytes)");
++        }
++    }
+ 
+     fn context_create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
+         let Some((slot, seq)) = self.pending.remove(&fence.ring_idx) else {
+@@ -406,6 +444,7 @@ impl RutabagaComponent for Wmtr {
+             ops,
+             pending: BTreeMap::new(),
+             maps: Vec::new(),
++            resource_blobs: BTreeMap::new(),
+         }))
+     }
+ }
+@@ -418,6 +457,88 @@ mod tests {
+ 
+     type Layout = unsafe extern "C" fn(*mut u64, *mut u64, *mut u64, *mut u64);
+ 
++    fn footprint() -> u64 {
++        // SAFETY: an all-zero rusage_info_v2 is a valid out-parameter.
++        let mut ri: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
++        // SAFETY: ri is a rusage_info_v2, the size flavor RUSAGE_INFO_V2 writes.
++        let rc = unsafe {
++            libc::proc_pid_rusage(
++                std::process::id() as i32,
++                libc::RUSAGE_INFO_V2,
++                &mut ri as *mut _ as *mut libc::rusage_info_t,
++            )
++        };
++        assert_eq!(rc, 0);
++        ri.ri_phys_footprint
++    }
++
++    unsafe extern "C" fn no_create(_: *mut c_void, _: *const WmtrHostOps, _: *mut c_void) -> *mut c_void {
++        std::ptr::null_mut()
++    }
++    unsafe extern "C" fn no_void(_: *mut c_void) {}
++    unsafe extern "C" fn no_progress(_: *mut c_void, _: u32) -> u64 {
++        0
++    }
++
++    /// An arena blob the guest releases (detach, then the VMM's unref drops the fd) leaves this
++    /// process's footprint and the executor's blob table; the ring blob stays; the number can be
++    /// added again. No host library or GPU needed: blobs are plain shared memory.
++    #[test]
++    fn detach_releases_the_blob_memory() {
++        let lib = HostLib {
++            create: no_create,
++            kick: no_void,
++            destroy: no_void,
++            progress: no_progress,
++            create_view: None,
++            release_view: None,
++            map_path: None,
++        };
++        let comp = Wmtr { lib, fence_handler: RutabagaFenceHandler::new(|_| {}) };
++        let mut ctx =
++            comp.create_context(1, RUTABAGA_CAPSET_WMTR, None, RutabagaFenceHandler::new(|_| {})).unwrap();
++        let wmtr = |c: &mut Box<dyn RutabagaContext>| -> *const Shared {
++            // SAFETY: the only RutabagaContext this component creates is a WmtrContext.
++            let w = unsafe { &*(c.as_ref() as *const dyn RutabagaContext as *const WmtrContext) };
++            Arc::as_ptr(&w.shared)
++        };
++        let shared = wmtr(&mut ctx);
++        let blob_ptr = |blob: u32| {
++            let mut n = 0u64;
++            (cb_blob_ptr(shared as *mut c_void, blob, &mut n) as *mut u8, n)
++        };
++        let size: u64 = 64 << 20;
++        let create = |c: &mut Box<dyn RutabagaContext>, res: u32, blob: u64, size: u64| {
++            c.context_create_blob(res, ResourceCreateBlob { blob_mem: 2, blob_flags: 3, blob_id: blob, size }, None)
++                .unwrap()
++        };
++        let ring = create(&mut ctx, 1, 0, 1 << 20);
++        let res = create(&mut ctx, 2, 3, size);
++        let (p, n) = blob_ptr(3);
++        assert!(!p.is_null() && n == size);
++        // SAFETY: p is the context's mapping of `size` bytes.
++        unsafe { std::ptr::write_bytes(p, 0x5a, size as usize) };
++        let before = footprint();
++        ctx.detach(&res);
++        drop(res); // the VMM's unref closes the last descriptor
++        let after = footprint();
++        assert!(
++            before >= after + size * 9 / 10,
++            "footprint {} -> {} MiB after releasing a {} MiB blob",
++            before >> 20,
++            after >> 20,
++            size >> 20
++        );
++        assert!(blob_ptr(3).0.is_null(), "released blob still resolves for the executor");
++        ctx.detach(&ring);
++        assert!(!blob_ptr(0).0.is_null(), "detaching the ring must not drop it");
++        let again = create(&mut ctx, 3, 3, size);
++        let (p2, n2) = blob_ptr(3);
++        assert!(!p2.is_null() && n2 == size);
++        drop(again);
++        drop(ctx);
++    }
++
+     fn layout(path: &str) -> (u64, u64, u64, u64) {
+         let c = CString::new(path).unwrap();
+         // SAFETY: test-only dlopen of the library under test.
+-- 
+2.39.5 (Apple Git-154)
+

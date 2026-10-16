@@ -81,14 +81,16 @@ apply_dxmt() {
         # optional parts: a Proton without the directory, or a payload without the file, leave it to Proton
         [[ -f $D/$f.dll ]] || continue
         if [[ ! -f $PAYLOAD/x86_64-windows/$f.dll ]]; then
-            # an earlier payload had it: Proton's kept original goes back unless Proton was updated since (then
-            # the file there is Proton's new one)
-            if [[ -f $B/$f.dll ]]; then
-                if ! is_dxmt "$B/$f.dll" && [[ $(vkey "$p") == "$(cat "$B/version" 2>/dev/null)" ]] && ! cmp -s "$B/$f.dll" "$D/$f.dll"; then
-                    cp -f "$B/$f.dll" "$D/$f.dll.steamac-tmp" && mv -f "$D/$f.dll.steamac-tmp" "$D/$f.dll" && changed=1
-                fi
-                rm -f "$B/$f.dll"
+            # an earlier payload had it: Proton's kept original goes back where DXMT's file is still there (also a
+            # file installed before checksums were kept: Proton's version is still the one the original was kept from)
+            if [[ -f $B/$f.dll ]] && ! is_dxmt "$B/$f.dll" && { ours "$D/$f.dll" || is_dxmt "$D/$f.dll" \
+                || { [[ $(vkey "$p") == "$(cat "$B/version" 2>/dev/null)" ]] && ! cmp -s "$B/$f.dll" "$D/$f.dll"; }; }; then
+                cp -f "$B/$f.dll" "$D/$f.dll.steamac-tmp" && mv -f "$D/$f.dll.steamac-tmp" "$D/$f.dll" && changed=1 \
+                    || { log "cannot put Proton's $f.dll back in $p"; continue; }
+            elif [[ ! -f $B/$f.dll ]] && is_dxmt "$D/$f.dll"; then
+                log "WARNING: no original of $f.dll kept for $p; DXMT's file stays. Repair: in Steam, $(basename "$p") > Properties > Installed Files > Verify integrity of tool files"
             fi
+            rm -f "$B/$f.dll"
             continue
         fi
         # a kept original that is DXMT's (kept by an older version of this script) is not Proton's: drop it
@@ -119,24 +121,42 @@ apply_dxmt() {
     return 0
 }
 
+# DXMT's file in Proton's tree: this payload's native copy, one this script installed, or any other DXMT build
+# (another steamac layer's payload, e.g. after switching between app bundles that share the guest disk)
+dxmt_installed() { # payload file, installed file
+    { [[ -f $1 ]] && same_as_native "$1" "$2"; } || ours "$2" || is_dxmt "$2"
+}
+
 restore() {
     local p=$1 W=$1/files/lib/wine B; B=$STATE/orig/$(key "$p")
-    local D f d
+    local D f d keep=0 broken=""
     for d in $DLLS; do
         f=${d#*/}; D=$W/${d%/*}/x86_64-windows
+        [[ -f $D/$f.dll ]] || continue
         # a kept original must be Proton's: one that is DXMT's was kept by an older version of this script
         if [[ -f $B/$f.dll ]] && is_dxmt "$B/$f.dll"; then
             log "kept original $f.dll of $p is DXMT's, not restoring it: in Steam run Proton's Properties > Installed Files > Verify integrity"
-            continue
+            rm -f "$B/$f.dll"
         fi
-        # put Proton's file back only where DXMT's is still there (an update may have restored it already)
-        if [[ -f $B/$f.dll ]] && { same_as_native "$PAYLOAD/x86_64-windows/$f.dll" "$D/$f.dll" || ours "$D/$f.dll"; }; then
-            cp -f "$B/$f.dll" "$D/$f.dll.steamac-tmp" && mv -f "$D/$f.dll.steamac-tmp" "$D/$f.dll"
+        # Proton's own file is there (never replaced, or an update restored it): nothing to do; a kept original
+        # is then stale and goes with $B
+        dxmt_installed "$PAYLOAD/x86_64-windows/$f.dll" "$D/$f.dll" || continue
+        if [[ -f $B/$f.dll ]]; then
+            # a kept original is deleted only once it is back in place
+            if ! { cp -f "$B/$f.dll" "$D/$f.dll.steamac-tmp" && mv -f "$D/$f.dll.steamac-tmp" "$D/$f.dll"; }; then
+                log "cannot put Proton's $f.dll back in $p; keeping it in $B"; keep=1
+            fi
+        else
+            broken+=" $f.dll"
         fi
     done
     rm -f "$W/x86_64-windows/winemetal.dll" "$W/x86_64-unix/winemetal.so" "$W/$MARK" \
         "$1/files/share/default_pfx/drive_c/windows/system32/winemetal.dll"
-    rm -rf "$B"
+    (( keep )) || rm -rf "$B"
+    if [[ -n $broken ]]; then
+        log "WARNING: no original of${broken} kept for $p; DXMT's file stays and Direct3D 11 games on the Vulkan path will fail. Repair: in Steam, $(basename "$p") > Properties > Installed Files > Verify integrity of tool files"
+        return 1
+    fi
     log "Proton's DXVK back in $p"
 }
 

@@ -33,4 +33,5 @@ bool legacy_controller_state(int hand, vr::VRControllerState_t *state);
 
 // for tests: reset IVRInput state between runs in one process
 void input_reset();
+void input_startup_info(const char *startup_json);
 }  // namespace svr

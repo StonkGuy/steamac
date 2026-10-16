@@ -268,6 +268,18 @@ void VrPipeline::on_frame(const LinkFrame & f)
 		w = info->eye_width;
 		h = info->eye_height;
 	}
+	// what the game submits (after the exporter cut out its rect / slice): logged when it changes, so a live run shows
+	// whether each eye gets an eye-sized image or a whole double-wide frame
+	std::array<uint32_t, 6> geo{f.eye[0].w, f.eye[0].h, f.eye[1].w, f.eye[1].h, f.eye[0].pixel_format,
+	                            uint32_t(f.eye[0].flip_y) | uint32_t(f.eye[0].srgb) << 1};
+	if (geo != last_geometry)
+	{
+		last_geometry = geo;
+		printf("[vrhost] game eye images: left %ux%u right %ux%u, format %u%s%s; headset eye %ux%u, render fov L %.2f/%.2f/%.2f/%.2f\n",
+		       geo[0], geo[1], geo[2], geo[3], geo[4], f.eye[0].flip_y ? ", bottom-up" : "", f.eye[0].srgb ? ", sRGB" : "",
+		       info->render_eye_width, info->render_eye_height, f.fov[0].left, f.fov[0].right, f.fov[0].up, f.fov[0].down);
+		fflush(stdout);
+	}
 	(*bridge)(f);
 	int64_t sent = now_ns();
 	st.submitted++;

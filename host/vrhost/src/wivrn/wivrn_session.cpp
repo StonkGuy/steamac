@@ -332,6 +332,36 @@ struct WivrnSession::impl
 	void send_frame_eye(int eye, const Frame & f, uint64_t wire, CVPixelBufferRef buf);
 };
 
+// The sender of a datagram on the dual-stack (AF_INET6) stream socket as a sockaddr_in6. macOS reports an IPv4 sender
+// as a sockaddr_in (Linux: a v4-mapped sockaddr_in6, which WiVRn's server compares with the control socket's
+// v4-mapped peer); map it the same way, or every datagram of an IPv4 headset looks foreign.
+static sockaddr_in6 stream_sender(const sockaddr_storage & from)
+{
+	if (from.ss_family != AF_INET)
+		return reinterpret_cast<const sockaddr_in6 &>(from);
+	auto & v4 = reinterpret_cast<const sockaddr_in &>(from);
+	sockaddr_in6 v6{};
+	v6.sin6_family = AF_INET6;
+	v6.sin6_port = v4.sin_port;
+	v6.sin6_addr.s6_addr[10] = v6.sin6_addr.s6_addr[11] = 0xff;
+	memcpy(&v6.sin6_addr.s6_addr[12], &v4.sin_addr, 4);
+	return v6;
+}
+
+// "from_headset::pin_check_1" for the log
+template <typename T>
+static std::string packet_name()
+{
+	std::string f = __PRETTY_FUNCTION__; // "... [T = wivrn::from_headset::pin_check_1]"
+	auto b = f.find("T = "), e = f.rfind(']');
+	if (b == std::string::npos or e == std::string::npos or e < b)
+		return "packet";
+	f = f.substr(b + 4, e - b - 4);
+	if (f.starts_with("wivrn::"))
+		f.erase(0, 7);
+	return f;
+}
+
 // Throwing receive helper for the handshake phase.
 template <typename T>
 static T expect(control_socket & ctl, stream_socket * strm, std::chrono::milliseconds timeout, int * udp_port = nullptr,
@@ -357,11 +387,12 @@ static T expect(control_socket & ctl, stream_socket * strm, std::chrono::millise
 			// Not UDP::receive_from_raw(): it sizes the buffer with recvfrom(MSG_PEEK | MSG_TRUNC), which returns the
 			// datagram length on Linux but 0 on macOS. Peek the sender address, then let the socket read and decrypt
 			// the datagram (UDP::receive_raw, AES-CTR when encryption is on).
-			sockaddr_in6 from{};
-			socklen_t from_len = sizeof(from);
+			sockaddr_storage from_any{};
+			socklen_t from_len = sizeof(from_any);
 			uint8_t peek;
-			if (recvfrom(strm->get_fd(), &peek, 1, MSG_PEEK, (sockaddr *)&from, &from_len) < 0)
+			if (recvfrom(strm->get_fd(), &peek, 1, MSG_PEEK, (sockaddr *)&from_any, &from_len) < 0)
 				continue;
+			sockaddr_in6 from = stream_sender(from_any);
 			if (peer and memcmp(&from.sin6_addr, &peer->sin6_addr, sizeof(from.sin6_addr)) != 0)
 			{
 				recv(strm->get_fd(), &peek, 1, 0); // wrong sender, like wivrn_connection: drop it
@@ -395,7 +426,7 @@ static T expect(control_socket & ctl, stream_socket * strm, std::chrono::millise
 			throw std::runtime_error("unexpected packet during handshake (index " + std::to_string(pkt->index()) + ")");
 		}
 	}
-	throw std::runtime_error("handshake timeout");
+	throw std::runtime_error("handshake timeout (waiting for " + packet_name<T>() + ")");
 }
 
 void WivrnSession::impl::handshake(control_socket & ctl, stream_socket & strm, fh::headset_info_packet & out)
@@ -470,6 +501,7 @@ void WivrnSession::impl::handshake(control_socket & ctl, stream_socket & strm, f
 					ctl.send(th::pin_check_4{msg4});
 					if (not pin_match)
 						throw std::runtime_error("incorrect PIN from headset '" + hs.name + "'");
+					log("headset '" + hs.name + "': PIN ok");
 				}
 				catch (crypto::smp_cheated &)
 				{
@@ -617,14 +649,15 @@ void WivrnSession::impl::on_headset_info(const fh::headset_info_packet & hi)
 	if (h.microphone)
 		ad.microphone = th::audio_stream_description::device{uint8_t(h.microphone->channels), h.microphone->rate};
 	if (ad.speaker or ad.microphone)
-	{
 		control->send(std::move(ad));
-		control->send(th::feature_control{th::feature_control::microphone, h.microphone and mic_wanted.load()});
-	}
 
 	{
+		// with info, under the lock set_microphone takes: a switch while this runs is either read here or sent by
+		// set_microphone, never lost in between
 		std::lock_guard lock(cnx_mutex);
 		info = h;
+		if (ad.speaker or ad.microphone)
+			control->send(th::feature_control{th::feature_control::microphone, h.microphone and mic_wanted.load()});
 	}
 	char buf[160];
 	snprintf(buf, sizeof buf, "headset '%s': stream %ux%u per eye, %.0f Hz, %s", h.name.c_str(), h.eye_width,
@@ -1137,10 +1170,17 @@ void WivrnSession::haptics(Device d, float duration_s, float frequency, float am
 	        .amplitude = clean(amplitude, 1.f),
 	};
 	p->stats.haptics++;
-	if (p->stream)
-		p->stream->send(std::move(h));
-	else if (p->control)
-		p->control->send(std::move(h));
+	try
+	{
+		if (p->stream)
+			p->stream->send(std::move(h));
+		else if (p->control)
+			p->control->send(std::move(h));
+	}
+	catch (...)
+	{
+		// called from the link / audio threads: a headset that just left is the receive loop's to handle
+	}
 }
 
 void WivrnSession::request_idr()
@@ -1156,10 +1196,17 @@ void WivrnSession::send_audio(std::span<const int16_t> pcm)
 	if (not p->control)
 		return;
 	// Like WiVRn's speaker_process: one packet per quantum on the control channel, stamped with the send time.
-	p->control->send(wivrn::audio_data{
-	        .timestamp = p->clock.to_headset(now_ns()),
-	        .payload = std::span(reinterpret_cast<uint8_t *>(const_cast<int16_t *>(pcm.data())), pcm.size_bytes()),
-	});
+	try
+	{
+		p->control->send(wivrn::audio_data{
+		        .timestamp = p->clock.to_headset(now_ns()),
+		        .payload = std::span(reinterpret_cast<uint8_t *>(const_cast<int16_t *>(pcm.data())), pcm.size_bytes()),
+		});
+	}
+	catch (...)
+	{
+		return; // the audio thread's send: a headset that just left is the receive loop's to handle
+	}
 	p->stats.audio_packets++;
 }
 
@@ -1169,6 +1216,13 @@ void WivrnSession::set_microphone(bool on)
 		return;
 	std::lock_guard lock(p->cnx_mutex);
 	if (p->control and p->info and p->info->microphone)
-		p->control->send(th::feature_control{th::feature_control::microphone, on});
+		try
+		{
+			p->control->send(th::feature_control{th::feature_control::microphone, on});
+		}
+		catch (...)
+		{
+			// as send_audio: the receive loop handles the disconnect
+		}
 }
 } // namespace vrhost

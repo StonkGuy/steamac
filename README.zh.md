@@ -21,8 +21,9 @@ Epic Games、VRChat 及 DXMT 作者均无关联。
 请以 pull request 的形式提交到 [StonkGuy/FEX](https://github.com/StonkGuy/FEX) 当前的 `eac-<release>` 分支，并在其
 `eac-tests/` 中附带测试。
 
-状态：仅在一台 Mac 和一款带反作弊的游戏上验证过。默认使用 Vulkan 路径；DXMT 需在设置中开启。已公布的 VRChat 帧率
-只有 Vulkan 路径的（轻量世界、1280x800 下约 26-30 fps）；DXMT 路径暂无公布数据。
+状态：仅在一台 Mac（M2、16 GB）上验证过。VRChat 在两条图形路径上都通过 EAC 并进入世界。默认使用 Vulkan 路径；DXMT
+需在设置中开启。在这台 Mac 上实测：VRChat 在 Vulkan 上约 29-44 fps，在 DXMT 上约 76-78 fps（单次测试，见
+[docs/eac-performance.md](docs/eac-performance.md)）。
 
 ## 要求
 
@@ -36,7 +37,7 @@ Epic Games、VRChat 及 DXMT 作者均无关联。
 
 ## 安装与首次启动
 
-1. 从本分支的[发布页](https://github.com/StonkGuy/steamac/releases)下载 `FX-Steam-Launcher-<版本>.dmg`，把 **FX Steam Launcher.app** 拖到“应用程序”并打开（见下文*首次打开*）。每个发布版有两个文件：DMG，以及 `FX-Steam-Launcher-<版本>-gpl-sources.tar`，即 GPL 与 LGPL 组件（内核、initramfs 工具、DXMT、wmtr）的对应源码。
+1. 从本分支的 `main` 分支或某个[发布](https://github.com/StonkGuy/steamac/releases)标签构建应用：`./build.sh`（[要求与构建](docs/upstream/requirements-and-building.md)；DXMT 路径还需在 layer 步骤之前于 `wmtr/` 中运行 `make dxmt-payload`）。本分支暂不发布预构建的 DMG。把 `work/out/` 中的 **FX Steam Launcher.app** 复制到“应用程序”并打开（见下文*首次打开*）。
 2. 首次启动时选择**新建磁盘…**。应用会下载 Valve 的 SteamOS 映像，校验并完成设置。此过程较久，但只需一次。
 3. 在窗口中登录 Steam。保持 **16:10** 的窗口大小（设置 > 显示 > 默认窗口大小；默认的 1280×800 即 16:10）。16:9 的游戏
    在 16:10 窗口中会出现黑边。
@@ -56,8 +57,9 @@ Epic Games、VRChat 及 DXMT 作者均无关联。
 
 设置 > 高级 > **图形路径**：*DXMT（精简）* 或 *Vulkan（经典）*；下次启动时生效。无需为每个游戏单独设置：Steam 启动时，
 每个已安装的 Proton 都会获得所选路径，并由 Proton 放入每个游戏的前缀。切回 *Vulkan* 会原样恢复 Proton 自带的文件。
-DXMT 覆盖 Direct3D 11（及 10）；Direct3D 12 游戏请用 *Vulkan*（在 DXMT 下未测试或受限）。在真实前缀上，DXMT 下的 EAC
-在首次启动前尚未验证；若 EAC 失败，请切换到 *Vulkan*。
+若 Proton 的原始文件缺失（例如在同一磁盘上切换两个应用构建之后），DXMT 的文件会保留，启动日志会给出提示；请在 Steam 中修复
+Proton：该 Proton 工具 > 属性 > 已安装文件 > **验证工具文件的完整性**。DXMT 覆盖 Direct3D 11（及 10）；Direct3D 12 游戏请用
+*Vulkan*（DXMT 的 Direct3D 12 受限）。DXMT 下的 EAC 已用 VRChat 验证；若其他游戏 EAC 失败，请切换到 *Vulkan*。
 
 **Metal 性能 HUD** 在两条路径上都能显示帧率：设置 > 显示、“显示”菜单或 Ctrl+Cmd+P。游戏运行时可随时开关。
 
@@ -82,6 +84,7 @@ EAC 在 SteamOS 内由 Valve 的 FEX 模拟器运行。本分支打过补丁的 
 |---|---|
 | DXMT 设置似乎没有生效 | 设置在下次启动虚拟机时生效：更改后请重启虚拟机。若应用缺少 DXMT 主机库，设置中会提示，并改用 Vulkan（启动日志：`gpu: graphics path Vulkan`） |
 | DXMT 下 EAC 失败 | 切换到 *Vulkan* 并重启启动器 |
+| 用过 DXMT 后，Direct3D 11 游戏在 *Vulkan* 上无法运行 | Proton 中仍是 DXMT 的文件：在 Steam 中，该 Proton 工具 > 属性 > 已安装文件 > 验证工具文件的完整性 |
 | EAC 无法完成，或在 Steam 更新后失败 | 打过补丁的 FEX 缺失或被 Valve 的版本覆盖；运行 `sh install-fex-tool.sh status` |
 | 进入世界前停顿约一分钟 | 检查启动选项中是否有 `WINE_CPU_TOPOLOGY` |
 | 卡顿并伴有爆音 | 授予麦克风权限（系统设置 > 隐私与安全性 > 麦克风） |
@@ -91,11 +94,14 @@ EAC 在 SteamOS 内由 Valve 的 FEX 模拟器运行。本分支打过补丁的 
 
 ## 限制
 
-- 仅验证了一台机器（M2、16 GB、macOS 27.0）。VRChat 已在游戏中验证；Mini Royale 的 EAC 启动器可达到 `301`（未继续游玩）。其他游戏未测试，结果因游戏而异。
-- DXMT：仅支持 Direct3D 11/10。功能级别上限为 11_1（无 DXIL，无保守光栅化）。
-- 经 D3DMetal 支持 Direct3D 12 仅在**计划**中，未包含。
+- 仅验证了一台机器（M2、16 GB、macOS 27.0）。VRChat 已在两条路径上于游戏中验证；Mini Royale 的 EAC 启动器可达到 `301`（未继续游玩）。其他游戏未测试，结果因游戏而异。
+- 16 GB 的 Mac：重型游戏可能超出可用内存。Unigine Superposition（720p，Low）在两条路径上、虚拟机 8 GiB 时，应用内存都超过了 14 GB。
+- VR 不在本次发布中（实验性，位于 `vr-live` 分支）。
+- DXMT：Direct3D 11/10。其 Direct3D 12 受限（功能级别 11_1，仅 DXBC，无 DXIL，无光线追踪；ExecuteIndirect 会使 GPU 停顿）；Direct3D 12 游戏请用 *Vulkan*。
+- 不包含 D3DMetal。
 - DXMT 设置对所有游戏生效；此时游戏的 Metal 层覆盖整个虚拟机视图（窗口化游戏或 alt-tab 会显示游戏层）。
 - 内存需求超过虚拟机所得（设置 > 高级）的游戏会使用交换。
+- 切换图形路径会在下次启动时更改所有已安装的 Proton；若某个 Proton 中留下了 DXMT 的文件，修复方法见*选择图形路径*。
 - 构建中包含异步管线编译，但默认关闭且不推荐（实测更差）。
 - 麦克风测试很少；麦克风启动后卡死的可能性尚未完全排除。重新构建或重新签名的应用会再次请求麦克风权限。
 

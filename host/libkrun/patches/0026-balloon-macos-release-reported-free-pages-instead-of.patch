@@ -1,0 +1,512 @@
+From afd943f3115490139a639d056245b2a7be5adefc Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Tue, 13 Oct 2026 14:41:29 +0300
+Subject: [PATCH] balloon(macos): release reported free pages instead of
+ MADV_FREE
+
+Free page reporting (VIRTIO_BALLOON_F_REPORTING, which the steamac guest
+kernel negotiates: CONFIG_PAGE_REPORTING=y, order 9) handed each reported
+range to madvise(MADV_FREE) on macOS. On macOS that does not uncharge the
+pages: they stay in the VMM's phys_footprint until the host runs short of
+memory, and guest RAM is charged once per mapping (host stage-1 and the HVF
+stage-2 mapping both count), so a guest that once touched its RAM keeps the
+VMM at that footprint for good (8 GiB guest: 9.3-10.5 GiB right after boot,
+no lower after the guest frees memory). MADV_DONTNEED behaves the same.
+
+The balloon now sends whole host pages of a reported range to the VMM worker
+(new WorkerMessage::DiscardMemory), which unmaps them from the guest, replaces
+them with a fresh anonymous mapping and maps that back
+(HvfVm::discard_memory): the pages are freed at once and uncharged, and the
+next guest access gets zero pages that are charged normally. The stage-2
+mapping has to be rebuilt because hv_vm_map binds pages, not the host address
+range. Partial host pages at the edges, ranges spanning two memory regions and
+any failure keep the old MADV_FREE. Cost: only when the guest reports
+(~35 us per 2 MiB block); nothing changes for guests without the feature.
+
+Upstream state (libkrun v1.19.6 227b2de, main at the time): MADV_FREE on
+macOS, MADV_DONTNEED on Linux, where it does uncharge.
+
+Test: hvf discard_memory_releases_pages_and_keeps_the_guest_mapping (needs
+the hypervisor entitlement): a guest fills 16 MiB, discard must uncharge
+>= 16 MiB, read back zeros, and later guest stores must reach the new host
+pages. With MADV_FREE it fails (0 bytes released), without the stage-2
+remap it fails (guest stores invisible to the host).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Cargo.lock                               |   1 +
+ src/devices/src/virtio/balloon/device.rs | 114 +++++++++++++++---
+ src/hvf/Cargo.toml                       |   1 +
+ src/hvf/src/lib.rs                       | 144 +++++++++++++++++++++++
+ src/utils/src/worker_message.rs          |   4 +
+ src/vmm/src/builder.rs                   |  11 +-
+ src/vmm/src/lib.rs                       |  12 ++
+ src/vmm/src/macos/vstate.rs              |  18 +++
+ src/vmm/src/worker.rs                    |   2 +
+ 9 files changed, 292 insertions(+), 15 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 94f2181..48bdd0f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -681,6 +681,7 @@ version = "0.1.0-1.19.6"
+ dependencies = [
+  "crossbeam-channel",
+  "krun-arch",
++ "libc",
+  "libloading",
+  "log",
+ ]
+diff --git a/src/devices/src/virtio/balloon/device.rs b/src/devices/src/virtio/balloon/device.rs
+index 85b2812..8cf403d 100644
+--- a/src/devices/src/virtio/balloon/device.rs
++++ b/src/devices/src/virtio/balloon/device.rs
+@@ -1,8 +1,15 @@
+ use std::cmp;
++#[cfg(target_os = "linux")]
+ use std::convert::TryInto;
+ use std::io::Write;
+ 
++#[cfg(target_os = "macos")]
++use crossbeam_channel::Sender;
+ use utils::eventfd::EventFd;
++#[cfg(target_os = "macos")]
++use utils::worker_message::WorkerMessage;
++#[cfg(target_os = "macos")]
++use vm_memory::GuestAddress;
+ use vm_memory::{ByteValued, GuestMemory, GuestMemoryMmap};
+ 
+ use super::super::{
+@@ -52,6 +59,8 @@ pub struct Balloon {
+     pub(crate) activate_evt: EventFd,
+     pub(crate) device_state: DeviceState,
+     config: VirtioBalloonConfig,
++    #[cfg(target_os = "macos")]
++    map_sender: Option<Sender<WorkerMessage>>,
+ }
+ 
+ impl Balloon {
+@@ -64,9 +73,73 @@ impl Balloon {
+                 .map_err(BalloonError::EventFd)?,
+             device_state: DeviceState::Inactive,
+             config: VirtioBalloonConfig::default(),
++            #[cfg(target_os = "macos")]
++            map_sender: None,
+         })
+     }
+ 
++    /// Lets the device hand reported free pages to the VMM worker, which drops them from the
++    /// VMM instead of only marking them MADV_FREE (see `release_free_pages`).
++    #[cfg(target_os = "macos")]
++    pub fn set_map_sender(&mut self, map_sender: Sender<WorkerMessage>) {
++        self.map_sender = Some(map_sender);
++    }
++
++    /// Returns free-page-reporting memory to the host.
++    ///
++    /// On macOS, MADV_FREE leaves the pages charged to the VMM (phys_footprint) until the host
++    /// is short of memory, and the guest's stage-2 mapping keeps them alive, so a guest that has
++    /// once touched all of its RAM stays at that footprint for good. With the VMM worker
++    /// available, the whole host pages of the range are discarded and remapped instead
++    /// (`HvfVm::discard_memory`); partial host pages at the edges, and any failure, fall back
++    /// to MADV_FREE.
++    #[cfg(target_os = "macos")]
++    fn release_free_pages(
++        map_sender: Option<&Sender<WorkerMessage>>,
++        mem: &GuestMemoryMmap,
++        guest_addr: GuestAddress,
++        len: usize,
++    ) {
++        let Ok(host_addr) = mem.get_host_address(guest_addr) else {
++            error!("balloon: reported range {guest_addr:?} is not guest memory");
++            return;
++        };
++        let madv_free = |addr: usize, len: usize| {
++            if len > 0 {
++                // SAFETY: a range of guest memory the guest has given up.
++                unsafe { libc::madvise(addr as *mut libc::c_void, len, libc::MADV_FREE) };
++            }
++        };
++        let start = host_addr as usize;
++        let end = start + len;
++        // SAFETY: sysconf has no preconditions.
++        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
++        let (dstart, dend) = (start.next_multiple_of(page), end / page * page);
++        let discarded = match map_sender {
++            // the whole range must lie in one guest memory region (one host mapping)
++            Some(sender) if dend > dstart && mem.get_slice(guest_addr, len).is_ok() => {
++                let (reply_sender, reply_receiver) = crossbeam_channel::bounded(1);
++                let guest = guest_addr.0 + (dstart - start) as u64;
++                sender
++                    .send(WorkerMessage::DiscardMemory(
++                        reply_sender,
++                        dstart as u64,
++                        guest,
++                        (dend - dstart) as u64,
++                    ))
++                    .is_ok()
++                    && reply_receiver.recv().unwrap_or(false)
++            }
++            _ => false,
++        };
++        if discarded {
++            madv_free(start, dstart - start);
++            madv_free(dend, end - dend);
++        } else {
++            madv_free(start, len);
++        }
++    }
++
+     pub fn id(&self) -> &str {
+         defs::BALLOON_DEV_ID
+     }
+@@ -88,22 +161,35 @@ impl Balloon {
+         while let Some(head) = queues[FRQ_INDEX].queue.pop(mem) {
+             let index = head.index;
+             for desc in head.into_iter() {
++                #[cfg(target_os = "macos")]
++                {
++                    debug!(
++                        "balloon: release guest_addr={:?} len={}",
++                        desc.addr, desc.len
++                    );
++                    Self::release_free_pages(
++                        self.map_sender.as_ref(),
++                        mem,
++                        desc.addr,
++                        desc.len as usize,
++                    );
++                }
++                #[cfg(target_os = "linux")]
+                 let host_addr = mem.get_host_address(desc.addr).unwrap();
+-                debug!(
+-                    "balloon: should release guest_addr={:?} host_addr={:p} len={}",
+-                    desc.addr, host_addr, desc.len
+-                );
+                 #[cfg(target_os = "linux")]
+-                let advice = libc::MADV_DONTNEED;
+-                #[cfg(target_os = "macos")]
+-                let advice = libc::MADV_FREE;
+-                unsafe {
+-                    libc::madvise(
+-                        host_addr as *mut libc::c_void,
+-                        desc.len.try_into().unwrap(),
+-                        advice,
+-                    )
+-                };
++                {
++                    debug!(
++                        "balloon: should release guest_addr={:?} host_addr={:p} len={}",
++                        desc.addr, host_addr, desc.len
++                    );
++                    unsafe {
++                        libc::madvise(
++                            host_addr as *mut libc::c_void,
++                            desc.len.try_into().unwrap(),
++                            libc::MADV_DONTNEED,
++                        )
++                    };
++                }
+             }
+ 
+             have_used = true;
+diff --git a/src/hvf/Cargo.toml b/src/hvf/Cargo.toml
+index a707499..b6419a1 100644
+--- a/src/hvf/Cargo.toml
++++ b/src/hvf/Cargo.toml
+@@ -9,6 +9,7 @@ repository = "https://github.com/containers/libkrun"
+ 
+ [dependencies]
+ crossbeam-channel = ">=0.5.15"
++libc = ">=0.2.39"
+ libloading = "0.8"
+ log = "0.4.0"
+ 
+diff --git a/src/hvf/src/lib.rs b/src/hvf/src/lib.rs
+index b111a89..0218b08 100644
+--- a/src/hvf/src/lib.rs
++++ b/src/hvf/src/lib.rs
+@@ -112,6 +112,7 @@ pub enum Error {
+     IpaTooLow,
+     MemoryMap,
+     MemoryUnmap,
++    MemoryDiscard,
+     NestedCheck,
+     VcpuCreate,
+     VcpuInitialRegisters,
+@@ -143,6 +144,7 @@ impl Display for Error {
+             ),
+             MemoryMap => write!(f, "Error registering memory region in HVF"),
+             MemoryUnmap => write!(f, "Error unregistering memory region in HVF"),
++            MemoryDiscard => write!(f, "Error replacing discarded guest memory"),
+             NestedCheck => write!(
+                 f,
+                 "Nested virtualization was requested but it's not support in this system"
+@@ -338,6 +340,41 @@ impl HvfVm {
+             Ok(())
+         }
+     }
++
++    /// Releases the host pages behind guest memory the guest no longer uses, so the next guest
++    /// access sees fresh zero pages. `host_start_addr` must be the private anonymous mapping
++    /// that backs `guest_start_addr` (as set up by `map_memory`), both host-page aligned.
++    ///
++    /// madvise() is not enough on macOS: after MADV_FREE or MADV_DONTNEED the pages stay
++    /// charged to the task until the host runs short of memory, and the stage-2 mapping keeps
++    /// referencing them. A new anonymous mapping over the range releases them at once; the
++    /// stage-2 mapping is rebuilt on top of it because hv_vm_map() binds the pages, not the
++    /// host address range (without that, the guest would keep writing to the old pages).
++    pub fn discard_memory(
++        &self,
++        host_start_addr: u64,
++        guest_start_addr: u64,
++        size: u64,
++    ) -> Result<(), Error> {
++        self.unmap_memory(guest_start_addr, size)?;
++        // SAFETY: the range is guest RAM owned by this VMM; nothing else maps it.
++        let ret = unsafe {
++            libc::mmap(
++                host_start_addr as *mut libc::c_void,
++                size as libc::size_t,
++                libc::PROT_READ | libc::PROT_WRITE,
++                libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
++                -1,
++                0,
++            )
++        };
++        // Map it back either way: if mmap() failed, the old pages are still there.
++        self.map_memory(host_start_addr, guest_start_addr, size)?;
++        if ret == libc::MAP_FAILED {
++            return Err(Error::MemoryDiscard);
++        }
++        Ok(())
++    }
+ }
+ 
+ #[derive(Debug)]
+@@ -842,3 +879,110 @@ impl HvfVcpu<'_> {
+         }
+     }
+ }
++
++#[cfg(all(test, target_arch = "aarch64"))]
++mod tests {
++    //! Needs the com.apple.security.hypervisor entitlement (see the steamac test script that
++    //! signs and runs this binary); one HVF VM per process, so a single test.
++    use super::*;
++
++    const CODE_GPA: u64 = 0x4000_0000;
++    const DATA_GPA: u64 = 0x4010_0000;
++    const DATA_SIZE: u64 = 16 << 20;
++    const STEP: u64 = 16384;
++
++    // the library crate leaves linking the framework to the final binary (libkrun's build.rs)
++    #[link(name = "Hypervisor", kind = "framework")]
++    extern "C" {}
++
++    extern "C" {
++        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u64) -> i32;
++    }
++
++    /// phys_footprint of this process (rusage_info_v4: ri_phys_footprint is the 9th u64).
++    fn footprint() -> u64 {
++        let mut ri = [0u64; 64];
++        // SAFETY: RUSAGE_INFO_V4 (4) fills less than 64 u64s.
++        assert_eq!(unsafe { proc_pid_rusage(std::process::id() as i32, 4, ri.as_mut_ptr()) }, 0);
++        ri[8]
++    }
++
++    fn anon(size: u64) -> u64 {
++        // SAFETY: a fresh private anonymous mapping.
++        let p = unsafe {
++            libc::mmap(
++                std::ptr::null_mut(),
++                size as usize,
++                libc::PROT_READ | libc::PROT_WRITE,
++                libc::MAP_PRIVATE | libc::MAP_ANON,
++                -1,
++                0,
++            )
++        };
++        assert_ne!(p, libc::MAP_FAILED);
++        p as u64
++    }
++
++    /// Runs the guest loop that stores `val` into every host page of the data range; it ends
++    /// with an HVC (EC 0x16), which always exits to the host.
++    fn guest_fill(vcpu: &mut HvfVcpu, ipa: u32, val: u64) {
++        vcpu.set_initial_state(ipa, CODE_GPA, DATA_GPA).unwrap(); // pc, x0
++        vcpu.write_reg(hv_reg_t_HV_REG_X1, DATA_GPA + DATA_SIZE).unwrap();
++        vcpu.write_reg(hv_reg_t_HV_REG_X2, val).unwrap();
++        // SAFETY: a vcpu created on this thread.
++        assert_eq!(unsafe { hv_vcpu_run(vcpu.vcpuid) }, HV_SUCCESS);
++        let ec = (vcpu.vcpu_exit.exception.syndrome >> 26) & 0x3f;
++        if ec != 0x16 {
++            let r = |r| vcpu.read_sys_reg(r).unwrap_or(0);
++            panic!(
++                "guest exit ec {ec:#x}: pc {:#x} esr_el1 {:#x} elr_el1 {:#x} far_el1 {:#x}",
++                vcpu.read_reg(hv_reg_t_HV_REG_PC).unwrap_or(0),
++                r(hv_sys_reg_t_HV_SYS_REG_ESR_EL1),
++                r(hv_sys_reg_t_HV_SYS_REG_ELR_EL1),
++                r(hv_sys_reg_t_HV_SYS_REG_FAR_EL1)
++            );
++        }
++    }
++
++    fn host_all(host: u64, val: u64) -> bool {
++        // SAFETY: reads of our own mapping.
++        (0..DATA_SIZE)
++            .step_by(STEP as usize)
++            .all(|o| unsafe { std::ptr::read_volatile((host + o) as *const u64) } == val)
++    }
++
++    #[test]
++    fn discard_memory_releases_pages_and_keeps_the_guest_mapping() {
++        let mut info = ArchMemoryInfo {
++            guest_last_addr: DATA_GPA + DATA_SIZE,
++            ..Default::default()
++        };
++        let vm = HvfVm::new(&mut info, false).unwrap();
++        // str x2, [x0]; add x0, x0, #16384; cmp x0, x1; b.lt -3; hvc #0
++        let code = anon(STEP);
++        let prog: [u32; 5] = [0xf900_0002, 0x9140_1000, 0xeb01_001f, 0x54ff_ffab, 0xd400_0002];
++        // SAFETY: code is a fresh STEP-byte mapping.
++        unsafe { std::ptr::copy_nonoverlapping(prog.as_ptr(), code as *mut u32, prog.len()) };
++        vm.map_memory(code, CODE_GPA, STEP).unwrap();
++        let data = anon(DATA_SIZE);
++        vm.map_memory(data, DATA_GPA, DATA_SIZE).unwrap();
++        let mut vcpu = HvfVcpu::new(0, false).unwrap();
++
++        guest_fill(&mut vcpu, info.ipa_size, 5);
++        assert!(host_all(data, 5), "guest stores not visible to the host");
++        let before = footprint();
++
++        vm.discard_memory(data, DATA_GPA, DATA_SIZE).unwrap();
++        let after = footprint();
++        assert!(
++            before >= after + DATA_SIZE,
++            "discard released {} of {DATA_SIZE} bytes",
++            before.saturating_sub(after)
++        );
++        assert!(host_all(data, 0), "discarded memory not zero");
++
++        // the guest must now write the host's new pages, not the released ones
++        guest_fill(&mut vcpu, info.ipa_size, 9);
++        assert!(host_all(data, 9), "guest writes after discard not visible to the host");
++    }
++}
+diff --git a/src/utils/src/worker_message.rs b/src/utils/src/worker_message.rs
+index 50a4fcf..901db77 100644
+--- a/src/utils/src/worker_message.rs
++++ b/src/utils/src/worker_message.rs
+@@ -18,5 +18,9 @@ pub enum WorkerMessage {
+     GpuAddMapping(crossbeam_channel::Sender<bool>, u64, u64, u64),
+     #[cfg(target_os = "macos")]
+     GpuRemoveMapping(crossbeam_channel::Sender<bool>, u64, u64),
++    /// Release the host pages behind guest RAM the guest reported free: host address, guest
++    /// address, length (host-page aligned).
++    #[cfg(target_os = "macos")]
++    DiscardMemory(crossbeam_channel::Sender<bool>, u64, u64, u64),
+     ConvertMemory(crossbeam_channel::Sender<bool>, MemoryProperties),
+ }
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index b0eee6e..9d62942 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -984,7 +984,13 @@ pub fn build_microvm(
+     }
+ 
+     #[cfg(not(feature = "tee"))]
+-    attach_balloon_device(&mut vmm, event_manager, intc.clone())?;
++    attach_balloon_device(
++        &mut vmm,
++        event_manager,
++        intc.clone(),
++        #[cfg(target_os = "macos")]
++        _sender.clone(),
++    )?;
+     #[cfg(not(feature = "tee"))]
+     attach_rng_device(&mut vmm, event_manager, intc.clone())?;
+     let mut console_id = 0;
+@@ -2227,10 +2233,13 @@ fn attach_balloon_device(
+     vmm: &mut Vmm,
+     event_manager: &mut EventManager,
+     intc: IrqChip,
++    #[cfg(target_os = "macos")] map_sender: Sender<WorkerMessage>,
+ ) -> std::result::Result<(), StartMicrovmError> {
+     use self::StartMicrovmError::*;
+ 
+     let balloon = Arc::new(Mutex::new(devices::virtio::Balloon::new().unwrap()));
++    #[cfg(target_os = "macos")]
++    balloon.lock().unwrap().set_map_sender(map_sender);
+ 
+     event_manager
+         .add_subscriber(balloon.clone())
+diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
+index 87ee074..c90720e 100644
+--- a/src/vmm/src/lib.rs
++++ b/src/vmm/src/lib.rs
+@@ -396,6 +396,18 @@ impl Vmm {
+     pub fn remove_mapping(&self, reply_sender: Sender<bool>, guest_addr: u64, len: u64) {
+         self.vm.remove_mapping(reply_sender, guest_addr, len);
+     }
++
++    #[cfg(target_os = "macos")]
++    pub fn discard_memory(
++        &self,
++        reply_sender: Sender<bool>,
++        host_addr: u64,
++        guest_addr: u64,
++        len: u64,
++    ) {
++        self.vm
++            .discard_memory(reply_sender, host_addr, guest_addr, len);
++    }
+ }
+ 
+ impl Subscriber for Vmm {
+diff --git a/src/vmm/src/macos/vstate.rs b/src/vmm/src/macos/vstate.rs
+index 6cd0160..a7b7654 100644
+--- a/src/vmm/src/macos/vstate.rs
++++ b/src/vmm/src/macos/vstate.rs
+@@ -151,6 +151,24 @@ impl Vm {
+         }
+     }
+ 
++    pub fn discard_memory(
++        &self,
++        reply_sender: Sender<bool>,
++        host_addr: u64,
++        guest_addr: u64,
++        len: u64,
++    ) {
++        debug!("discard_memory: host_addr={host_addr:x}, guest_addr={guest_addr:x}, len={len}");
++        let ok = match self.hvf_vm.discard_memory(host_addr, guest_addr, len) {
++            Ok(()) => true,
++            Err(e) => {
++                error!("Error discarding guest memory: {e:?}");
++                false
++            }
++        };
++        reply_sender.send(ok).unwrap();
++    }
++
+     pub fn remove_mapping(&self, reply_sender: Sender<bool>, guest_addr: u64, len: u64) {
+         debug!("remove_mapping: guest_addr={guest_addr:x}, len={len}");
+         if let Err(e) = self.hvf_vm.unmap_memory(guest_addr, len) {
+diff --git a/src/vmm/src/worker.rs b/src/vmm/src/worker.rs
+index d0131b9..510ae64 100644
+--- a/src/vmm/src/worker.rs
++++ b/src/vmm/src/worker.rs
+@@ -44,6 +44,8 @@ impl super::Vmm {
+             WorkerMessage::GpuAddMapping(s, h, g, l) => self.add_mapping(s, h, g, l),
+             #[cfg(target_os = "macos")]
+             WorkerMessage::GpuRemoveMapping(s, g, l) => self.remove_mapping(s, g, l),
++            #[cfg(target_os = "macos")]
++            WorkerMessage::DiscardMemory(s, h, g, l) => self.discard_memory(s, h, g, l),
+             #[cfg(target_arch = "x86_64")]
+             WorkerMessage::GsiRoute(sender, entries) => {
+                 let mut routing = kvm_bindings::KvmIrqRouting::new(entries.len()).unwrap();
+-- 
+2.39.5 (Apple Git-154)
+

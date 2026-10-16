@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sched.h>
+#include <libproc.h>
+#include <sys/mman.h>
 
 #define WINEMETAL_API
 #include "winemetal_thunks.h"
@@ -117,7 +119,12 @@ static NTSTATUS f_newfunction(void *a) {
   p->ret = strlen((const char *)(uintptr_t)p->arg) * 1000 + p->handle;
   return 0;
 }
-const void *wmtr_impl_funcs[WMTR_NCALLS] = {[1] = f_release, [25] = f_newlibrary, [76] = f_sm50compile, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
+static NTSTATUS f_signal(void *p) { /* encodeSignalEvent, as DXMT's unix side */
+  struct unixcall_generic_obj_obj_uint64_noret *a = p;
+  [(id<MTLCommandBuffer>)a->handle encodeSignalEvent:(id<MTLSharedEvent>)a->arg0 value:a->arg1];
+  return 0;
+}
+const void *wmtr_impl_funcs[WMTR_NCALLS] = {[1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
                                     [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes};
 
 /* ---------------- loopback transport ---------------- */
@@ -137,12 +144,24 @@ static void *t_open_ring(struct wmtr_transport *t, uint64_t size) {
   H = wmtr_host_create(R, &host_ops, NULL);
   return R;
 }
-static void *t_add_blob(struct wmtr_transport *t, uint32_t b, uint64_t size) { blob_base[b] = pages(size); blob_size[b] = size; return blob_base[b]; }
+/* arena blobs are their own mappings, like the shm blobs of the real transports */
+static void *t_add_blob(struct wmtr_transport *t, uint32_t b, uint64_t size) {
+  void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (p == MAP_FAILED) return NULL;
+  blob_base[b] = p; blob_size[b] = size; return p;
+}
+static int n_blob_released;
+static void t_release_blob(struct wmtr_transport *t, uint32_t b, void *base, uint64_t size) {
+  if (base == blob_base[b] && size == blob_size[b]) { munmap(blob_base[b], size); blob_base[b] = NULL; blob_size[b] = 0; n_blob_released++; }
+}
+static uint64_t arena_bytes(void) { uint64_t n = 0; for (int b = 1; b < WMTR_MAX_BLOBS; b++) n += blob_base[b] ? blob_size[b] : 0; return n; }
+static uint64_t footprint(void) { struct rusage_info_v2 ri; return proc_pid_rusage(getpid(), RUSAGE_INFO_V2, (rusage_info_t *)&ri) ? 0 : ri.ri_phys_footprint; }
 static void t_kick(struct wmtr_transport *t) { wmtr_host_kick(H); }
 static void t_wait(struct wmtr_transport *t, volatile uint64_t *d, uint64_t seq, uint32_t slot, uint64_t spin_ns) { (void)spin_ns; while (__atomic_load_n(d, __ATOMIC_ACQUIRE) < seq) sched_yield(); }
 struct wmtr_transport *wmtr_transport_create(void) {
   struct wmtr_transport *t = calloc(1, sizeof *t);
   t->open_ring = t_open_ring; t->add_blob = t_add_blob; t->kick = t_kick; t->wait = t_wait;
+  t->release_blob = t_release_blob;
   return t;
 }
 static NTSTATUS remote(int call, void *p) { return ((fn_t)__wine_unix_call_funcs[call])(p); }
@@ -298,6 +317,40 @@ static void test_vr(id<MTLDevice> dev) {
       if (sf) CHECK(surface_matches(sf, e, e ? 0 : 16, e ? 0 : 8, e ? TW : 256, e ? TH : 128), "eye %d pixels differ", e);
     }
   }
+  /* stage split of submit->copied: that frame waited >= 200 ms for the guest's event and no signal was encoded
+   * through the executor, so the wait counts as rendering; the stages add up to ready - submit */
+  struct wmtr_vr_stats sg; wmtr_vr_get_stats(vr, &sg);
+  uint64_t sum = 0; for (int i = 0; i < WMTR_VR_STAGES; i++) sum += sg.stage_ns[i];
+  CHECK(sg.stage_frames == 1 && sg.stage_ns[WMTR_VR_STAGE_ENCODE] == 0 && sg.stage_ns[WMTR_VR_STAGE_RENDER] >= 150000000ull &&
+        ok && sum == (uint64_t)(u.s.ready_time - u.s.app_submit_time),
+        "stages of frame 7: %llu frames, encode %llu render %llu sum %llu", sg.stage_frames, sg.stage_ns[0], sg.stage_ns[1], sum);
+  /* a frame whose rendering is still being encoded when the submit arrives (the normal live order): the signal
+   * goes through the executor (call 17) 60 ms after the submit, the GPU reaches it 60 ms later */
+  if (ok) {
+    struct vrl_release r7 = {{VRL_RELEASE, sizeof r7}, u.s.eye[0].swapchain, u.s.eye[0].image, u.s.frame_id, 0};
+    send(sv[1], &r7, sizeof r7, 0);
+    r7.swapchain = u.s.eye[1].swapchain; r7.image = u.s.eye[1].image; send(sv[1], &r7, sizeof r7, 0);
+    id<MTLSharedEvent> gate = [dev newSharedEvent];
+    id<MTLCommandQueue> gq = [dev newCommandQueue];
+    id<MTLCommandBuffer> gcb = [gq commandBuffer];
+    [gcb encodeWaitForEvent:gate value:1];
+    sub.info.frame_id = 30; sub.info.wait_value = 2;
+    remote(146, &sub); remote(39, &sync);
+    usleep(60000);
+    struct unixcall_generic_obj_obj_uint64_noret se = {(obj_handle_t)gcb, (obj_handle_t)ev, 2};
+    remote(17, &se); remote(39, &sync);
+    [gcb commit];
+    usleep(60000);
+    gate.signaledValue = 1;
+    int ok30 = vr_next(sv[1], VRL_SUBMIT, &u, sizeof u);
+    struct wmtr_vr_stats s2; wmtr_vr_get_stats(vr, &s2);
+    uint64_t enc = s2.stage_ns[WMTR_VR_STAGE_ENCODE] - sg.stage_ns[WMTR_VR_STAGE_ENCODE], ren = s2.stage_ns[WMTR_VR_STAGE_RENDER] - sg.stage_ns[WMTR_VR_STAGE_RENDER];
+    uint64_t sum2 = 0; for (int i = 0; i < WMTR_VR_STAGES; i++) sum2 += s2.stage_ns[i];
+    CHECK(ok30 && u.s.frame_id == 30 && s2.stage_frames == 2 && enc >= 55000000ull && enc < 120000000ull && ren >= 55000000ull &&
+          sum2 - sum == (uint64_t)(u.s.ready_time - u.s.app_submit_time),
+          "stages of frame 30: sent %d, encode %llu render %llu", ok30, enc, ren);
+    [gq release]; [gate release];
+  }
   /* back-pressure: 3 images per eye, one still held by the host -> of 3 more frames, 2 go out and 1 drops */
   struct vrl_submit held = u.s;
   sub.info.wait_event = 0; sub.info.wait_value = 0;
@@ -416,6 +469,7 @@ int main(void) {
     snprintf(frames_path, sizeof frames_path, "/tmp/wmtr_frames_%d.csv", (int)getpid());
     unlink(frames_path);
     setenv("WMTR_FRAMES", frames_path, 1);
+    setenv("WMTR_ARENA_TRIM_MS", "300", 1); /* section 7 */
     char stats_path[] = "/tmp/wmtr_callstats_XXXXXX";
     close(mkstemp(stats_path));
     /* WMTR_TEST_TRIGGER=1: statistics turned on at runtime through the trigger file instead of the environment */
@@ -531,6 +585,42 @@ int main(void) {
       CHECK(cb2.ret && ci.memory.ptr && ci.memory.ptr != own && ((uint8_t *)ci.memory.ptr)[65535] == 0x3c,
             "caller-placed buffer ret %llx mem %p", cb2.ret, ci.memory.ptr);
       free(own);
+    }
+    /* 7. after a peak, idle arena blobs beyond the 128 MiB reserve go back to the host once they have
+          been idle for WMTR_ARENA_TRIM_MS; blobs reused within that time are kept */
+    {
+      enum { NB = 8 };
+      struct wmtr_ring *R = blob_base[0];
+      uint64_t a0 = arena_bytes();
+      obj_handle_t bh[NB];
+      for (int i = 0; i < NB; i++) {
+        struct WMTBufferInfo pi = {60u << 20, WMTResourceStorageModeShared, {NULL}, 0};
+        struct unixcall_mtldevice_newbuffer pb = {(obj_handle_t)dev, {&pi}, 0};
+        remote(18, &pb);
+        bh[i] = pb.ret;
+        if (pi.memory.ptr) memset(pi.memory.ptr, i + 1, 60u << 20);
+      }
+      uint64_t a_peak = arena_bytes(), fp_peak = footprint();
+      CHECK(bh[NB - 1] && a_peak >= a0 + (NB - 1) * (60ull << 20), "peak: %llu arena MiB", a_peak >> 20);
+      uint64_t fh = R->free_head;
+      for (int i = 0; i < NB; i++) remote(1, &bh[i]);
+      remote(26, &fb);
+      for (int i = 0; i < 2000 && R->free_head < fh + NB; i++) usleep(1000);
+      remote(26, &fb); /* takes the frees: the blobs are idle, but not for long enough yet */
+      CHECK(n_blob_released == 0 && arena_bytes() == a_peak, "released %d blobs before the idle time", n_blob_released);
+      usleep(400000);
+      remote(26, &fb);
+      uint64_t a_after = arena_bytes(), fp_after = footprint();
+      printf("arena trim: arena %llu -> %llu MiB, footprint %llu -> %llu MiB, %d blobs released\n",
+             a_peak >> 20, a_after >> 20, fp_peak >> 20, fp_after >> 20, n_blob_released);
+      CHECK(a_after <= a0 + (128ull << 20), "arena kept %llu MiB after the peak (before %llu MiB)", a_after >> 20, a0 >> 20);
+      CHECK(fp_after + (256ull << 20) <= fp_peak, "footprint %llu -> %llu MiB", fp_peak >> 20, fp_after >> 20);
+      /* the arena still works: a released blob number is reused */
+      struct WMTBufferInfo ri = {100u << 20, WMTResourceStorageModeShared, {NULL}, 0};
+      struct unixcall_mtldevice_newbuffer rb = {(obj_handle_t)dev, {&ri}, 0};
+      remote(18, &rb);
+      CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
+      if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
     }
     test_vr(dev);
     test_vr_fd();

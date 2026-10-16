@@ -11,6 +11,9 @@
 #   oldgfx    steamac.vr=1 with a DXMT payload that has no VR link (winemetal.so without wmtr_vr_call, or no DXMT
 #             payload) leaves everything stock and says why
 #   other     steamac.vr=0 / no key / another Proton: untouched
+#   foreign   payload A, a Proton update that leaves vrclient_x64 alone (new version file only), payload B (another
+#             bundle's layer), off: Proton's files are back (before: A's patched files were kept as "originals")
+#   noorig    our file with no kept original: it stays, a WARNING names Verify integrity, no "back" claim
 # usage: scripts/test/steam-vr-path.sh
 set -u
 S=$(cd "$(dirname "$0")/../.." && pwd)/guest/layer/usr/lib/steamac/steam-vr-path
@@ -79,5 +82,19 @@ expect=$( (echo "$upd" | grep -v openvrpaths; echo "$stock" | grep openvrpaths) 
 rm -f "$CFG/openvr/openvrpaths.vrpath"; base=$(snap)
 run "steamac.vr=1"; [ "$(proton_vr_runtime)" = "$T/state/runtime" ] || fail novrpath "vrpath not written"
 run "steamac.vr=0"; [ "$(snap)" = "$base" ] || fail novrpath "our vrpath left behind"
+
+# foreign: fresh stock, then A -> version-only Proton update -> B -> off
+blob "$W/x86_64-windows/vrclient_x64.dll" v; blob "$W/x86_64-unix/vrclient_x64.so" u; echo 1 > "$P/version"
+fs=$(snap | grep "Proton - Experimental/files"); : > "$T/log"
+XB=$T/vrb; cp -a "$X" "$XB"; blob "$XB/x86_64-windows/vrclient_x64.dll" c; blob "$XB/x86_64-unix/vrclient_x64.so" d
+run "steamac.vr=1" "$X"; echo 3 > "$P/version"; run "steamac.vr=1" "$XB"; run "steamac.vr=0" "$XB"
+[ "$(snap | grep "Proton - Experimental/files")" = "$fs" ] || fail foreign "Proton's vrclient_x64 not back after A -> update -> B -> off"
+[ -e "$T/state" ] && fail foreign "state dir left"
+# noorig
+run "steamac.vr=1" "$XB"; rm -f "$T/state/orig/x86_64-windows/vrclient_x64.dll"; : > "$T/log"; run "steamac.vr=0" "$XB"
+cmp -s "$W/x86_64-windows/vrclient_x64.dll" "$XB/x86_64-windows/vrclient_x64.dll" || fail noorig "patched dll changed without a kept original"
+[ "$(tr -d u < "$W/x86_64-unix/vrclient_x64.so")" = "" ] || fail noorig "kept .so not restored"
+grep -q "WARNING: no original of vrclient_x64.dll kept.*Verify integrity" "$T/log" || fail noorig "no warning: $(cat "$T/log")"
+grep -q "vrclient_x64 and openvrpaths.vrpath back" "$T/log" && fail noorig "claims Proton's files back"
 
 if [ $fails -eq 0 ]; then echo "PASS steam-vr-path"; else cat "$T/log"; exit 1; fi

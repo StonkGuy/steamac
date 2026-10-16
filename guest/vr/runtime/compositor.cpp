@@ -17,9 +17,14 @@ class Compositor : public StubIVRCompositor {
   EVRCompositorError WaitGetPoses(TrackedDevicePose_t *render, uint32_t nrender, TrackedDevicePose_t *game,
                                   uint32_t ngame) override {
     Runtime &rt = Runtime::get();
-    if (!rt.wait_frame()) return VRCompositorError_DoNotHaveFocus;
+    rt.pose_stats().wait++;
+    if (!rt.wait_frame()) {
+      rt.pose_stats().wait_fail++;
+      return VRCompositorError_DoNotHaveFocus;
+    }
     frame_start_ = now_ns();
     fill(render, nrender);
+    if (render && nrender) rt.note_render_head(render[kHmd]);
     // "game" poses are predicted one frame further (SteamVR semantics); same snapshot, extrapolated
     if (game) {
       int64_t t = rt.frame_display_guest() + (int64_t)(1e9f / rt.refresh_hz());
@@ -33,6 +38,7 @@ class Compositor : public StubIVRCompositor {
 
   EVRCompositorError GetLastPoses(TrackedDevicePose_t *render, uint32_t nrender, TrackedDevicePose_t *game,
                                   uint32_t ngame) override {
+    Runtime::get().pose_stats().last_poses++;
     fill(render, nrender);
     fill(game, ngame);
     return VRCompositorError_None;
@@ -41,6 +47,7 @@ class Compositor : public StubIVRCompositor {
   EVRCompositorError GetLastPoseForTrackedDeviceIndex(TrackedDeviceIndex_t i, TrackedDevicePose_t *out,
                                                       TrackedDevicePose_t *game) override {
     if (i >= k_unMaxTrackedDeviceCount) return VRCompositorError_IndexOutOfRange;
+    Runtime::get().pose_stats().last_pose_index++;
     vr::TrackedDevicePose_t p = Runtime::get().device_frame_pose(i);
     if (out) *out = p;
     if (game) *game = p;
@@ -96,6 +103,9 @@ class Compositor : public StubIVRCompositor {
   void FadeToColor(float, float, float, float, float, bool) override {}
   HmdColor_t GetCurrentFadeColor(bool) override { return HmdColor_t{0, 0, 0, 0}; }
   void FadeGrid(float, bool) override {}
+  // the skybox shows while the application is not submitting (level loads); the host keeps the last frame
+  EVRCompositorError SetSkyboxOverride(const Texture_t *, uint32_t) override { return VRCompositorError_None; }
+  void ClearSkyboxOverride() override {}
   float GetCurrentGridAlpha() override { return 0; }
   void CompositorBringToFront() override {}
   void CompositorGoToBack() override {}

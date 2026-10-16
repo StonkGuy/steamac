@@ -16,6 +16,10 @@ struct wmtr_transport {
    * (wmtr_spin.h: 0 for calls the host answers in milliseconds) */
   void (*wait)(struct wmtr_transport *t, volatile uint64_t *done_seq, uint64_t seq, uint32_t slot,
                uint64_t spin_ns);
+  /* optional: give arena blob `blob` (client mapping `base`, `size` bytes, no live range left and the
+   * host holds no buffer in it) back to the host; afterwards the number may be added again.
+   * NULL: blobs are kept for the life of the process */
+  void (*release_blob)(struct wmtr_transport *t, uint32_t blob, void *base, uint64_t size);
   void *priv;
 };
 

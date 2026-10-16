@@ -8,8 +8,9 @@ This is a fork of [steamac](https://github.com/fxgl/steamac). It is not affiliat
 VRChat or the DXMT authors. VRChat does not support virtual machines or emulation; use is at your own risk, and
 enforcement is the game publisher's decision.
 
-Status: only one machine (M2 MacBook Air, 16 GB, macOS 27.0) has been verified. VRChat is verified in game; Mini Royale's
-EAC launcher also reaches `301` (not played further). Results differ game by game.
+Status: only one machine (M2 MacBook Air, 16 GB, macOS 27.0) has been verified. VRChat is verified in game on both
+graphics paths; Mini Royale's EAC launcher also reaches `301` (not played further). Results differ game by game.
+VR is not part of this release.
 
 ## Requirements
 
@@ -24,10 +25,11 @@ EAC launcher also reaches `301` (not played further). Results differ game by gam
 
 ## Install
 
-1. Download `FX-Steam-Launcher-<version>.dmg` from the [releases](https://github.com/StonkGuy/steamac/releases) of this
-   repository. Each release has two assets: the DMG, and `FX-Steam-Launcher-<version>-gpl-sources.tar`, the
-   corresponding source for the GPL and LGPL components (kernel, initramfs tools, DXMT, wmtr).
-2. Open the disk image and drag **FX Steam Launcher.app** to Applications.
+1. This fork does not publish a prebuilt DMG yet. Check out `main` or a
+   [release](https://github.com/StonkGuy/steamac/releases) tag and build with `./build.sh`
+   ([requirements and building](docs/upstream/requirements-and-building.md)). For the DXMT path, run
+   `make dxmt-payload` in `wmtr/` before the layer step; without it the app offers only the Vulkan path.
+2. Copy **FX Steam Launcher.app** from `work/out/` to Applications.
 3. **First open.** The fork's builds are ad-hoc signed and not notarized, so macOS Gatekeeper blocks the first open. This
    is needed once. Right-click (or Control-click) the app, choose **Open**, then **Open** again. If macOS 15 or newer does
    not offer that, open System Settings > Privacy & Security, scroll to the "FX Steam Launcher was blocked" message,
@@ -77,7 +79,8 @@ Settings > Advanced > **Graphics path**: **DXMT (lean)** or **Vulkan (classic)**
 
 How it works: at every boot the guest reads the launcher setting. With DXMT, every installed Proton's DXVK files (d3d11,
 dxgi, d3d10core) and its vkd3d-proton d3d12.dll are replaced by DXMT's before Steam starts, and again when Steam updates a Proton during the session.
-With Vulkan, Proton's own files are restored byte for byte. There is no per-game compatibility tool and no extra step:
+With Vulkan, Proton's own files are restored byte for byte. ARM64 Protons are left alone. There is no per-game
+compatibility tool and no extra step:
 the setting applies to every game, and the game just launches. If the DXMT library is missing from the app, the launcher
 falls back to Vulkan.
 
@@ -85,8 +88,13 @@ falls back to Vulkan.
   (DXBC, no DXIL), no ray tracing, no tiled resources, and ExecuteIndirect stalls the GPU. A Direct3D 12 game that
   needs more fails to start or renders wrongly; use **Vulkan** for it (vkd3d-proton). There is no automatic per-game
   fallback: with DXMT's dxgi in place, vkd3d-proton's d3d12 cannot present, so the switch is the setting.
-- EAC with DXMT on a real game prefix is unverified until your first launch. If EAC fails on DXMT, switch to Vulkan.
-- The default is **Vulkan (classic)** until the DXMT path has been measured ahead of it.
+- **Repairing Proton.** The originals are kept in the guest until they are back in place. If one is missing (for
+  example after switching between two builds of the app on one disk), DXMT's file stays, the boot log shows a
+  `WARNING: no original of ... kept` line, and Direct3D 11 games fail on Vulkan. Repair it in Steam: the Proton tool
+  (for example Proton Experimental) > Properties > Installed Files > **Verify integrity of tool files**.
+- EAC on DXMT is verified with VRChat. If EAC fails on DXMT in another game, switch to Vulkan.
+- The default is **Vulkan (classic)**. DXMT measured faster on the one verified Mac (see Known limits), but the
+  default has not been changed.
 - DXMT covers Direct3D 11 and 10, and Direct3D 12 within the limits above.
 
 Settings > Advanced > **Vulkan driver** (KosmicKrisp or MoltenVK) applies to the Vulkan path only.
@@ -134,8 +142,7 @@ on an external APFS, Mac OS Extended or exFAT volume (FAT32 is rejected). exFAT 
 - **A successful start:** the EAC launcher log (`anticheatlauncher.log`) ends with
   `Launcher finished with: 301, 'Easy Anti-Cheat successfully loaded in-game'` (about 5 s), and VRChat's log shows
   `AntiCheat Session Begin: Success` and `Finished entering world`, with no `null client`.
-- **EAC with DXMT** on a real game prefix is unverified until first launch; switch the Graphics path to Vulkan if EAC
-  fails.
+- **EAC with DXMT** is verified with VRChat; switch the Graphics path to Vulkan if EAC fails in another game.
 - **Not expected to work:** anti-cheat that blocks virtual machines, and titles whose anti-cheat adds its own anti-debug
   checks beyond EAC's Linux module (a second title was tried and stalls inside those checks).
 - Never attach a debugger, `strace` or `perf` to the running game; EAC reports it.
@@ -157,17 +164,20 @@ on an external APFS, Mac OS Extended or exFAT volume (FAT32 is rejected). exFAT 
 | game freezes after a microphone start or audio change | see the microphone row above; a fix for the capture start is part of the app, but the freeze risk is not fully ruled out |
 | audio | audio goes through CoreAudio with about 65 ms latency on built-in speakers; choose the output device and buffer size in Settings > Sound |
 | game needs more memory than the VM has | raise VM RAM in Settings > Advanced; Settings warns when less than 2 GiB is left for graphics |
+| Direct3D 11 games fail on Vulkan after using DXMT | a Proton kept DXMT's files (boot log `WARNING: no original ... kept`): Steam > the Proton tool > Properties > Installed Files > Verify integrity of tool files |
 
 ## Known limits
 
-- One Mac verified; VRChat verified in game, Mini Royale's EAC reaches `301`. Other titles, Macs and macOS versions are
-  untested, and EAC results differ game by game.
-- Measured VRChat result on the M2 MacBook Air: about 26-30 fps in a light world at 1280x800 on the Vulkan path, GPU-bound
-  and power-limited. There are no published numbers for the DXMT path yet.
+- One Mac verified; VRChat verified in game on both paths, Mini Royale's EAC reaches `301`. Other titles, Macs and
+  macOS versions are untested, and EAC results differ game by game.
+- Measured VRChat results on the M2 MacBook Air (single runs, 1280x800): about 29-44 fps on Vulkan, 76-78 fps on DXMT; lower under Mac memory pressure
+  ([docs/eac-performance.md](docs/eac-performance.md)). GPU-bound and power-limited.
+- 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
+  memory on both paths with an 8 GiB VM.
+- VR is not part of this release (experimental, `vr-live` branch).
 - Anti-cheat that blocks virtual machines will not work.
-- DXMT: Direct3D 11/10 only. Direct3D 12 games under the DXMT setting are untested or limited; use Vulkan for them.
+- DXMT: Direct3D 11/10. Direct3D 12 under the DXMT setting is limited (see above); use Vulkan for those games.
 - The DXMT setting applies to every game; there is no per-game opt-out.
-- EAC with DXMT on a real prefix is unverified until first launch; switch to Vulkan if EAC fails.
 - On the DXMT path the game's Metal layer covers the whole VM view (a windowed game or alt-tab shows the game layer), and a 16:9 game in a 16:10 window is letterboxed; pick a 16:10 resolution.
 - Asynchronous pipeline compilation exists in the build but is off and not recommended (measured worse).
 - The patched FEX and VRChat's launch options are installed by hand today.

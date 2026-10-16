@@ -665,10 +665,15 @@ struct Options {
     }
 
     func validate() throws {
-        guard !isSelftest, !needsDisk, !sentryTestEvent, sentryTestCrash == nil else { return }
+        guard !isSelftest, !sentryTestEvent, sentryTestCrash == nil else { return }
+        // Before the needsDisk return: a boot that shows the first-run disk window skipped every check, so
+        // --mem 0 or --cpus 0 booted a guest with no RAM or vCPU and hung.
+        guard memMiB >= VMSizing.minMemMiB else {
+            throw OptionError("--mem must be at least \(VMSizing.minMemMiB) MiB, got \(memMiB)")
+        }
+        guard (1...255).contains(cpus) else { throw OptionError("--cpus must be 1..255, got \(cpus)") }
+        guard !needsDisk else { return }
         guard !kernel.isEmpty else { throw OptionError("--kernel is required") }
-        guard (1...255).contains(cpus) else { throw OptionError("--cpus must be 1..255") }
-        guard memMiB >= 256 else { throw OptionError("--mem must be >= 256") }
         let gpuWords = cmdline.split(separator: " ").filter { $0.hasPrefix("steamac.gpu_mib=") }
         if !gpuWords.isEmpty {
             guard gpuWords.count == 1, let value = Int(gpuWords[0].dropFirst("steamac.gpu_mib=".count)),

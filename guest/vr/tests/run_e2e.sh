@@ -4,6 +4,8 @@
 # link on a Unix socket, vr-testapp loads the runtime like Proton does and checks poses, pacing, submits,
 # actions and haptics; then the fake host's log is checked (every submit consistent with the frame it was
 # rendered for, the haptic event arrived). Runs natively on x86-64 Linux and in the VM guest under FEX.
+# Each profile runs twice: the test app's own sequence, and --title (a Unity SteamVR plugin title's: manifest in
+# the startup info, IVRInput_010, every action read for every input source each frame).
 #   tests/run_e2e.sh BUILD_DIR [touch|index]
 set -eu
 out=${1:?build dir}
@@ -11,6 +13,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d)
 trap 'kill $fh 2>/dev/null || true; rm -rf "$tmp"' EXIT
 
+for mode in "" --title; do
 for profile in ${2:-touch index}; do
   sock=$tmp/vr.sock log=$tmp/host-$profile.log
   "$out/vr-fakehost" --socket "$sock" --script "$here/data/script.txt" --log "$log" --profile "$profile" --once &
@@ -18,9 +21,9 @@ for profile in ${2:-touch index}; do
   i=0
   while [ ! -S "$sock" ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
   STEAMAC_VR_SOCKET=$sock STEAMAC_VR_LOG=${STEAMAC_VR_LOG:-1} \
-    "$out/vr-testapp" "$out/runtime" "$here/data" --profile "$profile" 2>"$tmp/app-$profile.err" || {
+    "$out/vr-testapp" "$out/runtime" "$here/data" --profile "$profile" $mode 2>"$tmp/app-$profile.err" || {
     cat "$tmp/app-$profile.err"
-    echo "FAIL e2e ($profile): vr-testapp"
+    echo "FAIL e2e ($profile $mode): vr-testapp"
     exit 1
   }
   wait $fh
@@ -39,5 +42,12 @@ for profile in ${2:-touch index}; do
   case $summary in *'"submit_errors":0'*) ;; *) echo "FAIL e2e ($profile)"; exit 1 ;; esac
   # the runtime logs every interface the app asked for (the record M2 needs from VRChat)
   grep -q 'requested interface IVRInput_' "$tmp/app-$profile.err" || { echo "FAIL e2e: interface log"; exit 1; }
+  # --title: the manifest came from the startup info, with the binding file of the headset's controllers
+  if [ -n "$mode" ]; then
+    case $profile in index) ct=knuckles ;; *) ct=oculus_touch ;; esac
+    grep -q "action manifest .*/vrchat/actions.json: 20 actions, 25 bindings for $ct" "$tmp/app-$profile.err" ||
+      { grep -i manifest "$tmp/app-$profile.err"; echo "FAIL e2e ($profile $mode): startup manifest"; exit 1; }
+  fi
+done
 done
 echo "PASS e2e"

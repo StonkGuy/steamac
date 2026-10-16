@@ -134,7 +134,12 @@ class RenderModels : public StubIVRRenderModels {
   const char *GetRenderModelErrorNameFromEnum(vr::EVRRenderModelError) override { return "VRRenderModelError_NotSupported"; }
 };
 
-class Screenshots : public StubIVRScreenshots {};
+class Screenshots : public StubIVRScreenshots {
+ public:
+  // the application takes screenshots itself; this runtime has no screenshot button, so it never sends
+  // VREvent_RequestScreenshot
+  vr::EVRScreenshotError HookScreenshot(const vr::EVRScreenshotType *, int) override { return vr::VRScreenshotError_None; }
+};
 class OverlayView : public StubIVROverlayView {};
 }  // namespace
 

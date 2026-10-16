@@ -15,6 +15,10 @@
 struct FakeHeadsetOptions
 {
 	int port = 9757;
+	// Server address. An IPv4 literal connects like the WiVRn client does for an IPv4 server address (AF_INET control
+	// and stream sockets); the dual-stack server then sees a v4-mapped peer. Default: IPv6 loopback.
+	std::string host = "::1";
+	int pin_delay_ms = 0; // the "user" types the PIN this long after the PIN prompt (the client polls the socket meanwhile)
 	uint64_t protocol_version = 0; // 0 = ours
 	int frames = 60;              // decoded frames wanted per eye
 	int64_t drop_frame = -1;      // ignore all shards of this frame on stream 0 and report it lost
@@ -30,6 +34,23 @@ struct FakeHeadsetOptions
 	int64_t display_phase_ns = 0;
 	bool identity_foveation = true;          // view_info must carry identity foveation (game frames: foveated)
 	std::function<void(int eye, uint64_t frame_idx, CVPixelBufferRef)> on_decoded; // optional content check
+	// A headset closer to a real one (vrhost-test-headset --quest3): render size the game should use (0 = the stream
+	// size, as the loopback tests use), per-eye FOV (left, right, up, down; radians), refresh, head motion
+	// (sinusoids of these amplitudes in radians at motion_hz, yaw then pitch phase-shifted) and controllers
+	// (grip/aim poses plus a trigger ramp and an A press every second).
+	uint16_t render_width = 0, render_height = 0;
+	std::array<std::array<float, 4>, 2> fov{{{-0.9f, 0.8f, 0.85f, -0.9f}, {-0.9f, 0.8f, 0.85f, -0.9f}}};
+	float refresh_hz = 72;
+	float yaw_amplitude = 0.3f, pitch_amplitude = 0, motion_hz = 0.159f;
+	bool controllers = false;
+	struct View
+	{
+		std::array<std::array<float, 4>, 2> orientation; // x, y, z, w per eye (view_info pose: the render pose)
+		std::array<std::array<float, 3>, 2> position;
+		std::array<std::array<float, 4>, 2> fov;
+		std::array<std::vector<uint16_t>, 2> foveation_x, foveation_y;
+	};
+	std::function<void(int eye, uint64_t frame_idx, CVPixelBufferRef, const View &)> on_view; // decoded + its view_info
 	// Audio (WiVRn headset_info speaker/microphone). Microphone: once the server enables it (feature_control), send
 	// a mic_tone_hz sine (amplitude 8000) in 5 ms packets, with a full-scale marker of 48 frames mic_marker_ms after
 	// the first packet.
@@ -47,6 +68,7 @@ struct FakeHeadsetResult
 	std::string handshake_state;  // to_headset::crypto_handshake state name
 	bool encrypted = false;
 	std::vector<std::pair<uint64_t, int64_t>> display_times; // (frame index, view_info.display_time) stream 0
+	std::vector<std::pair<uint64_t, std::array<float, 4>>> view_orientation; // (frame index, view_info left eye) stream 0
 	bool got_stream_description = false;
 	bool got_tracking_control = false;
 	int timesync_queries = 0;

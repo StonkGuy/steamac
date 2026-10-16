@@ -8,6 +8,7 @@
 #include <sys/un.h>
 #include <stdatomic.h>
 #include <pthread.h>
+#include <os/lock.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +36,7 @@ _Static_assert(sizeof(struct svr_wmtvr_submit) == sizeof(struct WMTVRSubmitInfo)
 #define STATUS_UNSUCCESSFUL ((int)0xC0000001)
 
 #define VR_IMAGES 3 /* per eye: one being written, one in the compositor, one spare */
+#define VR_SIGNALS 64 /* DXMT signals its queue event once per command chunk: several frames' worth */
 
 struct vr_swapchain {
   uint32_t id, width, height, format, flags;
@@ -65,6 +67,12 @@ struct wmtr_vr {
   _Atomic uint64_t queries, haptics;
   _Atomic int have_state; /* a VRL_STATE arrived on this link */
   int64_t state_wait_ns;  /* when a hello last waited for it */
+  /* where a frame's time between WMTVRSubmit and VRL_SUBMIT goes (wmtr_vr_stats.stage_ns) */
+  _Atomic uint64_t stage_frames, stage_ns[WMTR_VR_STAGES];
+  /* the newest shared-event signals the executor encoded for the guest (wmtr_vr_note_signal), under sig_lock */
+  os_unfair_lock sig_lock;
+  struct vr_signal { uint64_t event, value; int64_t t; } sig[VR_SIGNALS];
+  unsigned sig_n;
 };
 
 /* a runtime hello on a link without host state yet: how long it waits, how often it asks the host again, and how
@@ -334,6 +342,42 @@ wmtr_vr_query(struct wmtr_vr *vr, void *buf, uint32_t size) {
   return r;
 }
 
+void
+wmtr_vr_note_signal(struct wmtr_vr *vr, uint64_t event, uint64_t value) {
+  if (!vr) return;
+  int64_t t = now_ns();
+  os_unfair_lock_lock(&vr->sig_lock);
+  vr->sig[vr->sig_n++ % VR_SIGNALS] = (struct vr_signal){event, value, t};
+  os_unfair_lock_unlock(&vr->sig_lock);
+}
+
+/* when the executor encoded the signal that takes `event` to `value` (the first one at or past it); 0 = not seen */
+static int64_t
+signal_time(struct wmtr_vr *vr, uint64_t event, uint64_t value) {
+  int64_t t = 0;
+  uint64_t best = UINT64_MAX;
+  os_unfair_lock_lock(&vr->sig_lock);
+  for (int i = 0; i < VR_SIGNALS; i++)
+    if (vr->sig[i].event == event && vr->sig[i].value >= value && vr->sig[i].value < best) best = vr->sig[i].value, t = vr->sig[i].t;
+  os_unfair_lock_unlock(&vr->sig_lock);
+  return t;
+}
+
+/* One frame's stages from its submit to the completion handler of its copy. The copy's command buffer waits for
+ * the guest's event, so its GPU start is the end of the guest's rendering. */
+static void
+stage_account(struct wmtr_vr *vr, int64_t t_submit, int64_t t_signal, id<MTLCommandBuffer> cb, int64_t t_done) {
+  int64_t gs = (int64_t)(cb.GPUStartTime * 1e9), ge = (int64_t)(cb.GPUEndTime * 1e9);
+  if (gs < t_submit || gs > t_done) gs = t_done; /* no GPU times: the whole wait counts as the guest's */
+  if (ge < gs || ge > t_done) ge = gs;
+  if (t_signal < t_submit || t_signal > gs) t_signal = t_submit; /* encoded before the submit, or not seen */
+  atomic_fetch_add_explicit(&vr->stage_ns[WMTR_VR_STAGE_ENCODE], (uint64_t)(t_signal - t_submit), memory_order_relaxed);
+  atomic_fetch_add_explicit(&vr->stage_ns[WMTR_VR_STAGE_RENDER], (uint64_t)(gs - t_signal), memory_order_relaxed);
+  atomic_fetch_add_explicit(&vr->stage_ns[WMTR_VR_STAGE_COPY], (uint64_t)(ge - gs), memory_order_relaxed);
+  atomic_fetch_add_explicit(&vr->stage_ns[WMTR_VR_STAGE_NOTIFY], (uint64_t)(t_done - ge), memory_order_relaxed);
+  atomic_fetch_add_explicit(&vr->stage_frames, 1, memory_order_relaxed);
+}
+
 int
 wmtr_vr_submit(struct wmtr_vr *vr, const struct WMTVRSubmitInfo *info) {
   if (!vr) return STATUS_NOT_SUPPORTED;
@@ -384,7 +428,8 @@ wmtr_vr_submit(struct wmtr_vr *vr, const struct WMTVRSubmitInfo *info) {
   memcpy(p.pose, info->pose, sizeof p.pose);
   memcpy(p.fov, info->fov, sizeof p.fov);
   id<MTLCommandBuffer> cb = [vr->queue commandBuffer];
-  if (info->wait_event && info->wait_value) [cb encodeWaitForEvent:(id<MTLSharedEvent>)info->wait_event value:info->wait_value];
+  uint64_t wait_event = info->wait_event, wait_value = info->wait_value;
+  if (wait_event && wait_value) [cb encodeWaitForEvent:(id<MTLSharedEvent>)wait_event value:wait_value];
   id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
   for (int e = 0; e < 2; e++) {
     [be copyFromTexture:src[e] sourceSlice:info->eye[e].slice sourceLevel:0 sourceOrigin:MTLOriginMake(rx[e], ry[e], 0)
@@ -405,6 +450,7 @@ wmtr_vr_submit(struct wmtr_vr *vr, const struct WMTVRSubmitInfo *info) {
       return;
     }
     q.ready_time = now_ns();
+    stage_account(vr, q.app_submit_time, wait_event && wait_value ? signal_time(vr, wait_event, wait_value) : 0, done, q.ready_time);
     if (send_packet(vr, &q, sizeof q)) atomic_fetch_add(&vr->sent, 1);
     atomic_fetch_sub(&vr->inflight, 1);
   }];
@@ -417,6 +463,7 @@ wmtr_vr_create(int link_fd, const char *mach_name) {
   if (link_fd < 0 || !mach_name) return NULL;
   struct wmtr_vr *vr = calloc(1, sizeof *vr);
   vr->fd = link_fd;
+  vr->sig_lock = OS_UNFAIR_LOCK_INIT;
   snprintf(vr->mach_name, sizeof vr->mach_name, "%s", mach_name);
   int on = 1;
   setsockopt(link_fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
@@ -488,4 +535,6 @@ wmtr_vr_get_stats(struct wmtr_vr *vr, struct wmtr_vr_stats *o) {
   o->submits = vr->submits; o->sent = vr->sent; o->dropped = vr->dropped;
   o->released = vr->released; o->errors = vr->errors; o->swapchains = vr->swapchains;
   o->queries = vr->queries; o->haptics = vr->haptics;
+  o->stage_frames = vr->stage_frames;
+  for (int i = 0; i < WMTR_VR_STAGES; i++) o->stage_ns[i] = vr->stage_ns[i];
 }

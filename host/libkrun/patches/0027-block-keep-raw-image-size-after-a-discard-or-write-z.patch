@@ -1,0 +1,291 @@
+From 0679ddb64ecf32848ce53d6d8f360bc5d86efd44 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Tue, 13 Oct 2026 19:19:23 +0300
+Subject: [PATCH] block: keep raw image size after a discard or write-zeroes at
+ the disk's end
+
+imago's File storage (0.2.3) served a discard, unmap write-zeroes or plain
+write-zeroes whose range reaches the end of the file by truncating the file
+to the start of the range (File::try_discard_by_truncate). For a raw image
+the file length is the disk size, so the disk shrank: the guest kept the old
+capacity until it was restarted, then saw a smaller device than the
+filesystem on it. mke2fs zeroes the last 64 KiB of the device it formats
+(old MD RAID superblock wipe), so a whole-disk ext4 made in the guest lost
+exactly 64 KiB of image and failed to mount on the next boot ("filesystem
+larger than device"); fstrim/blkdiscard of a whole-disk filesystem whose
+last blocks are free does the same. A GPT disk such as steamos.img is not
+hit in practice: the backup GPT occupies the last sectors, so no partition
+discard reaches the end of the file.
+
+Upstream state: fixed in imago 0.2.5 (hreitz/imago d48b76e1 "file: keep
+image size after tail discard": truncate, then set the length back).
+libkrun v1.19.6 pins imago 0.2.3; libkrun main (at the time) pins 0.2.4,
+which still truncates. This takes imago 0.2.5 (Cargo.lock: imago, plus its
+new futures/maybe-async/slab deps; bincode/unty/virtue dropped) and adds a
+regression test. No code change in libkrun itself; nothing changes for
+requests that do not reach the end of the disk.
+
+Test: virtio::block::device::tests::
+raw_image_keeps_size_after_tail_discard_and_write_zeroes opens a raw image
+through Block::new, sends write-zeroes, unmap write-zeroes and discard for
+the last 64 KiB, and checks the file size and the capacity on reopen. Fails
+on imago 0.2.3 (4194304 -> 4128768 bytes), passes on 0.2.5.
+---
+ Cargo.lock                             | 116 +++++++++++++++++--------
+ src/devices/Cargo.toml                 |   2 +-
+ src/devices/src/virtio/block/device.rs |  52 +++++++++++
+ 3 files changed, 135 insertions(+), 35 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 48bdd0f..e08e608 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -112,25 +112,6 @@ version = "0.22.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+ 
+-[[package]]
+-name = "bincode"
+-version = "2.0.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
+-dependencies = [
+- "bincode_derive",
+- "unty",
+-]
+-
+-[[package]]
+-name = "bincode_derive"
+-version = "2.0.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
+-dependencies = [
+- "virtue",
+-]
+-
+ [[package]]
+ name = "bindgen"
+ version = "0.72.1"
+@@ -431,6 +412,67 @@ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+ 
++[[package]]
++name = "futures"
++version = "0.3.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
++dependencies = [
++ "futures-channel",
++ "futures-core",
++ "futures-io",
++ "futures-sink",
++ "futures-task",
++ "futures-util",
++]
++
++[[package]]
++name = "futures-channel"
++version = "0.3.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
++dependencies = [
++ "futures-core",
++ "futures-sink",
++]
++
++[[package]]
++name = "futures-core"
++version = "0.3.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
++
++[[package]]
++name = "futures-io"
++version = "0.3.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
++
++[[package]]
++name = "futures-sink"
++version = "0.3.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
++
++[[package]]
++name = "futures-task"
++version = "0.3.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
++
++[[package]]
++name = "futures-util"
++version = "0.3.34"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
++dependencies = [
++ "futures-core",
++ "futures-sink",
++ "futures-task",
++ "pin-project-lite",
++ "slab",
++]
++
+ [[package]]
+ name = "generic-array"
+ version = "0.14.7"
+@@ -478,14 +520,15 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+ 
+ [[package]]
+ name = "imago"
+-version = "0.2.3"
++version = "0.2.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ae7cfee876c698a1a2ed9c705ab18f21acbed82110f19b51cc458de73426fe2c"
++checksum = "10824637f85b06dd6652a11caa62110e8cd33af4c875863c3c192f9ccc698375"
+ dependencies = [
+  "async-trait",
+- "bincode",
+  "cfg-if",
++ "futures",
+  "libc",
++ "maybe-async",
+  "miniz_oxide",
+  "nix 0.30.1",
+  "page_size",
+@@ -922,6 +965,17 @@ dependencies = [
+  "hashbrown",
+ ]
+ 
++[[package]]
++name = "maybe-async"
++version = "0.2.11"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "746873a384ad60adc5db74471dfaba74bd278afbdcfd81db93fafcdfc8b5ca0c"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn",
++]
++
+ [[package]]
+ name = "memchr"
+ version = "2.8.0"
+@@ -1380,6 +1434,12 @@ version = "0.3.8"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
+ 
++[[package]]
++name = "slab"
++version = "0.4.12"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
++
+ [[package]]
+ name = "sm3"
+ version = "0.4.2"
+@@ -1621,12 +1681,6 @@ version = "0.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+ 
+-[[package]]
+-name = "unty"
+-version = "0.0.4"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+-
+ [[package]]
+ name = "utf8parse"
+ version = "0.2.2"
+@@ -1661,12 +1715,6 @@ version = "0.2.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "091f1f09cfbf2a78563b562e7a949465cce1aef63b6065645188d995162f8868"
+ 
+-[[package]]
+-name = "virtue"
+-version = "0.0.18"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
+-
+ [[package]]
+ name = "vm-fdt"
+ version = "0.3.0"
+diff --git a/src/devices/Cargo.toml b/src/devices/Cargo.toml
+index 4f1c806..c9bb923 100644
+--- a/src/devices/Cargo.toml
++++ b/src/devices/Cargo.toml
+@@ -41,7 +41,7 @@ arch = { package = "krun-arch", version = "=0.1.0-1.19.6", path = "../arch" }
+ utils = { package = "krun-utils", version = "=0.1.0-1.19.6", path = "../utils" }
+ polly = { package = "krun-polly", version = "=0.1.0-1.19.6", path = "../polly" }
+ rutabaga_gfx = { package = "krun-rutabaga-gfx", version = "=0.1.0-1.19.6", path = "../rutabaga_gfx", features = ["virgl_renderer", "virgl_renderer_next"], optional = true }
+-imago = { version = "0.2.2", features = ["sync-wrappers"] }
++imago = { version = "0.2.5", features = ["sync-wrappers"] }
+ 
+ [target.'cfg(target_os = "macos")'.dependencies]
+ hvf = { package = "krun-hvf", version = "=0.1.0-1.19.6", path = "../hvf" }
+diff --git a/src/devices/src/virtio/block/device.rs b/src/devices/src/virtio/block/device.rs
+index 9e83a77..81aefb1 100644
+--- a/src/devices/src/virtio/block/device.rs
++++ b/src/devices/src/virtio/block/device.rs
+@@ -494,6 +494,58 @@ mod tests {
+         );
+     }
+ 
++    /// A raw image is the disk: a discard or write-zeroes request that reaches the end of the
++    /// device must not shorten the file, or the next boot sees a smaller disk than the
++    /// filesystem on it (mke2fs zeroes the last 64 KiB of the device; fstrim and blkdiscard
++    /// on a whole-disk filesystem end there too).
++    #[test]
++    fn raw_image_keeps_size_after_tail_discard_and_write_zeroes() {
++        const SIZE: u64 = 4 << 20;
++        const TAIL: u64 = 64 << 10;
++        let backing = TempFile::new().expect("create backing file");
++        let path = backing.as_path().to_str().unwrap().to_string();
++        let open = || {
++            Block::new(
++                "tail".to_string(),
++                None,
++                CacheType::Unsafe,
++                path.clone(),
++                ImageType::Raw,
++                false,
++                false,
++                SyncMode::Full,
++            )
++            .expect("open raw image")
++        };
++
++        for request in ["write-zeroes", "write-zeroes+unmap", "discard"] {
++            backing.as_file().set_len(SIZE).expect("size backing file");
++            let block = open();
++            assert_eq!({ block.config.capacity }, SIZE / SECTOR_SIZE);
++            {
++                let mut disk = block.disk_image.lock().unwrap();
++                match request {
++                    "write-zeroes" => disk.write_zeroes(SIZE - TAIL, TAIL),
++                    "write-zeroes+unmap" => disk.discard_to_zero(SIZE - TAIL, TAIL),
++                    _ => disk.discard_to_any(SIZE - TAIL, TAIL),
++                }
++                .expect(request);
++            }
++            drop(block);
++
++            assert_eq!(
++                backing.as_file().metadata().unwrap().len(),
++                SIZE,
++                "{request} at the end of the disk changed the image file size"
++            );
++            assert_eq!(
++                { open().config.capacity },
++                SIZE / SECTOR_SIZE,
++                "{request} at the end of the disk shrank the disk seen on the next open"
++            );
++        }
++    }
++
+     #[test]
+     fn disk_image_id_accepts_empty_block_id() {
+         let backing = TempFile::new().expect("create backing file");
+-- 
+2.39.5 (Apple Git-154)
+

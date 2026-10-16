@@ -14,6 +14,7 @@
 // ring of 3 textures: the host copies a submitted texture on its own Metal queue after the frame's work, so the next
 // frame must not draw into the same one (an OpenVR runtime's Submit copy gives the same guarantee): IMTLD3D11ExportableTexture (DXMT private interface) gives each eye's Metal texture plus the
 // shared event to wait for, WMTVRSubmit (winemetal.dll) sends the frame. Prints "vr: submitted N, failed M".
+// Also prints "vr: max frame latency A, B after the first export" (IDXGIDevice1::GetMaximumFrameLatency).
 // Needs StonkGuy/dxmt vr-export and a wmtr executor with a VR link (WMTR_VR_SOCKET + WMTR_VR_MACH_NAME).
 // Per frame: N draws of an instanced-free textured cube grid, each with its own constant buffer
 // update (Map WRITE_DISCARD), plus K full-screen overdraw passes with a moderately heavy pixel
@@ -307,6 +308,10 @@ int main(int argc, char **argv) {
           if (n_off) ctx1->ClearView(eye_rtv[slot][e], black, off, n_off);
         }
       }
+      /* DXMT bounds the frame queue from the first export on (d3d11.exportMaxFrameLatency) */
+      UINT lat0 = 0, lat1 = 0;
+      IDXGIDevice1 *dxgi1 = nullptr;
+      if (frame == 0 && SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice1), (void **)&dxgi1))) dxgi1->GetMaximumFrameLatency(&lat0);
       bool ok = true;
       for (int e = 0; e < 2; e++) {
         UINT64 ev = 0, val = 0;
@@ -317,6 +322,10 @@ int main(int argc, char **argv) {
         memcpy(vi.pose[e], pose, sizeof pose); memcpy(vi.fov[e], fov, sizeof fov);
       }
       if (ok && vr_submit(&vi) == 0) vr_ok++; else vr_fail++;
+      if (dxgi1) {
+        dxgi1->GetMaximumFrameLatency(&lat1); dxgi1->Release();
+        printf("vr: max frame latency %u, %u after the first export\n", lat0, lat1); fflush(stdout);
+      }
     }
     scene(rtv, g_width, g_height, clear);
     QueryPerformanceCounter(&tb);

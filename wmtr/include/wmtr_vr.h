@@ -27,6 +27,17 @@ int wmtr_vr_submit(struct wmtr_vr *vr, const struct WMTVRSubmitInfo *info);
  * vr == NULL (no VR host attached) answers HELLO with connected = 0. Returns an NTSTATUS. */
 int wmtr_vr_query(struct wmtr_vr *vr, void *buf, uint32_t size);
 
+/* Where a frame's time goes between its WMTVRSubmit and its VRL_SUBMIT (vrhost's "submit->copied"); the four
+ * stages add up to it. The submit overtakes the frame's own rendering: DXMT's encode thread is still sending that
+ * rendering (and what is queued before it, up to dxgi.maxFrameLatency frames) when the submit arrives. */
+enum {
+  WMTR_VR_STAGE_ENCODE, /* submit -> the executor encoded the event signal that ends the frame's rendering */
+  WMTR_VR_STAGE_RENDER, /* -> the GPU finished that rendering (the copy starts) */
+  WMTR_VR_STAGE_COPY,   /* the eye copy on the GPU */
+  WMTR_VR_STAGE_NOTIFY, /* -> completion handler (VRL_SUBMIT sent) */
+  WMTR_VR_STAGES
+};
+
 struct wmtr_vr_stats {
   uint64_t submits;   /* WMTVRSubmit calls */
   uint64_t sent;      /* VRL_SUBMIT packets sent */
@@ -36,8 +47,13 @@ struct wmtr_vr_stats {
   uint64_t swapchains;/* swapchains (re)created */
   uint64_t queries;   /* WMTR_CTL_VR_QUERY requests answered */
   uint64_t haptics;   /* VRL_HAPTICS sent */
+  uint64_t stage_frames;             /* frames in stage_ns */
+  uint64_t stage_ns[WMTR_VR_STAGES]; /* cumulative, see WMTR_VR_STAGE_* */
 };
 void wmtr_vr_get_stats(struct wmtr_vr *vr, struct wmtr_vr_stats *out);
+/* the executor encoded a signal of shared event `event` (host object) to `value` for the guest: the time is kept
+ * for the stage split of the frames that wait for it. vr == NULL is ignored. */
+void wmtr_vr_note_signal(struct wmtr_vr *vr, uint64_t event, uint64_t value);
 
 /* attach an exporter to an executor (call 146); NULL detaches. Without one, call 146 fails with
  * STATUS_NOT_SUPPORTED. wmtr_host_create attaches one itself when WMTR_VR_MACH_NAME is set together with

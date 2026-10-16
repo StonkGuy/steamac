@@ -48,8 +48,13 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 		sockaddr_in6 addr{};
 		addr.sin6_family = AF_INET6;
 		addr.sin6_port = htons(o.port);
-		addr.sin6_addr = in6addr_loopback;
-		control_socket control(addr);
+		sockaddr_in addr4{};
+		addr4.sin_family = AF_INET;
+		addr4.sin_port = htons(o.port);
+		bool ipv4 = inet_pton(AF_INET, o.host.c_str(), &addr4.sin_addr) == 1;
+		if (not ipv4 and inet_pton(AF_INET6, o.host.c_str(), &addr.sin6_addr) != 1)
+			throw std::runtime_error("bad host address " + o.host);
+		control_socket control = ipv4 ? control_socket(addr4) : control_socket(addr);
 
 		auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(o.timeout_ms);
 		bool from_control = false; // the last packet receive() returned came over TCP
@@ -108,6 +113,14 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 			case cs::encryption_disabled:
 				break;
 			case cs::pin_needed: {
+				// the client's PIN prompt: wait for the user while watching the control socket (lobby.cpp pin_enter)
+				for (auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(o.pin_delay_ms);
+				     std::chrono::steady_clock::now() < until;)
+				{
+					pollfd pfd{.fd = control.get_fd(), .events = 0};
+					if (::poll(&pfd, 1, 50) > 0 and (pfd.revents & (POLLHUP | POLLERR)))
+						throw std::runtime_error("server closed the connection during PIN entry");
+				}
 				crypto::smp pin_check;
 				auto msg1 = pin_check.step1(o.pin);
 				control.send(fh::pin_check_1{msg1});
@@ -134,11 +147,25 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 		std::unique_ptr<stream_socket> stream;
 		if (h.stream_port > 0)
 		{
-			stream = std::make_unique<stream_socket>();
+			if (ipv4)
+			{
+				// The Android client connects its AF_INET6 UDP socket to the sockaddr_in (Linux maps it to IPv4);
+				// macOS refuses that, so use an AF_INET socket: same packets on the wire.
+				int fd = socket(AF_INET, SOCK_DGRAM, 0);
+				if (fd < 0)
+					throw std::system_error(errno, std::system_category());
+				stream = std::make_unique<stream_socket>(fd);
+			}
+			else
+				stream = std::make_unique<stream_socket>();
 			if (sec)
 				stream->set_aes_key_and_ivs(sec->stream_key, sec->stream_iv_header_to_headset, sec->stream_iv_header_from_headset);
 			addr.sin6_port = htons(h.stream_port);
-			stream->connect(addr);
+			addr4.sin_port = htons(h.stream_port);
+			if (ipv4)
+				stream->connect(addr4);
+			else
+				stream->connect(addr);
 			stream->send(fh::handshake{});
 		}
 		else
@@ -146,15 +173,15 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 		std::get<th::handshake>(receive(stream.get()));
 
 		fh::headset_info_packet info{};
-		info.render_eye_width = o.eye_width;
-		info.render_eye_height = o.eye_height;
+		info.render_eye_width = o.render_width ? o.render_width : o.eye_width;
+		info.render_eye_height = o.render_height ? o.render_height : o.eye_height;
 		info.stream_eye_width = o.eye_width;
 		info.stream_eye_height = o.eye_height;
 		info.available_refresh_rates = {72, 90};
-		info.settings.preferred_refresh_rate = 72;
+		info.settings.preferred_refresh_rate = o.refresh_hz;
 		info.settings.bitrate_bps = 20'000'000;
-		for (auto & f: info.fov)
-			f = XrFovf{-0.9f, 0.8f, 0.85f, -0.9f};
+		for (int e = 0; e < 2; ++e)
+			info.fov[e] = XrFovf{o.fov[e][0], o.fov[e][1], o.fov[e][2], o.fov[e][3]};
 		info.supported_codecs = {wivrn::video_codec::h265, wivrn::video_codec::h264};
 		info.system_name = "fake";
 		if (o.speaker_channels)
@@ -170,6 +197,7 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 		std::array<std::optional<uint64_t>, 2> last_frame; // newest frame index seen per stream
 		auto last_tracking = std::chrono::steady_clock::now();
 		float t = 0;
+		int input_tick = 0;
 
 		std::array<std::map<uint64_t, int64_t>, 2> first_packet; // frame -> headset time of its first shard
 		auto send_feedback = [&](uint8_t idx, uint64_t frame, bool ok) {
@@ -240,16 +268,53 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 				tr.view_flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
 				for (int i = 0; i < 2; ++i)
 					tr.views[i] = {.pose = {.orientation = {0, 0, 0, 1}, .position = {i ? 0.032f : -0.032f, 0, 0}},
-					               .fov = {-0.9f, 0.8f, 0.85f, -0.9f}};
-				tr.device_poses.push_back({.pose = yaw_pose(0.3f * std::sin(t)),
-				                           .angular_velocity = {0, 0.3f * std::cos(t), 0},
+					               .fov = {o.fov[i][0], o.fov[i][1], o.fov[i][2], o.fov[i][3]}};
+				// t advances 1 per second of motion phase: the default (0.159 Hz) is the old 0.3 sin(t) yaw
+				float w = 2 * float(M_PI) * o.motion_hz, ph = w * t;
+				float yaw = o.yaw_amplitude * std::sin(ph), pitch = o.pitch_amplitude * std::sin(ph + float(M_PI) / 2);
+				XrPosef head = yaw_pose(yaw);
+				if (o.pitch_amplitude != 0)
+				{
+					// yaw about +y, then pitch about the head's x: q = q_yaw * q_pitch
+					float cy = std::cos(yaw / 2), sy = std::sin(yaw / 2), cp = std::cos(pitch / 2), sp = std::sin(pitch / 2);
+					head.orientation = {cy * sp, sy * cp, -sy * sp, cy * cp};
+				}
+				tr.device_poses.push_back({.pose = head,
+				                           .angular_velocity = {0, o.yaw_amplitude * w * std::cos(ph), 0},
 				                           .device = wivrn::device_id::HEAD,
 				                           .flags = wivrn::from_headset::orientation_valid | wivrn::from_headset::position_valid |
 				                                    wivrn::from_headset::angular_velocity_valid});
+				if (o.controllers)
+				{
+					// hands 40 cm in front, 30 cm below the head, 20 cm to each side, swaying with the head
+					for (auto [dev, x]: {std::pair{wivrn::device_id::LEFT_GRIP, -0.2f}, {wivrn::device_id::LEFT_AIM, -0.2f},
+					                     {wivrn::device_id::RIGHT_GRIP, 0.2f}, {wivrn::device_id::RIGHT_AIM, 0.2f}})
+						tr.device_poses.push_back({.pose = {.orientation = head.orientation, .position = {x + 0.1f * std::sin(ph), 1.3f, -0.4f}},
+						                           .device = dev,
+						                           .flags = wivrn::from_headset::orientation_valid | wivrn::from_headset::position_valid |
+						                                    wivrn::from_headset::orientation_tracked |
+						                                    wivrn::from_headset::position_tracked});
+				}
 				if (stream)
 					stream->send(std::move(tr));
 				else
 					control.send(std::move(tr));
+				if (o.controllers and ++input_tick % 4 == 0)
+				{
+					// 50 Hz: right trigger ramps 0..1 over 2 s, A pressed for the first half of every second, left stick x sways
+					fh::inputs in{};
+					float trig = std::fmod(t, 2.f) / 2;
+					bool a = std::fmod(t, 1.f) < 0.5f;
+					XrTime now = hs_now();
+					in.values = {{wivrn::device_id::RIGHT_TRIGGER_VALUE, trig, now},
+					             {wivrn::device_id::RIGHT_TRIGGER_TOUCH, trig > 0.05f ? 1.f : 0.f, now},
+					             {wivrn::device_id::A_CLICK, a ? 1.f : 0.f, now},
+					             // B (VRChat: menu) held for 0.3 s every 8 s
+					             {wivrn::device_id::B_CLICK, std::fmod(t, 8.f) < 0.3f ? 1.f : 0.f, now},
+					             {wivrn::device_id::LEFT_THUMBSTICK_X, 0.5f * std::sin(ph), now},
+					             {wivrn::device_id::LEFT_SQUEEZE_VALUE, a ? 0.f : 1.f, now}};
+					control.send(std::move(in));
+				}
 			}
 
 			th::packets pkt = receive(stream.get());
@@ -383,7 +448,11 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 					res.view_info_ok = false;
 				res.display_time_offset_ms = (vi.display_time - hs_now()) / 1e6;
 				if (idx == 0)
+				{
 					res.display_times.emplace_back(frame_idx, vi.display_time);
+					auto & q = vi.pose[0].orientation;
+					res.view_orientation.push_back({frame_idx, {q.x, q.y, q.z, q.w}});
+				}
 
 				CVPixelBufferRef img = dec[idx].decode(au);
 				send_feedback(idx, frame_idx, img != nullptr);
@@ -392,6 +461,21 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 				int64_t read = vrhost::TestPattern::read_frame_index(img);
 				if (o.on_decoded)
 					o.on_decoded(idx, frame_idx, img);
+				if (o.on_view)
+				{
+					FakeHeadsetOptions::View v;
+					for (int e = 0; e < 2; ++e)
+					{
+						auto & q = vi.pose[e].orientation;
+						auto & p = vi.pose[e].position;
+						v.orientation[e] = {q.x, q.y, q.z, q.w};
+						v.position[e] = {p.x, p.y, p.z};
+						v.fov[e] = {vi.fov[e].angleLeft, vi.fov[e].angleRight, vi.fov[e].angleUp, vi.fov[e].angleDown};
+						v.foveation_x[e] = vi.foveation[e].x;
+						v.foveation_y[e] = vi.foveation[e].y;
+					}
+					o.on_view(idx, frame_idx, img, v);
+				}
 				if (read != int64_t(frame_idx & 0xffff))
 					res.index_mismatch[idx]++;
 				res.decoded[idx]++;

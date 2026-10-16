@@ -39,12 +39,7 @@ class System : public StubIVRSystem {
 
   void GetProjectionRaw(EVREye eye, float *l, float *r, float *t, float *b) override {
     svr_hello_rep hi = Runtime::get().hello();
-    const float *f = hi.fov[eye == Eye_Right ? 1 : 0];  // left, right, up, down (radians)
-    // OpenVR: tangents, y down (top is negative for an upward angle)
-    if (l) *l = std::tan(f[0]);
-    if (r) *r = std::tan(f[1]);
-    if (t) *t = -std::tan(f[2]);
-    if (b) *b = -std::tan(f[3]);
+    raw_tangents(hi.fov[eye == Eye_Right ? 1 : 0], l, r, t, b);
   }
 
   HmdMatrix44_t GetProjectionMatrix(EVREye eye, float zn, float zf) override {
@@ -88,9 +83,11 @@ class System : public StubIVRSystem {
   bool IsDisplayOnDesktop() override { return false; }
   bool SetDisplayVisibility(bool) override { return false; }
 
-  void GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin, float seconds, TrackedDevicePose_t *poses,
+  void GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin origin, float seconds, TrackedDevicePose_t *poses,
                                        uint32_t count) override {
     Runtime &rt = Runtime::get();
+    rt.pose_stats().abs_pose++;
+    if (origin == TrackingUniverseSeated) rt.pose_stats().abs_seated++;
     rt.poll();
     for (uint32_t i = 0; i < count; i++) poses[i] = rt.device_pose(i, seconds);
   }
@@ -136,7 +133,13 @@ class System : public StubIVRSystem {
     return i == kHmd ? TrackedDeviceClass_HMD : (i == kLeft || i == kRight) ? TrackedDeviceClass_Controller
                                                                             : TrackedDeviceClass_Invalid;
   }
-  bool IsTrackedDeviceConnected(vr::TrackedDeviceIndex_t i) override { return Runtime::get().device_connected(i); }
+  bool IsTrackedDeviceConnected(vr::TrackedDeviceIndex_t i) override {
+    Runtime &rt = Runtime::get();
+    bool c = rt.device_connected(i);
+    rt.pose_stats().connected_query++;
+    if (i == kHmd && !c) rt.pose_stats().connected_false_hmd++;
+    return c;
+  }
 
   bool GetBoolTrackedDeviceProperty(vr::TrackedDeviceIndex_t i, ETrackedDeviceProperty p,
                                     ETrackedPropertyError *e) override {
@@ -147,6 +150,7 @@ class System : public StubIVRSystem {
       case Prop_DeviceIsCharging_Bool: return prop_result(e, TrackedProp_Success, false);
       case Prop_HasDisplayComponent_Bool: return prop_result(e, TrackedProp_Success, i == kHmd);
       case Prop_HasControllerComponent_Bool: return prop_result(e, TrackedProp_Success, i != kHmd);
+      case Prop_ContainsProximitySensor_Bool: return prop_result(e, TrackedProp_Success, i == kHmd);
       default: return prop_result(e, TrackedProp_UnknownProperty, false);
     }
   }
@@ -227,12 +231,18 @@ class System : public StubIVRSystem {
     if (i >= kDeviceCount) return prop_result(e, TrackedProp_InvalidDevice, 0u);
     if (i == kHmd) {
       svr_hello_rep hi = Runtime::get().hello();
+      // The headset presents itself as SteamVR presents that family's HMD (OpenComposite XrHMD/XrTrackedDevice, values
+      // validated against SteamVR): titles key on these. VRChat ignores an HMD without Prop_ControllerType_String
+      // entirely (no head tracking: picture glued to the face, camera at floor height).
+      bool index = Runtime::get().profile() == SVR_PROFILE_INDEX;
       switch (p) {
-        case Prop_TrackingSystemName_String: return copy_string("steamac", buf, size, e);
+        case Prop_TrackingSystemName_String: return copy_string(index ? "lighthouse" : "oculus", buf, size, e);
         case Prop_ModelNumber_String: return copy_string(hi.name[0] ? hi.name : "steamac HMD", buf, size, e);
-        case Prop_ManufacturerName_String: return copy_string("steamac", buf, size, e);
+        case Prop_ManufacturerName_String: return copy_string(index ? "Valve" : "Oculus", buf, size, e);
         case Prop_SerialNumber_String: return copy_string("steamac-hmd", buf, size, e);
         case Prop_RenderModelName_String: return copy_string("generic_hmd", buf, size, e);
+        case Prop_ControllerType_String: return copy_string(index ? "indexhmd" : "oculus", buf, size, e);
+        case Prop_RegisteredDeviceType_String: return copy_string(index ? "valve/steamac-hmd" : "oculus/steamac-hmd", buf, size, e);
         default: return prop_result(e, TrackedProp_UnknownProperty, 0u);
       }
     }

@@ -73,6 +73,8 @@ public:
 		int64_t compose_ns, compose_gpu_ns, encode_ns;
 	};
 	Timing last_timing() const { return timing; }
+	// each eye's x offset from the head centre in head space (WiVRn foveation eye_x): -/+ half the eye distance
+	static void eye_offsets(const LinkFrame & frame, float eye_x[2]);
 
 private:
 	EyeCompositor compositor;

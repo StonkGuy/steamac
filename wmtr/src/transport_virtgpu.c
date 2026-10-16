@@ -66,7 +66,7 @@ struct drm_virtgpu_context_init { uint32_t num_params, pad; uint64_t ctx_set_par
 #define VIRTGPU_CONTEXT_PARAM_NUM_RINGS 0x0002
 #define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs 7
 
-struct vg_priv { int fd; uint32_t ring_bo; };
+struct vg_priv { int fd; uint32_t ring_bo; uint32_t blob_bo[WMTR_MAX_BLOBS]; };
 
 /* WAIT commands submitted (tests: tests/wmtr_wait_test.c) */
 uint64_t wmtr_vgpu_wait_submits;
@@ -139,7 +139,19 @@ v_open_ring(struct wmtr_transport *t, uint64_t size) {
 
 static void *
 v_add_blob(struct wmtr_transport *t, uint32_t blob, uint64_t size) {
-  return map_blob(t->priv, blob, size, NULL);
+  struct vg_priv *p = t->priv;
+  return blob < WMTR_MAX_BLOBS ? map_blob(p, blob, size, &p->blob_bo[blob]) : NULL;
+}
+
+/* unmapping and closing the last handle makes the kernel detach the resource from the context,
+ * unmap it from the guest (the host drops its stage-2 mapping) and unref it (the host frees it) */
+static void
+v_release_blob(struct wmtr_transport *t, uint32_t blob, void *base, uint64_t size) {
+  struct vg_priv *p = t->priv;
+  munmap(base, size);
+  struct drm_gem_close gc = {p->blob_bo[blob], 0};
+  if (xioctl(p->fd, DRM_IOCTL_GEM_CLOSE, &gc) < 0) fprintf(stderr, "wmtr: close blob %u: %s\n", blob, strerror(errno));
+  p->blob_bo[blob] = 0;
 }
 
 static void
@@ -178,5 +190,6 @@ wmtr_transport_create(void) {
   p->fd = -1;
   t->priv = p;
   t->open_ring = v_open_ring; t->add_blob = v_add_blob; t->kick = v_kick; t->wait = v_wait;
+  t->release_blob = v_release_blob;
   return t;
 }

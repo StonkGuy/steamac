@@ -45,16 +45,28 @@ vrpath_json() { # runtime dir, state dir: Proton reads runtime[0]; config/log ar
         "$2/config" "$2/log" "$1"
 }
 
+# Our vrclient_x64 file in Proton's tree (path under files/lib/wine): this payload's, one this script installed
+# (checksums kept until "off" has put Proton's back), or any build of the patched PE dll (another steamac layer's
+# payload, e.g. after switching between app bundles on one guest disk).
+ours() {
+    local W=$PROTON/files/lib/wine c; c=$(sum "$W/$1"); [[ -n $c ]] || return 1
+    cmp -s "$PAYLOAD/$1" "$W/$1" || grep -qx "$c" "$STATE/orig/installed" 2>/dev/null \
+        || { [[ $1 == *.dll ]] && grep -aq load_compositor_texture_dxmt "$W/$1"; }
+}
+
 apply() {
     local W=$PROTON/files/lib/wine B=$STATE/orig f changed=0
     [[ -d $W/x86_64-windows ]] || { log "no Proton Experimental in $STEAM"; return 0; }
     mkdir -p "$B/x86_64-windows" "$B/x86_64-unix" || return 1
-    # a new Proton version: its files are the originals now, the old kept ones are stale
-    [[ -f $B/version && $(sum "$PROTON/version") != "$(cat "$B/version")" ]] && rm -f "$B"/x86_64-*/* "$B/installed"
+    # a new Proton version: a kept original is stale where Proton rewrote the file; where ours is still there (an
+    # update that did not touch vrclient_x64) it is still Proton's and stays
+    if [[ -f $B/version && $(sum "$PROTON/version") != "$(cat "$B/version")" ]]; then
+        for f in $FILES; do ours "$f" || rm -f "$B/$f"; done
+    fi
     for f in $FILES; do
         cmp -s "$PAYLOAD/$f" "$W/$f" && continue
         # keep Proton's file unless it is one this script installed (an earlier payload)
-        if ! grep -qx "$(sum "$W/$f")" "$B/installed" 2>/dev/null; then
+        if ! ours "$f"; then
             [[ -f $W/$f ]] && { cp -f "$W/$f" "$B/$f" || return 1; }
         fi
         cp -f "$PAYLOAD/$f" "$W/$f.steamac-tmp" && mv -f "$W/$f.steamac-tmp" "$W/$f" || return 1
@@ -84,19 +96,28 @@ apply() {
 }
 
 restore() {
-    local W=$PROTON/files/lib/wine B=$STATE/orig f
+    local W=$PROTON/files/lib/wine B=$STATE/orig f keep=0 broken=""
     [[ -d $STATE ]] || return 0
     for f in $FILES; do
-        # only where our file is still there (a Proton update may have restored it already)
-        if [[ -f $B/$f ]] && grep -qx "$(sum "$W/$f")" "$B/installed" 2>/dev/null; then
-            cp -f "$B/$f" "$W/$f.steamac-tmp" && mv -f "$W/$f.steamac-tmp" "$W/$f"
+        # Proton's own file is there (never replaced, or an update restored it): a kept original is stale
+        ours "$f" || continue
+        if [[ -f $B/$f ]]; then
+            # a kept original is deleted only once it is back in place
+            cp -f "$B/$f" "$W/$f.steamac-tmp" && mv -f "$W/$f.steamac-tmp" "$W/$f" \
+                || { log "cannot put Proton's $f back; keeping it in $B"; keep=1; }
+        else
+            broken+=" ${f##*/}"
         fi
     done
     if [[ -e $STATE/vrpath.kept ]]; then
         if [[ -f $STATE/vrpath.orig ]]; then cp -f "$STATE/vrpath.orig" "$VRPATH"
         elif [[ -f $VRPATH && $(cat "$VRPATH") == "$(vrpath_json "$STATE/runtime" "$STATE")" ]]; then rm -f "$VRPATH"; fi
     fi
-    rm -rf "$STATE"
+    if (( keep )); then find "$STATE" -mindepth 1 -maxdepth 1 ! -name orig -exec rm -rf {} +; else rm -rf "$STATE"; fi
+    if [[ -n $broken ]]; then
+        log "WARNING: no original of${broken} kept; the patched file stays in $PROTON. Repair: in Steam, Proton - Experimental > Properties > Installed Files > Verify integrity of tool files"
+        return 0
+    fi
     log "Proton's vrclient_x64 and openvrpaths.vrpath back"
 }
 

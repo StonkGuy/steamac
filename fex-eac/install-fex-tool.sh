@@ -16,7 +16,10 @@ cur() { sed -n "s/^FEX describe\t//p" "$V/VERSIONS.txt"; }
 new() { sed -n "s/^FEX describe\t//p" "$N/VERSIONS.txt"; }
 case "${1:-install}" in
 status) echo "installed: $(cur)"; echo "staged:    $(new)"; for b in $BINS; do sha256sum "$V/usr/bin/$b" | cut -c1-12; done | tr "\n" " "; echo; exit 0;;
-restore) S=$(ls -d "$B"/FEX-* | head -1); for b in $BINS; do cp "$S/usr/bin/$b" "$V/usr/bin/.$b.new" && mv -f "$V/usr/bin/.$b.new" "$V/usr/bin/$b"; done
+restore) S=$(ls -d "$B"/FEX-* 2>/dev/null | head -1)
+         # No backup means Valve's build was never replaced: an empty S would copy from / into the tool.
+         [ -n "$S" ] || { echo "no backup in $B: Valve's build was never replaced, nothing to restore" >&2; exit 1; }
+         for b in $BINS; do cp "$S/usr/bin/$b" "$V/usr/bin/.$b.new" && mv -f "$V/usr/bin/.$b.new" "$V/usr/bin/$b"; done
          for f in $FILES; do cp "$S/$f" "$V/.$f.new" && mv -f "$V/.$f.new" "$V/$f"; done; echo "restored: $(cur)"; exit 0;;
 esac
 # Already installed when the binaries match the staged build (the describe string is fixed at configure time, so a

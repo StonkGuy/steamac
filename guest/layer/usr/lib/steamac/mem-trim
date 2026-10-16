@@ -1,0 +1,29 @@
+#!/bin/bash
+# steamac: return the boot's page cache to the Mac, once (steamac-mem-trim.timer, 150 s after boot).
+#
+# Booting SteamOS and starting the Steam client leave ~3 GiB of clean page cache in the guest. The
+# guest frees memory to the Mac through virtio-balloon free page reporting, and since libkrun patch
+# 0026 the Mac really gets reported pages back (they leave the VM's phys_footprint), but page cache
+# is not free memory, so it is never reported. Dropping the clean page cache once, after boot has
+# settled, frees it: ~1.7 GiB less VM footprint at idle (audit numbers in the commit). Re-reads are
+# served from the Mac's own file cache of the disk image. It runs once per boot, so it costs nothing
+# while a game runs.
+#
+# Default on; steamac.mem_trim=0 on the kernel command line turns it off.
+# Test overrides: STEAMAC_CMDLINE, STEAMAC_DROP_CACHES, STEAMAC_MEMINFO.
+set -euo pipefail
+
+cmdline=${STEAMAC_CMDLINE:-/proc/cmdline}
+drop=${STEAMAC_DROP_CACHES:-/proc/sys/vm/drop_caches}
+meminfo=${STEAMAC_MEMINFO:-/proc/meminfo}
+
+for w in $(cat "$cmdline" 2>/dev/null); do
+    case $w in steamac.mem_trim=0) echo "mem-trim: off (steamac.mem_trim=0)"; exit 0 ;; esac
+done
+
+free_kib() { awk '/^MemFree:/ { print $2 }' "$meminfo"; }
+before=$(free_kib)
+# 1 = clean page cache only: dirty pages, anonymous memory and slab stay untouched.
+echo 1 > "$drop"
+after=$(free_kib)
+echo "mem-trim: dropped clean page cache, MemFree ${before} -> ${after} KiB"

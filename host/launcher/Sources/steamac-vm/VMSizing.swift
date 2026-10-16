@@ -32,6 +32,8 @@ enum VMSizing {
     }
 
     static let minAutoMemMiB = 4096, maxAutoMemMiB = 16384
+    /// Smallest guest RAM a boot accepts (--mem; Options.validate). Saved settings are floored at 1024.
+    static let minMemMiB = 256
     /// Fewer than 4 vCPUs leave Steam's UI loading for minutes (STEAMAC-2K: 2 vCPUs on a 12-core Mac).
     static let minAutoCPUs = 4, maxAutoCPUs = 8
     /// macOS, the launcher, driver-internal allocations and other apps need room besides
@@ -109,6 +111,24 @@ enum VMSizing {
         for (p, n, want) in cpus where autoCPUs(host(16, p, n)) != want {
             failures.append("sizing: \(p.map(String.init) ?? "-")P/\(n) cores → \(autoCPUs(host(16, p, n))) vCPUs, want \(want)")
         }
+        // --mem is checked on a first boot too (needsDisk), with a kernel, so the other checks cannot mask it.
+        func rejected(_ flag: String, _ value: String, needsDisk: Bool) -> Bool {
+            guard var o = try? Options.parse(["steamac-vm", flag, value]) else { return false }
+            o.kernel = "/dev/null"
+            o.needsDisk = needsDisk
+            return (try? o.validate()) == nil
+        }
+        func memRejected(_ mib: Int, needsDisk: Bool) -> Bool { rejected("--mem", String(mib), needsDisk: needsDisk) }
+        // --cpus 0 on a first boot: same early return as --mem (validate skipped the CPU check).
+        if !rejected("--cpus", "0", needsDisk: true) { failures.append("sizing: --cpus 0 accepted on a first boot") }
+        if !rejected("--cpus", "0", needsDisk: false) { failures.append("sizing: --cpus 0 accepted") }
+        if rejected("--cpus", "1", needsDisk: false) { failures.append("sizing: --cpus 1 rejected") }
+        if rejected("--cpus", "255", needsDisk: false) { failures.append("sizing: --cpus 255 rejected") }
+        if !rejected("--cpus", "256", needsDisk: false) { failures.append("sizing: --cpus 256 accepted") }
+        if !memRejected(0, needsDisk: true) { failures.append("sizing: --mem 0 accepted on a first boot") }
+        if !memRejected(0, needsDisk: false) { failures.append("sizing: --mem 0 accepted") }
+        if !memRejected(minMemMiB - 1, needsDisk: false) { failures.append("sizing: --mem \(minMemMiB - 1) accepted") }
+        if memRejected(minMemMiB, needsDisk: false) { failures.append("sizing: --mem \(minMemMiB) rejected") }
         let air = host(8, 4, 8)
         if memWarning(memMiB: 4096, host: air) == nil { failures.append("sizing: 1 GiB GPU budget on an 8 GB Mac not warned") }
         if memWarning(memMiB: 5120, host: air) == nil { failures.append("sizing: 5 GB on an 8 GB Mac not warned") }

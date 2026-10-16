@@ -97,6 +97,14 @@ s_add_blob(struct wmtr_transport *t, uint32_t blob, uint64_t size) {
 }
 
 static void
+s_release_blob(struct wmtr_transport *t, uint32_t blob, void *base, uint64_t size) {
+  struct sock_priv *sp = t->priv;
+  munmap(base, size);
+  struct wmtr_sock_msg m = {WMTR_SOCK_BLOB_DEL, blob, size};
+  send_msg(sp->fd, &m, -1);
+}
+
+static void
 s_kick(struct wmtr_transport *t) {
   struct sock_priv *sp = t->priv;
   struct wmtr_sock_msg m = {WMTR_SOCK_KICK, 0, 0};
@@ -118,5 +126,6 @@ wmtr_transport_create(void) {
   sp->fd = -1;
   t->priv = sp;
   t->open_ring = s_open_ring; t->add_blob = s_add_blob; t->kick = s_kick; t->wait = s_wait;
+  t->release_blob = s_release_blob;
   return t;
 }

@@ -20,9 +20,9 @@ current `eac-<release>` branch, with a test in its `eac-tests/`.
 The EAC client is the stock one from the Proton EasyAntiCheat Runtime. Nothing fakes, replays or short-circuits its
 result. Not affiliated with FX GAMES, Valve, Epic Games, VRChat or the DXMT authors.
 
-Status: verified on one Mac and one anti-cheat title. The default is the Vulkan path; DXMT is a setting you turn on.
-Published VRChat frame rates exist only for the Vulkan path (about 26-30 fps in a light world at 1280x800); there are
-no published figures for DXMT yet.
+Status: verified on one Mac (M2, 16 GB). VRChat passes EAC and enters a world on both graphics paths. The default is
+the Vulkan path; DXMT is a setting you turn on. Measured on that Mac: VRChat about 29-44 fps on Vulkan and 76-78 fps on
+DXMT (single runs, see [docs/eac-performance.md](docs/eac-performance.md)).
 
 ## Requirements
 
@@ -36,10 +36,10 @@ no published figures for DXMT yet.
 
 ## Install and first launch
 
-1. Download `FX-Steam-Launcher-<version>.dmg` from this fork's [releases](https://github.com/StonkGuy/steamac/releases),
-   drag **FX Steam Launcher.app** to Applications and open it (see *First open* below). Each release has two assets: the
-   DMG, and `FX-Steam-Launcher-<version>-gpl-sources.tar`, the corresponding source for the GPL and LGPL components
-   (kernel, initramfs tools, DXMT, wmtr).
+1. Build the app from this fork's `main` branch or a [release](https://github.com/StonkGuy/steamac/releases) tag:
+   `./build.sh` ([requirements and building](docs/upstream/requirements-and-building.md); the DXMT path also needs
+   `make dxmt-payload` in `wmtr/` before the layer step). This fork does not publish a prebuilt DMG yet. Copy
+   **FX Steam Launcher.app** from `work/out/` to Applications and open it (see *First open* below).
 2. On first start, choose **Create New Disk…**. The app downloads Valve's SteamOS image, verifies it and sets it up.
    This takes a while, once.
 3. Sign in to Steam in the window. Keep a **16:10** window size (Settings > Display > Default window
@@ -62,9 +62,11 @@ The fork's builds are ad-hoc signed and not notarized, so macOS Gatekeeper block
 
 Settings > Advanced > **Graphics path**: *DXMT (lean)* or *Vulkan (classic)*; it applies from the next start. Nothing
 to set per game: when Steam starts, every installed Proton gets the selected path, and Proton puts it into each game's
-prefix. Switching back to *Vulkan* restores Proton's own files exactly. DXMT covers Direct3D 11 (and 10); play Direct3D
-12 games on *Vulkan* (untested or limited under DXMT). EAC with DXMT on a real prefix is unverified until first launch;
-switch to *Vulkan* if EAC fails.
+prefix. Switching back to *Vulkan* restores Proton's own files exactly. If Proton's original files are missing (for
+example after switching between two builds of the app on one disk), the files stay DXMT's and the boot log says so;
+repair Proton in Steam: the Proton tool > Properties > Installed Files > **Verify integrity of tool files**. DXMT
+covers Direct3D 11 (and 10); play Direct3D 12 games on *Vulkan* (DXMT's Direct3D 12 is limited). EAC on DXMT is
+verified with VRChat; if EAC fails in another game, switch to *Vulkan*.
 
 The **Metal Performance HUD** shows the frame rate on either path: Settings > Display, the View menu, or Ctrl+Cmd+P. It can
 be turned on and off while a game runs.
@@ -94,6 +96,7 @@ manual steps are required for VRChat; both are planned to become automatic:
 |---|---|
 | the DXMT setting seems to have no effect | the setting applies at the next VM start: restart the VM after changing it. If the app lacks the DXMT host library, Settings says so and the app uses Vulkan (boot log: `gpu: graphics path Vulkan`) |
 | EAC fails on DXMT | switch to *Vulkan* and restart the launcher |
+| Direct3D 11 games fail on *Vulkan* after using DXMT | Proton still has DXMT's files: in Steam, the Proton tool > Properties > Installed Files > Verify integrity of tool files |
 | EAC does not finish, or fails after a Steam update | the patched FEX is missing or was replaced by Valve's; run `sh install-fex-tool.sh status` |
 | about a minute's stall before joining | check that `WINE_CPU_TOPOLOGY` is in the launch options |
 | stutter with audio crackle | grant the microphone permission (System Settings > Privacy & Security > Microphone) |
@@ -103,13 +106,19 @@ More: [docs/eac-troubleshooting.md](docs/eac-troubleshooting.md).
 
 ## Limits
 
-- One machine verified (M2, 16 GB, macOS 27.0). VRChat is verified in game; Mini Royale's EAC launcher reaches `301`
-  (not played further). Other titles are untested and results differ game by game.
-- DXMT: Direct3D 11/10 only. Feature level is capped at 11_1 (no DXIL, no conservative rasterization).
-- Direct3D 12 through D3DMetal is **planned**, not included.
+- One machine verified (M2, 16 GB, macOS 27.0). VRChat is verified in game on both paths; Mini Royale's EAC launcher
+  reaches `301` (not played further). Other titles are untested and results differ game by game.
+- 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
+  memory on both paths with an 8 GiB VM.
+- VR is not part of this release (experimental, on the `vr-live` branch).
+- DXMT: Direct3D 11/10. Its Direct3D 12 is limited (feature level 11_1, DXBC only, no DXIL, no ray tracing;
+  ExecuteIndirect stalls the GPU); use *Vulkan* for Direct3D 12 games.
+- D3DMetal is not included.
 - The DXMT setting applies to every game; on it the game's Metal layer covers the whole VM view (a windowed game or alt-tab
   shows the game layer).
 - Games that need more memory than the VM gets (Settings > Advanced) will swap.
+- Switching the graphics path changes every installed Proton at the next boot; see *Choosing the graphics path* for
+  the repair if a Proton was left with DXMT's files.
 - Asynchronous pipeline compilation exists in the build but is off and not recommended (measured worse).
 - The microphone has had little testing; a freeze after a microphone start is not fully ruled out. A rebuilt or re-signed
   app asks again for microphone permission.

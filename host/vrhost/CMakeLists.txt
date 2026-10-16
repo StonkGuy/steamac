@@ -152,7 +152,7 @@ set_tests_properties(encoder loopback control vd_wire vd_loopback vd_key PROPERT
 # the test headset as a tool, for a running steamac-vrhost (docs/vr.md "Testing without a headset")
 add_executable(vrhost-test-headset tests/test_headset_tool.mm tests/fake_headset.cpp tests/vt_decode.mm)
 set_source_files_properties(tests/test_headset_tool.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
-target_link_libraries(vrhost-test-headset PRIVATE vrhost-core)
+target_link_libraries(vrhost-test-headset PRIVATE vrhost-core "-framework ImageIO" "-framework CoreGraphics" "-framework Foundation")
 
 # End-to-end game-frame test (wmtr exporter -> link -> compositor -> session -> test headset). The exporter
 # (wmtr/src/wmtr_vr.m) needs the WMTVRSubmitInfo layout from a StonkGuy/dxmt vr-export checkout.
@@ -168,7 +168,16 @@ if(VRHOST_DXMT_DIR)
 	set_source_files_properties(tests/test_vr_e2e.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
 	target_link_libraries(test_vr_e2e PRIVATE vrhost-core vrhost-compositor vrhost-test-exporter "-framework Metal")
 	add_test(NAME vr_e2e COMMAND test_vr_e2e)
+	add_executable(test_foveation_geometry tests/test_foveation_geometry.mm)
+	set_source_files_properties(tests/test_foveation_geometry.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+	target_link_libraries(test_foveation_geometry PRIVATE vrhost-core vrhost-compositor "-framework Metal" "-framework IOSurface")
+	add_test(NAME foveation_geometry COMMAND test_foveation_geometry)
 	set_tests_properties(vr_e2e PROPERTIES TIMEOUT 90)
+	# the same path with the eyes in one double-wide texture (OpenVR texture bounds) and in one two-slice array
+	foreach(layout wide array)
+		add_test(NAME vr_e2e_${layout} COMMAND test_vr_e2e)
+		set_tests_properties(vr_e2e_${layout} PROPERTIES TIMEOUT 90 ENVIRONMENT VR_E2E_LAYOUT=${layout})
+	endforeach()
 else()
 	message(STATUS "vr_e2e test off: set VRHOST_DXMT_DIR to a StonkGuy/dxmt vr-export checkout")
 endif()

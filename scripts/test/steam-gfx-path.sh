@@ -11,6 +11,10 @@
 #   missing   steamac.gfx=dxmt without the DXMT files leaves everything stock
 #   poisoned  a kept original that is a DXMT file (kept by an older script from a payload it no longer knows) is never
 #             kept and never restored: the file stays, a log line points at Steam's Verify integrity, the backup goes
+#   foreign   switching between app bundles (DXMT payload A -> B -> Vulkan with A's layer) where neither payload's
+#             checksum is kept: the DXMT file is still recognised, Proton's kept originals go back and are only then
+#             dropped (before: no restore, originals deleted, "DXVK back" logged with DXMT's d3d11/dxgi in place)
+#   noorig    a DXMT file with no kept original: it stays, a WARNING names Steam's Verify integrity, no "DXVK back"
 # usage: scripts/test/steam-gfx-path.sh
 set -u
 S=$(cd "$(dirname "$0")/../.." && pwd)/guest/layer/usr/lib/steamac/steam-gfx-path
@@ -120,5 +124,26 @@ cmp -s "$D2/dxgi.dll" "$D2/d3d9.dll" || fail poisoned "sound kept original of dx
 # a DXMT file in Proton's tree that no payload or checksum knows is not kept as Proton's original
 dxblob "$D2/dxgi.dll" y; run "steamac.gfx=dxmt" "$X2"
 grep -rl dxmt "$T/state" >/dev/null 2>&1 && fail poisoned "unknown DXMT file kept as an original"
+# foreign: a fresh tree, two real-looking DXMT payloads (dxmt:: symbols), checksums lost between bundles
+rm -rf "$T/state" "$ST/steamapps/compatdata"; : > "$T/log"
+for f in d3d11 dxgi d3d10core d3d9; do blob "$P1/files/lib/wine/dxvk/x86_64-windows/$f.dll" v; done
+DA=$T/dxa; DB=$T/dxb; mkdir -p "$DA/x86_64-windows" "$DA/x86_64-unix" "$DB/x86_64-windows" "$DB/x86_64-unix"
+for f in d3d11 dxgi d3d10core winemetal; do dxblob "$DA/x86_64-windows/$f.dll" a; dxblob "$DB/x86_64-windows/$f.dll" b; done
+blob "$DA/x86_64-unix/winemetal.so" s; blob "$DB/x86_64-unix/winemetal.so" s
+D1=$P1/files/lib/wine/dxvk/x86_64-windows
+run "steamac.gfx=dxmt" "$DA"; rm -f "$T"/state/orig/*/installed
+run "steamac.gfx=dxmt" "$DB"; rm -f "$T"/state/orig/*/installed
+run "steamac.gfx=vulkan" "$DA"
+for f in d3d11 dxgi d3d10core; do
+  cmp -s "$D1/$f.dll" "$D1/d3d9.dll" || fail foreign "P1 $f.dll not Proton's after A -> B -> vulkan"
+done
+[ -z "$(ls -A "$T/state/orig" 2>/dev/null)" ] || fail foreign "backups left after a full restore"
+# noorig: DXMT's dxgi.dll in Proton's tree with nothing kept
+run "steamac.gfx=dxmt" "$DB"; rm -rf "$T"/state/orig/*/dxgi.dll; : > "$T/log"
+run "steamac.gfx=vulkan" "$DB"
+cmp -s "$D1/d3d11.dll" "$D1/d3d9.dll" || fail noorig "kept d3d11.dll not restored"
+grep -q "dxmt" "$D1/dxgi.dll" || fail noorig "dxgi.dll changed although no original was kept"
+grep -q "WARNING: no original of dxgi.dll kept for $P1.*Verify integrity" "$T/log" || fail noorig "no warning: $(cat "$T/log")"
+grep -q "DXVK back in $P1" "$T/log" && fail noorig "claims DXVK back with DXMT's dxgi.dll in place"
 echo "steam-gfx-path: $([ $fails = 0 ] && echo passed || echo FAILED)"
 exit $((fails > 0))

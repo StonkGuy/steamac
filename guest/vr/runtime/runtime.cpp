@@ -51,6 +51,7 @@ vr::EVRInitError Runtime::init(vr::EVRApplicationType type) {
     return vr::VRInitError_Init_HmdNotFound;
   }
   hello_ = rep;
+  hello_view_ = rep.connected && rep.eye_width;
   SVR_INFO("init app type %d over %s: %s %ux%u per eye %.0f Hz connected=%u", (int)type, transport_->name(),
            rep.name, rep.eye_width, rep.eye_height, rep.refresh_hz, rep.connected);
   return vr::VRInitError_None;
@@ -78,10 +79,12 @@ float Runtime::refresh_hz() const {
 bool Runtime::fetch(svr_frame_rep *out) {
   svr_frame_req req{};
   req.h = {SVR_FRAME, sizeof(req)};
+  bool need_view;
   {
     std::lock_guard<std::mutex> g(m_);
     if (!transport_) return false;
     req.last_frame_id = frame_.frame_id;
+    need_view = !hello_view_;
   }
   svr_frame_rep rep{};
   int r = transport_->call(&req.h, &rep.h, sizeof(rep));
@@ -89,6 +92,22 @@ bool Runtime::fetch(svr_frame_rep *out) {
   if (r || rep.h.op != SVR_FRAME || rep.h.size != sizeof(rep)) {
     SVR_ERR("frame request failed (%d)", r);
     return false;
+  }
+  if (rep.connected && need_view) {
+    // VR_Init ran before a headset connected: its hello had no eye size, FOV or IPD (GetProjectionRaw would be all
+    // zero). Ask again now that the host has the headset's view.
+    svr_hello_req hq{};
+    hq.h = {SVR_HELLO, sizeof(hq)};
+    hq.version = SVR_VERSION;
+    hq.pid = (uint32_t)getpid();
+    strncpy(hq.app_key, app_key.c_str(), sizeof(hq.app_key) - 1);
+    svr_hello_rep hr{};
+    if (transport_->call(&hq.h, &hr.h, sizeof(hr)) == 0 && hr.h.op == SVR_HELLO && hr.connected && hr.eye_width) {
+      std::lock_guard<std::mutex> g(m_);
+      hello_ = hr;
+      hello_view_ = true;
+      SVR_INFO("headset view: %s %ux%u per eye %.0f Hz", hr.name, hr.eye_width, hr.eye_height, hr.refresh_hz);
+    }
   }
   std::lock_guard<std::mutex> g(m_);
   clock_offset_ = now - rep.host_now;
@@ -128,9 +147,45 @@ bool Runtime::wait_frame() {
   std::lock_guard<std::mutex> g(m_);
   if (frame_.frame_id) last_vsync_ = host_to_guest(frame_.predicted_display);
   frame_ = rep;
+  const svr_pose &head = rep.pose[SVR_DEV_HEAD];
+  if (head.flags != logged_head_flags_) {
+    // the render pose the game gets: invalid poses leave the scene head-locked in the headset
+    logged_head_flags_ = head.flags;
+    SVR_INFO("frame %llu head pose %s%s: orientation %.3f %.3f %.3f %.3f position %.3f %.3f %.3f",
+             (unsigned long long)rep.frame_id, (head.flags & SVR_POSE_VALID) ? "valid" : "INVALID",
+             (head.flags & SVR_POSE_TRACKED) ? ", tracked" : "", head.orientation[0], head.orientation[1],
+             head.orientation[2], head.orientation[3], head.position[0], head.position[1], head.position[2]);
+  }
   SVR_TRACE("frame %llu display in %.2f ms", (unsigned long long)rep.frame_id,
             (host_to_guest(rep.predicted_display) - now_ns()) / 1e6);
   return true;
+}
+
+void Runtime::note_render_head(const vr::TrackedDevicePose_t &p) {
+  int64_t now = now_ns();
+  std::lock_guard<std::mutex> g(m_);
+  if (!p.bPoseIsValid) stats_head_invalid_++;
+  else
+    for (int i = 0; i < 3; i++) {
+      // head yaw/pitch proxies (forward vector) and height: their range over the window shows whether it moves
+      float v = i == 0 ? -p.mDeviceToAbsoluteTracking.m[0][2] : i == 1 ? -p.mDeviceToAbsoluteTracking.m[1][2]
+                                                                         : p.mDeviceToAbsoluteTracking.m[1][3];
+      if (v < stats_head_min_[i]) stats_head_min_[i] = v;
+      if (v > stats_head_max_[i]) stats_head_max_[i] = v;
+    }
+  if (!stats_logged_) stats_logged_ = now;
+  if (now - stats_logged_ < 5000000000LL) return;
+  stats_logged_ = now;
+  PoseStats &s = pose_stats_;
+  SVR_INFO("poses 5s: WaitGetPoses %u (failed %u), GetLastPoses %u, GetLastPoseForTrackedDeviceIndex %u, "
+           "GetDeviceToAbsoluteTrackingPose %u (seated %u), pose actions %u (inactive %u), IsTrackedDeviceConnected %u "
+           "(HMD false %u); render head invalid %u, forward x %.2f..%.2f y %.2f..%.2f, height %.2f..%.2f m",
+           s.wait.exchange(0), s.wait_fail.exchange(0), s.last_poses.exchange(0), s.last_pose_index.exchange(0),
+           s.abs_pose.exchange(0), s.abs_seated.exchange(0), s.pose_action.exchange(0), s.pose_action_inactive.exchange(0),
+           s.connected_query.exchange(0), s.connected_false_hmd.exchange(0), stats_head_invalid_, stats_head_min_[0],
+           stats_head_max_[0], stats_head_min_[1], stats_head_max_[1], stats_head_min_[2], stats_head_max_[2]);
+  stats_head_invalid_ = 0;
+  for (int i = 0; i < 3; i++) stats_head_min_[i] = 1e9f, stats_head_max_[i] = -1e9f;
 }
 
 svr_pose Runtime::frame_pose(int dev) const {
@@ -244,7 +299,17 @@ vr::EVRCompositorError Runtime::submit(vr::EVREye eye, const vr::Texture_t *tex,
   // Single-pass stereo uses an array texture with one eye per slice. Proton stores an explicit slice in the
   // description for SubmitWithArrayIndex; otherwise array textures default to one slice per eye.
   e.slice = array_index != ~0u ? array_index : mt->array_size > 1 ? mt->array_index : 0;
-  (void)flags;
+  SubmitGeometry geo{mt->width, mt->height, mt->dxgi_format, mt->array_size, e.slice, e.x, e.y, e.w, e.h, e.flags};
+  if (memcmp(&geo, &logged_geometry_[eye], sizeof geo)) {
+    // what the game submits, once per change: whole texture, a bounds rect (double-wide) or an array slice
+    logged_geometry_[eye] = geo;
+    SVR_INFO("submit %s eye: texture %ux%u dxgi %u array %u slice %u, bounds u %.3f..%.3f v %.3f..%.3f -> rect %u,%u %ux%u%s, "
+             "flags %#x%s%s",
+             eye == vr::Eye_Left ? "left" : "right", mt->width, mt->height, mt->dxgi_format, mt->array_size, e.slice,
+             bounds ? bounds->uMin : 0.f, bounds ? bounds->uMax : 1.f, bounds ? bounds->vMin : 0.f,
+             bounds ? bounds->vMax : 1.f, e.x, e.y, e.w ? e.w : mt->width, e.w ? e.h : mt->height,
+             e.w ? "" : " (whole)", (unsigned)flags, flip ? ", bottom-up" : "", (e.flags & SVR_EYE_SRGB) ? ", sRGB" : "");
+  }
   if (mt->event_handle && mt->event_value >= pending_.wait_value) {
     pending_.wait_event = mt->event_handle;
     pending_.wait_value = mt->event_value;
