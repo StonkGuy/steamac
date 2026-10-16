@@ -571,6 +571,8 @@ struct VdSession::impl
 	{
 		HeadsetInfo h;
 		uint32_t d;
+		int q_logged = -1;
+		bool ssw_logged = false;
 		float old_refresh = refresh;
 		uint32_t old_divisor = divisor;
 		std::shared_ptr<Channel> v;
@@ -584,6 +586,7 @@ struct VdSession::impl
 			int q = std::clamp(int(user.number(key_quality).value_or(int(Quality::medium))), int(Quality::potato),
 			                   int(Quality::unstoppable));
 			EyeSize stream = quest3_stream[q + 1];
+			q_logged = q;
 			if (not quest_family(hmd))
 				log("vd: headset type " + std::to_string(hmd) + " has no preset table here; using the Quest 3 sizes");
 			h.eye_width = cfg.width ? cfg.width : stream.width;
@@ -612,6 +615,7 @@ struct VdSession::impl
 			h.microphone = AudioFormat{mic_channels, audio_rate};
 			h.max_bitrate_bps = max_bitrate_bps;
 			bool ssw_headset = mobile.boolean(key_spacewarp).value_or(false);
+			ssw_logged = ssw_headset;
 			uint32_t bitrate = cfg.bitrate_bps;
 			if (auto bw = mobile.number(key_measured_bandwidth); bw and *bw > 0)
 				bitrate = std::min(bitrate, uint32_t(std::min(*bw, double(max_bitrate_bps))));
@@ -635,6 +639,14 @@ struct VdSession::impl
 		}
 		refresh = h.preferred_refresh_rate;
 		divisor = d;
+		if (format_changed or old_divisor != d)
+		{
+			char buf[200];
+			snprintf(buf, sizeof buf, "vd: headset '%s' asks: stream %ux%u per eye, %s, %.0f Hz, quality %d, spacewarp %s -> render rate 1/%u",
+			         h.name.c_str(), h.eye_width, h.eye_height, h.codecs.front() == Codec::hevc ? "HEVC" : "H.264",
+			         h.preferred_refresh_rate, q_logged, ssw_logged ? "on" : "off", d);
+			log(buf);
+		}
 		if (format_changed)
 		{
 			std::lock_guard lock(encode_mutex);
