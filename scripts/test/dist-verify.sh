@@ -31,7 +31,8 @@ bad() { echo "  FAIL $*" >&2; fails=$((fails + 1)); }
 [[ $MODE == adhoc || $MODE == developer-id ]] || { echo "dist-verify.sh: unknown mode $MODE" >&2; exit 2; }
 MNT=$(mktemp -d "${TMPDIR:-/tmp}/dist-verify.XXXXXXXX")
 trap 'hdiutil detach -quiet "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true' EXIT
-hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$MNT" "$DMG"
+hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$MNT" "$DMG" \
+    || { echo "dist-verify.sh: cannot attach $DMG (already attached elsewhere? hdiutil info)" >&2; exit 2; }
 APP="$MNT/$NAME.app"
 
 echo "$(basename "$DMG"): sha256 $(shasum -a 256 "$DMG" | cut -d' ' -f1), expecting $MODE"

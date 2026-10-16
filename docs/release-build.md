@@ -41,10 +41,13 @@ do not) and `KK_SKIP_HOST_TESTS=1` (`host/kosmickrisp/build.sh`). Before a DMG i
 run on a Mac against the dylibs inside it:
 
 ```sh
-hdiutil attach -readonly FX-Steam-Launcher-<tag>-adhoc.dmg
-fw="/Volumes/FX Steam Launcher/FX Steam Launcher.app/Contents/Frameworks"
-host/moltenvk/repro/run.sh "$fw"                                     # MoltenVK
-REPRO_DRIVER=kosmickrisp host/moltenvk/repro/run.sh "$fw/libvulkan_kosmickrisp.dylib"
+# from a checkout of the tag; the repros need vulkan/vulkan.h (brew install vulkan-headers vulkan-loader glslang)
+m=$(mktemp -d); hdiutil attach -readonly -nobrowse -mountpoint "$m" FX-Steam-Launcher-<tag>-adhoc.dmg
+mkdir -p /tmp/fw && cp "$m/FX Steam Launcher.app/Contents/Frameworks/"*.dylib /tmp/fw/   # run.sh takes no spaces
+mkdir -p work/build/host-moltenvk/src/Package/Release/MoltenVK
+ln -sfn "$(brew --prefix vulkan-headers)/include" work/build/host-moltenvk/src/Package/Release/MoltenVK/include
+host/moltenvk/repro/run.sh /tmp/fw                                                   # MoltenVK
+REPRO_DRIVER=kosmickrisp host/moltenvk/repro/run.sh /tmp/fw/libvulkan_kosmickrisp.dylib
 ```
 
 ## Why the guest images can move between machines

@@ -19,7 +19,6 @@ name: Release DMG
 on:
   push:
     tags: ['v*']
-    branches: [ci-release]   # TEMPORARY while the workflow is brought up; removed before the merge
   workflow_dispatch:
     inputs:
       ref:
@@ -39,8 +38,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_REF: ${{ inputs.ref || (github.ref == 'refs/heads/ci-release' && 'v1.9-eac.1') || github.ref }}
-  RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+  SOURCE_REF: ${{ inputs.ref || github.ref }}
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
   # Pinned toolchain: the macos-26 image's Xcode 26.6 (actool for the Icon Composer icon, Metal toolchain).
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
   HOMEBREW_NO_AUTO_UPDATE: '1'
@@ -318,7 +317,7 @@ jobs:
       # build test runs here. A self-hosted Mac runner runs them all.
       - name: Host stack and app (./build.sh host)
         run: |
-          system_profiler SPDisplaysDataType | sed -n 's/^ *\(Chipset Model\|Type\|Metal Support\|Vendor\): /  /p' || true
+          system_profiler SPDisplaysDataType || true
           if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
             export MVK_SKIP_REPRO=1 KK_SKIP_HOST_TESTS=1
             echo "::notice::GitHub-hosted runner (paravirtual GPU): MoltenVK repros and KosmicKrisp host tests skipped"
@@ -360,7 +359,7 @@ jobs:
   release:
     name: Attach to the release
     needs: app
-    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    if: github.event_name == 'push' || inputs.release_tag != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
