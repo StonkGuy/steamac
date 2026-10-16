@@ -11,6 +11,7 @@
 #include <sched.h>
 #include <libproc.h>
 #include <sys/mman.h>
+#include <time.h>
 
 #define WINEMETAL_API
 #include "winemetal_thunks.h"
@@ -444,10 +445,20 @@ int main(void) {
         wmtr_host_set_spin(H, 20000000);
         { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); }
         wmtr_host_get_stats(H, &st1);
-        for (int i = 0; i < 20; i++) { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); usleep(300); }
+        /* a gap that really lasted longer than the budget (this thread descheduled on a loaded or
+           virtualized machine, e.g. a CI runner) is allowed to end in a sleep */
+        unsigned long long long_gaps = 0;
+        for (int i = 0; i < 20; i++) {
+          struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q);
+          uint64_t g0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+          usleep(300);
+          if (clock_gettime_nsec_np(CLOCK_MONOTONIC) - g0 >= 20000000) long_gaps++;
+        }
         wmtr_host_get_stats(H, &st2);
         CHECK(st1.idle_sleeps - st0.idle_sleeps >= 15, "no spin: %llu sleeps in 20 gaps", st1.idle_sleeps - st0.idle_sleeps);
-        CHECK(st2.idle_sleeps - st1.idle_sleeps <= 1, "20 ms spin: %llu sleeps in 20 gaps of 0.3 ms", st2.idle_sleeps - st1.idle_sleeps);
+        CHECK(long_gaps <= 5 && st2.idle_sleeps - st1.idle_sleeps <= 1 + long_gaps,
+              "20 ms spin: %llu sleeps in 20 gaps of 0.3 ms (%llu gaps lasted >= 20 ms)",
+              st2.idle_sleeps - st1.idle_sleeps, long_gaps);
         wmtr_host_set_spin(H, WMTR_HOST_SPIN_US_DEFAULT * 1000);
       }
       wmtr_host_destroy(H);

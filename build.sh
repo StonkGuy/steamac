@@ -7,6 +7,7 @@
 #   ./build.sh host       only the macOS side (MoltenVK, KosmicKrisp on macOS 26+, libepoxy,
 #                         virglrenderer, libkrun, launcher)
 #   ./build.sh guest      only the guest side (kernel, rootfs, Mesa, initramfs, layer, disk)
+#   ./build.sh dxmt       the DXMT graphics path (host/dxmt/build.sh: host library + guest payload)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -35,5 +36,6 @@ case ${1:-all} in
     host) host ;;
     guest) guest ;;
     all) host; guest ;;
-    *) echo "usage: $0 [all|host|guest]" >&2; exit 64 ;;
+    dxmt) host/dxmt/build.sh ;;
+    *) echo "usage: $0 [all|host|guest|dxmt]" >&2; exit 64 ;;
 esac
