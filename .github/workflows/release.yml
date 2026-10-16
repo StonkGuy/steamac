@@ -51,6 +51,7 @@ env:
   PACKAGING: >-
     host/launcher/dist.sh host/launcher/licenses.sh host/dxmt/build.sh
     scripts/guest-toolchain.sh scripts/test/dist-verify.sh wmtr/tests/wmtr_loopback.m
+    host/moltenvk/build.sh
 
 jobs:
   dxmt:
@@ -311,8 +312,18 @@ jobs:
           tar -xf dxmt-host.tar work/out/host/lib/libwmtr_host.dylib
           rm guest.tar dxmt-host.tar
           python3 scripts/guest-artifacts.py check-release
+      # The runner's GPU is a paravirtual Metal device without the features of Apple silicon (mesh
+      # shaders, Metal 4): the MoltenVK repros and KosmicKrisp's probe/repros run on a Mac against the
+      # built dylibs instead (docs/release-build.md). Every other build test runs here.
       - name: Host stack and app (./build.sh host)
-        run: ./build.sh host
+        run: |
+          gpu=$(system_profiler SPDisplaysDataType | sed -n 's/^ *Chipset Model: //p' | head -1)
+          echo "GPU: $gpu"
+          if [ "$gpu" = "Apple Paravirtual device" ]; then
+            export MVK_SKIP_REPRO=1 KK_SKIP_HOST_TESTS=1
+            echo "::notice::paravirtual GPU: MoltenVK repros and KosmicKrisp host tests skipped"
+          fi
+          ./build.sh host
       - name: Launcher self-tests (no VM)
         run: |
           app="work/out/FX Steam Launcher.app/Contents/MacOS/steamac-vm"

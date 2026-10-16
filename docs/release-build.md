@@ -32,6 +32,21 @@ The x86 Mesa build and the DXMT guest client run in `linux/amd64` containers und
 arm64 Linux runner, as they do under Rosetta in OrbStack on a Mac. The Mac's own build runs everything on one
 machine; nothing here changes that.
 
+## GPU tests
+
+The macOS runners are virtual machines whose GPU is a paravirtual Metal device. It lacks features that every
+Apple-silicon Mac has (mesh shaders, which MoltenVK's geometry shaders use; Metal 4 for KosmicKrisp). When the
+workflow finds that device, it sets `MVK_SKIP_REPRO=1` (`host/moltenvk/build.sh`: the probe still runs, the repros
+do not) and `KK_SKIP_HOST_TESTS=1` (`host/kosmickrisp/build.sh`). Before a DMG is published, the skipped suites
+run on a Mac against the dylibs inside it:
+
+```sh
+hdiutil attach -readonly FX-Steam-Launcher-<tag>-adhoc.dmg
+fw="/Volumes/FX Steam Launcher/FX Steam Launcher.app/Contents/Frameworks"
+host/moltenvk/repro/run.sh "$fw"                                     # MoltenVK
+REPRO_DRIVER=kosmickrisp host/moltenvk/repro/run.sh "$fw/libvulkan_kosmickrisp.dylib"
+```
+
 ## Why the guest images can move between machines
 
 The guest receipts (`scripts/guest-artifacts.py`, `work/out/*.inputs.json`) record a hash of the selected
