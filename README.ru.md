@@ -40,8 +40,9 @@ DXMT (одиночные прогоны, см. [docs/eac-performance.md](docs/ea
 
 1. Соберите приложение из ветки `main` этого форка или из тега [релиза](https://github.com/StonkGuy/steamac/releases):
    `./build.sh` ([требования и сборка](docs/upstream/requirements-and-building.md); для пути DXMT перед шагом layer
-   также нужен `make dxmt-payload` в `wmtr/`). Готовый DMG этот форк пока не публикует. Скопируйте
-   **FX Steam Launcher.app** из `work/out/` в «Программы» и откройте его (см. *Первое открытие* ниже).
+   также нужен `make dxmt-payload` в `wmtr/`). Или скачайте DMG из
+   [релиза](https://github.com/StonkGuy/steamac/releases) (начиная с v1.9-eac.1, собран GitHub Actions, ad-hoc подпись). Скопируйте
+   **FX Steam Launcher.app** из `work/out/` (или из DMG) в «Программы» и откройте его (см. *Первое открытие* ниже).
 2. При первом запуске выберите **Новый диск…**. Приложение скачает образ SteamOS от Valve, проверит его и настроит.
    Это занимает время, но делается один раз.
 3. Войдите в Steam в окне. Оставьте окно формата **16:10** (Настройки > Экран > Размер окна по умолчанию; значение по
