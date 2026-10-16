@@ -151,7 +151,10 @@ jobs:
             work/out/mesa-venus.inputs.json
             work/out/mesa-aarch64.inputs.json
             work/out/mesa-x86.inputs.json
-          key: mesa-${{ hashFiles('guest/mesa/**', 'scripts/config.env', 'scripts/steps/10-rootfs.sh', 'scripts/builder/Dockerfile', 'scripts/keys/**') }}
+            work/build/mesa-venus/bin
+            work/build/mesa-venus/packages-*.txt
+            work/build/mesa-venus/toolchain-*.txt
+          key: mesa-v2-${{ hashFiles('guest/mesa/**', 'scripts/config.env', 'scripts/steps/10-rootfs.sh', 'scripts/builder/Dockerfile', 'scripts/keys/**') }}
       # A cached output counts only when its receipt still matches these sources and its bytes.
       - name: Kernel
         run: |
@@ -172,7 +175,8 @@ jobs:
           key: ${{ steps.kernel.outputs.cache-primary-key }}
       - name: Builder image
         run: scripts/build-image.sh builder
-      # Both architectures first, cached as soon as they are built; then the verification against
+      # Both architectures first, cached as soon as they are built (with the probe programs and the
+      # package/toolchain lists the verification and MANIFEST.txt use); then the verification against
       # Valve's rootfs (a restored build whose per-architecture receipts match is only verified).
       - name: Mesa (aarch64, x86_64 + i386)
         run: |
@@ -192,6 +196,9 @@ jobs:
             work/out/mesa-venus.inputs.json
             work/out/mesa-aarch64.inputs.json
             work/out/mesa-x86.inputs.json
+            work/build/mesa-venus/bin
+            work/build/mesa-venus/packages-*.txt
+            work/build/mesa-venus/toolchain-*.txt
           key: ${{ steps.mesa.outputs.cache-primary-key }}
       - name: Mesa verify (against the verified SteamOS rootfs)
         run: |
