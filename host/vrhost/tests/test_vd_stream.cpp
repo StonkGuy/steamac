@@ -55,6 +55,7 @@ TrackingSample sample(int32_t n)
 	float a = yaw_step * float(n);
 	s.head.orientation = {0, std::sin(a / 2), 0, std::cos(a / 2)};
 	s.head.position = {0, 1.6f, 0};
+	s.head.angular_velocity = {0, yaw_step / 0.002f, 0}; // turning at what the samples show (2 ms apart)
 	return s;
 }
 
@@ -178,7 +179,22 @@ int main()
 		printf("world lock: %d frames, worst yaw error vs the named tracking sample %.4f rad (%.1f samples)\n", counted,
 		       worst, worst / yaw_step);
 		CHECK(counted >= 15);
-		CHECK(worst <= 2.5f * yaw_step); // the old adapter named the sample current at submit: ~20 samples newer
+		// exact: the frame is rendered with the named sample as the headset sent it. Before c54d61a the frame named the
+		// sample current at submit (~20 samples newer); c54d61a still rendered a pose extrapolated 30 ms ahead with the
+		// angular velocity (~15 samples), which the headset showed as stretching on head turns.
+		CHECK(worst <= 0.25f * yaw_step);
+		// FOV round trip: the headset's FovLeft/FovRight tangents come back unchanged in the frame (VD's FovPort:
+		// up, down, left, right tangents, all positive), per eye, not mirrored or swapped
+		bool fov_ok = not r.frames.empty();
+		for (auto & md: r.frames)
+		{
+			auto near = [](float a, float b) { return std::abs(a - b) < 1e-4f; };
+			auto & l = md.pose.fov[0];
+			auto & rr = md.pose.fov[1];
+			fov_ok = fov_ok and near(l.up, 1.0f) and near(l.down, 1.2f) and near(l.left, 1.3f) and near(l.right, 0.9f) and
+			         near(rr.up, 1.0f) and near(rr.down, 1.2f) and near(rr.left, 0.9f) and near(rr.right, 1.3f);
+		}
+		CHECK(fov_ok);
 	}
 
 	// --- 2. spacewarp toggled by the headset while frames flow ---------------------------------------------------

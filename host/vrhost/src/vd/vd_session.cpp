@@ -231,13 +231,18 @@ struct VdSession::impl
 		uint64_t frame_id = 0;
 		ns display = 0;
 		int32_t index = 0;
+		std::array<TrackedPose, size_t(Device::count)> poses{};
+		bool have_poses = false;
 	};
+	// newest sample per device, as the headset sent it (under index_mutex, together with last_tracking_index)
+	std::array<TrackedPose, size_t(Device::count)> latest{};
+	bool have_latest = false;
 	std::array<ViewIndex, 64> view_index{};
 	size_t view_index_pos = 0;
 	void remember_view(uint64_t frame_id, ns display)
 	{
 		std::lock_guard lock(index_mutex);
-		view_index[view_index_pos++ % view_index.size()] = {frame_id, display, last_tracking_index};
+		view_index[view_index_pos++ % view_index.size()] = {frame_id, display, last_tracking_index, latest, have_latest};
 	}
 	int32_t rendered_index(uint64_t frame_id, ns display, ns tolerance)
 	{
@@ -255,6 +260,29 @@ struct VdSession::impl
 				best = &v, best_d = dt;
 		}
 		return best ? best->index : last_tracking_index;
+	}
+	// VD-FACT(clock) / TODO(vd-live:clock) answered by the 2026-10-17 trial: the headset reprojects each frame from
+	// the pose of the tracking sample the frame names, as it sent it. Rendering with a pose the host predicted
+	// further (velocity extrapolation to the display time) made the picture stretch and swim on head turns, so the
+	// frame for display time t uses the very sample remembered for it, unmodified.
+	std::optional<TrackedPose> rendered_pose(Device d, ns t)
+	{
+		std::lock_guard lock(index_mutex);
+		for (size_t k = 0; k < view_index.size(); ++k)
+		{
+			auto & v = view_index[(view_index_pos + view_index.size() - 1 - k) % view_index.size()];
+			if (v.display == t and v.have_poses)
+			{
+				TrackedPose r = v.poses[size_t(d)];
+				r.time = t;
+				return r;
+			}
+		}
+		if (not have_latest)
+			return std::nullopt;
+		TrackedPose r = latest[size_t(d)];
+		r.time = t;
+		return r;
 	}
 
 	// Network side of the video channel: submit() encodes and queues, this thread sends. A headset that stops
@@ -553,6 +581,11 @@ struct VdSession::impl
 		{
 			for (auto & hist: history)
 				hist.clear();
+			{
+				std::lock_guard lock(index_mutex);
+				have_latest = false;
+				view_index = {};
+			}
 			if (listener)
 				listener->on_disconnected();
 		}
@@ -864,10 +897,6 @@ struct VdSession::impl
 	void on_tracking_sample(const TrackingSample & s)
 	{
 		ns t = now_ns(); // VD-FACT(clock): no clock sync; the sample time is the arrival time
-		{
-			std::lock_guard lock(index_mutex);
-			last_tracking_index = s.frame_index;
-		}
 		stats.last_latency_us = int32_t(s.latency_s * 1e6f);
 		auto & hd = s.head;
 		auto ctl = [&](Device d, int i) {
@@ -883,6 +912,14 @@ struct VdSession::impl
 		};
 		for (auto & p: poses)
 			history[size_t(p.device)].add(p);
+		{
+			// the sample's index and its poses change together: a frame names exactly the sample it rendered
+			std::lock_guard lock(index_mutex);
+			last_tracking_index = s.frame_index;
+			for (auto & p: poses)
+				latest[size_t(p.device)] = p;
+			have_latest = true;
+		}
 		stats.tracking++;
 		if (listener)
 			listener->on_tracking(poses);
@@ -1049,7 +1086,7 @@ bool VdSession::views_at(ns t, std::array<Pose, 2> & pose, std::array<Fov, 2> & 
 		ipd = p->ipd;
 	}
 	p->remember_view(0, t); // which tracking sample this frame's views come from (FrameMetadata.frame_index)
-	auto head = p->history[size_t(Device::head)].at(t);
+	auto head = p->rendered_pose(Device::head, t);
 	Pose h = head ? head->pose : Pose{};
 	for (int e = 0; e < 2; ++e)
 	{
@@ -1063,7 +1100,7 @@ std::optional<TrackedPose> VdSession::pose_at(Device d, ns t)
 {
 	if (d >= Device::count)
 		return std::nullopt;
-	return p->history[size_t(d)].at(t);
+	return p->rendered_pose(d, t);
 }
 
 void VdSession::submit(const Frame & f)
