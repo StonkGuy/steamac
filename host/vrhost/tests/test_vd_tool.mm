@@ -290,7 +290,7 @@ int main(int argc, char ** argv)
 
 		FILE * csv = csv_path.empty() ? nullptr : fopen(csv_path.c_str(), "w");
 		if (csv)
-			fprintf(csv, "t_s,frame_index,sample_age_ms,md_yaw,md_pitch,sample_yaw,named_err_deg,true_yaw_at_arrival,decoded,idr\n");
+			fprintf(csv, "t_s,frame_index,sample_age_ms,md_yaw,md_pitch,sample_yaw,named_err_deg,true_yaw_at_arrival,decoded,idr,left_bytes\n");
 		std::vector<Sample> samples;
 		MotionResult yaw_m, pitch_m;
 		std::vector<double> named_err, win_age;
@@ -336,8 +336,8 @@ int main(int argc, char ** argv)
 				}
 			}
 			if (csv)
-				fprintf(csv, "%.4f,%d,%.2f,%.4f,%.4f,%.4f,%.3f,%.4f,%d,%d\n", t, md.frame_index, age, myaw, mpitch, syaw, err, ty,
-				        l != nullptr, md.is_sync_frame);
+				fprintf(csv, "%.4f,%d,%.2f,%.4f,%.4f,%.4f,%.3f,%.4f,%d,%d,%d\n", t, md.frame_index, age, myaw, mpitch, syaw, err, ty,
+				        l != nullptr, md.is_sync_frame, md.data_size);
 		};
 		auto r = run_fake_vd_client(o);
 		if (csv)

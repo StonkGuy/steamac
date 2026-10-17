@@ -143,6 +143,13 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 
 	// the Streamer's order: video, audio, data
 	auto video = open(o.video_port);
+	if (video and o.video_rate_bps > 0)
+	{
+		// with a throughput cap the backlog belongs on the sender's side, as on a real link (a large receive buffer
+		// here would hide it from the host and add latency no headset has)
+		int rcv = 128 << 10;
+		setsockopt(video->fd(), SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
+	}
 	auto audio = o.audio ? open(o.audio_port) : nullptr;
 	auto data = open(o.data_port);
 	std::thread audio_reader;
