@@ -139,13 +139,22 @@ struct MotionResult
 {
 	int pairs = 0, matched = 0;
 	double median = 0, p10 = 0, p90 = 0;
+	std::vector<double> ratio;
+	void finish()
+	{
+		matched = int(ratio.size());
+		if (ratio.empty())
+			return;
+		std::sort(ratio.begin(), ratio.end());
+		median = ratio[ratio.size() / 2], p10 = ratio[ratio.size() / 10], p90 = ratio[ratio.size() * 9 / 10];
+	}
 };
 
-MotionResult motion_check(const std::vector<Sample> & s, bool horizontal)
+// pairs starting in s[0 .. first_end) (later samples only as partners); appends to m
+void motion_pairs(const std::vector<Sample> & s, size_t first_end, bool horizontal, MotionResult & m)
 {
-	MotionResult m;
-	std::vector<double> ratio;
-	for (size_t i = 0; i + 1 < s.size(); ++i)
+	auto & ratio = m.ratio;
+	for (size_t i = 0; i + 1 < s.size() and i < first_end; ++i)
 	{
 		size_t j = i + 1;
 		for (; j < s.size() and j < i + 6; ++j)
@@ -173,13 +182,6 @@ MotionResult motion_check(const std::vector<Sample> & s, bool horizontal)
 			continue;
 		ratio.push_back(got / expect);
 	}
-	m.matched = int(ratio.size());
-	if (not ratio.empty())
-	{
-		std::sort(ratio.begin(), ratio.end());
-		m.median = ratio[ratio.size() / 2], m.p10 = ratio[ratio.size() / 10], m.p90 = ratio[ratio.size() * 9 / 10];
-	}
-	return m;
 }
 
 double pct(std::vector<double> v, double q)
@@ -246,6 +248,7 @@ int main(int argc, char ** argv)
 		o.timeout_ms = int(seconds * 1000);
 		o.audio = true;
 		o.keep_results = false;
+		o.video_idle_ms = 600000; // the game may take minutes to submit its first frame
 		o.video_rate_bps = rate * 1e6;
 		o.net_delay_ms = delay, o.net_jitter_ms = jitter;
 		o.decode_cap_fps = decode_fps;
@@ -289,6 +292,7 @@ int main(int argc, char ** argv)
 		if (csv)
 			fprintf(csv, "t_s,frame_index,sample_age_ms,md_yaw,md_pitch,sample_yaw,named_err_deg,true_yaw_at_arrival,decoded,idr\n");
 		std::vector<Sample> samples;
+		MotionResult yaw_m, pitch_m;
 		std::vector<double> named_err, win_age;
 		std::vector<std::pair<double, std::vector<double>>> windows; // (start s, ages)
 		int frames = 0, decoded = 0, idr = 0, unnamed = 0;
@@ -324,6 +328,12 @@ int main(int argc, char ** argv)
 			{
 				decoded++;
 				samples.push_back(make_sample(l, md));
+				if (samples.size() >= 400) // bounded memory on long runs: evaluate, keep the tail as partners
+				{
+					motion_pairs(samples, samples.size() - 6, true, yaw_m);
+					motion_pairs(samples, samples.size() - 6, false, pitch_m);
+					samples.erase(samples.begin(), samples.end() - 6);
+				}
 			}
 			if (csv)
 				fprintf(csv, "%.4f,%d,%.2f,%.4f,%.4f,%.4f,%.3f,%.4f,%d,%d\n", t, md.frame_index, age, myaw, mpitch, syaw, err, ty,
@@ -340,7 +350,12 @@ int main(int argc, char ** argv)
 		for (auto & [ws, ages]: windows)
 			printf("latency %4.0f-%4.0f s: sample -> frame arrived p50 %.1f ms p99 %.1f ms (%zu frames)\n", ws, ws + 30,
 			       pct(ages, .5), pct(ages, .99), ages.size());
-		auto yaw = motion_check(samples, true), pitch = motion_check(samples, false);
+		motion_pairs(samples, samples.size(), true, yaw_m);
+		motion_pairs(samples, samples.size(), false, pitch_m);
+		yaw_m.finish();
+		pitch_m.finish();
+		auto & yaw = yaw_m;
+		auto & pitch = pitch_m;
 		printf("projection/world lock yaw: %d/%d pairs, picture shift / RenderPose+FOV prediction median %.3f p10 %.3f p90 %.3f\n",
 		       yaw.matched, yaw.pairs, yaw.median, yaw.p10, yaw.p90);
 		printf("projection/world lock pitch: %d/%d pairs, median %.3f p10 %.3f p90 %.3f\n", pitch.matched, pitch.pairs,

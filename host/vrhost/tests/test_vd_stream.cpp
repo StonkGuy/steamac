@@ -14,11 +14,13 @@
 #include "pattern_server.h"
 #include "vd/vd_session.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <csignal>
 #include <filesystem>
 #include <mutex>
+#include <map>
 #include <set>
 #include <thread>
 
@@ -63,6 +65,12 @@ float yaw(const Quat & q) // rotation about +y only
 {
 	return 2 * std::atan2(q.y, q.w);
 }
+
+float yaw_err(const Quat & q, int32_t n) // |yaw(q) - yaw of sample n|, wrapped to [0, pi]
+{
+	float d = std::remainder(yaw(q) - yaw_step * float(n), float(2 * M_PI));
+	return std::abs(d);
+}
 } // namespace
 
 int main()
@@ -93,6 +101,29 @@ int main()
 	// --- producer, the host pipeline's order of calls -----------------------------------------------------------
 	std::atomic<bool> stop{false};
 	std::atomic<int> render_ms{0};
+	std::atomic<bool> noisy{false};
+	std::atomic<bool> drift{false}; // submit with the next frame's id/display time, as the guest does when it ran ahead
+	// drift mode: the pacer runs on its own thread like VrPipeline::frame_clock; the game takes the latest timing
+	std::mutex clock_m;
+	FrameTiming clock_t{};
+	std::optional<TrackedPose> clock_head;
+	bool clock_have = false;
+	std::thread clock([&] {
+		while (not stop)
+		{
+			if (not drift or not session.connected())
+			{
+				std::lock_guard l(clock_m);
+				clock_have = false;
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				continue;
+			}
+			FrameTiming t = session.next_frame_timing();
+			auto head = session.pose_at(Device::head, t.predicted_display);
+			std::lock_guard l(clock_m);
+			clock_t = t, clock_head = head, clock_have = true;
+		}
+	}); // incompressible pictures (a game scene's worth of bits) instead of the pattern
 	std::atomic<int64_t> max_submit_ns{0};
 	std::atomic<int> submitted{0};
 	std::thread producer([&] {
@@ -117,21 +148,54 @@ int main()
 				}
 				bw = info->eye_width;
 			}
-			FrameTiming t = session.next_frame_timing();
+			FrameTiming t;
+			std::optional<TrackedPose> head;
+			if (drift)
+			{
+				std::lock_guard l(clock_m);
+				if (not clock_have)
+				{
+					std::this_thread::sleep_for(std::chrono::milliseconds(2));
+					continue;
+				}
+				t = clock_t, head = clock_head;
+			}
+			else
+			{
+				t = session.next_frame_timing();
+				head = session.pose_at(Device::head, t.predicted_display); // VrPipeline::frame_clock
+			}
 			Frame f;
 			f.frame_id = t.frame_id;
 			f.display_time = t.predicted_display;
-			auto head = session.pose_at(Device::head, t.predicted_display); // VrPipeline::frame_clock
 			for (int i = 0; i < 2; ++i)
 			{
 				f.pose[i] = head ? head->pose : Pose{};
 				f.fov[i] = info->fov[i];
 			}
+			if (drift)
+			{
+				f.frame_id += 1;
+				f.display_time += t.display_period * t.render_divisor;
+			}
 			if (int r = render_ms)
 				std::this_thread::sleep_for(std::chrono::milliseconds(r)); // the game renders
 			for (int i = 0; i < 2; ++i)
 			{
-				pattern.render(bufs[i], f.pose[i], f.fov[i], f.frame_id);
+				if (noisy)
+				{
+					CVPixelBufferLockBaseAddress(bufs[i], 0);
+					for (int pl = 0; pl < 2; pl++)
+					{
+						auto * d = (uint32_t *)CVPixelBufferGetBaseAddressOfPlane(bufs[i], pl);
+						size_t n = CVPixelBufferGetBytesPerRowOfPlane(bufs[i], pl) * CVPixelBufferGetHeightOfPlane(bufs[i], pl) / 4;
+						for (size_t k = 0; k < n; k++)
+							d[k] = arc4random() & 0x3f3f3f3f;
+					}
+					CVPixelBufferUnlockBaseAddress(bufs[i], 0);
+				}
+				else
+					pattern.render(bufs[i], f.pose[i], f.fov[i], f.frame_id);
 				f.eye[i].surface = CVPixelBufferGetIOSurface(bufs[i]);
 			}
 			int64_t t0 = now_ns();
@@ -173,7 +237,7 @@ int main()
 		{
 			if (md.frame_index <= 0)
 				continue;
-			float err = std::abs(yaw(md.pose.eye[0].orientation) - yaw_step * float(md.frame_index));
+			float err = yaw_err(md.pose.eye[0].orientation, md.frame_index);
 			worst = std::max(worst, err);
 			counted++;
 		}
@@ -196,6 +260,25 @@ int main()
 			         near(rr.up, 1.0f) and near(rr.down, 1.2f) and near(rr.left, 0.9f) and near(rr.right, 1.3f);
 		}
 		CHECK(fov_ok);
+	}
+
+	// --- 1b. the same with the guest's frame id / display time one frame ahead of the pose it rendered -----------
+	{
+		render_ms = 40;
+		drift = true;
+		FakeVdOptions o = base;
+		o.frames = 20;
+		auto r = run_fake_vd_client(o);
+		drift = false;
+		CHECK(r.error.empty());
+		float worst = 0;
+		// from the second frame on: the first one may still carry the previous session's pose (the producer rendered it
+		// before this headset's first sample arrived; nothing of this session matches it)
+		for (size_t k = 1; k < r.frames.size(); ++k)
+			if (r.frames[k].frame_index > 0)
+				worst = std::max(worst, yaw_err(r.frames[k].pose.eye[0].orientation, r.frames[k].frame_index));
+		printf("world lock, guest ahead: worst yaw error %.4f rad (%.1f samples)\n", worst, worst / yaw_step);
+		CHECK(worst <= 0.25f * yaw_step); // matched by the echoed orientation, not by id/time
 	}
 
 	// --- 2. spacewarp toggled by the headset while frames flow ---------------------------------------------------
@@ -257,6 +340,65 @@ int main()
 		CHECK(after_stall >= 20); // recovered: frames after the stall decode (key frame after the drop)
 	}
 
+	// --- 5. a link slower than the stream: latency stays bounded (the backlog must not pile up in socket buffers) --
+	{
+		render_ms = 0;
+		std::mutex tm;
+		std::map<int32_t, int64_t> sent_at;
+		std::vector<double> ages;
+		FakeVdOptions o = base;
+		o.frames = 100000;
+		o.timeout_ms = 10000;
+		o.keep_results = false;
+		o.video_rate_bps = 12e6; // far below the 200 Mbit/s target
+		o.tracking_fn = [&](int32_t n) {
+			std::lock_guard l(tm);
+			sent_at[n] = now_ns();
+			return sample(n);
+		};
+		o.on_frame = [&](const FrameMetadata & md, CVPixelBufferRef, CVPixelBufferRef, int64_t arrival) {
+			std::lock_guard l(tm);
+			if (auto it = sent_at.find(md.frame_index); it != sent_at.end() and arrival - o.timeout_ms * 0 > 0)
+				ages.push_back((arrival - it->second) / 1e6);
+		};
+		run_fake_vd_client(o);
+		std::vector<double> late(ages.begin() + std::min<size_t>(ages.size(), ages.size() / 2), ages.end());
+		std::sort(late.begin(), late.end());
+		double p50 = late.empty() ? 0 : late[late.size() / 2], p99 = late.empty() ? 0 : late[late.size() * 99 / 100];
+		printf("slow link: %zu frames, second half sample -> arrival p50 %.0f ms p99 %.0f ms\n", ages.size(), p50, p99);
+		CHECK(ages.size() >= 20);
+		CHECK(p99 < 400); // unbounded kernel buffering grows to seconds here
+	}
+
+	// --- 6. frames skipped for a slow link do not grow the next frames (encoder rate control) -----------------------
+	{
+		render_ms = 0;
+		noisy = true;
+		std::vector<size_t> sizes;
+		std::mutex sm;
+		FakeVdOptions o = base;
+		o.frames = 100000;
+		o.timeout_ms = 8000;
+		o.keep_results = false;
+		o.video_rate_bps = 60e6; // ~1/3 of the 200 Mbit/s stream: most frames are skipped
+		o.on_frame = [&](const FrameMetadata & md, CVPixelBufferRef, CVPixelBufferRef, int64_t) {
+			std::lock_guard l(sm);
+			sizes.push_back(size_t(md.data_size));
+		};
+		run_fake_vd_client(o);
+		noisy = false;
+		double mean = 0;
+		for (size_t k = sizes.size() / 2; k < sizes.size(); ++k)
+			mean += double(sizes[k]);
+		mean /= std::max<size_t>(1, sizes.size() - sizes.size() / 2);
+		// per eye and frame: bitrate / 2 eyes / frame rate (72 Hz, divisor 1)
+		double target = 200e6 / 8 / 2 / 72;
+		printf("skipping link: %zu frames, second half mean left-eye frame %.0f KB (target %.0f KB)\n", sizes.size(), mean / 1024,
+		       target / 1024);
+		CHECK(sizes.size() >= 20);
+		CHECK(mean < 2.0 * target); // with display-time timestamps the skipped frames' bits land on the next one: x3-x7
+	}
+
 	// --- 4. corrupt controller poses are untracked ---------------------------------------------------------------
 	{
 		FakeVdOptions o = base;
@@ -282,6 +424,7 @@ int main()
 
 	stop = true;
 	producer.join();
+	clock.join();
 	session.stop();
 	std::filesystem::remove_all(dir);
 	return test_result("vd_stream");

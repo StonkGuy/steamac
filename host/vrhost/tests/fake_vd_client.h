@@ -58,6 +58,7 @@ struct FakeVdOptions
 	// arrival time; the pictures are only valid during the call
 	std::function<void(const vrhost::vd::FrameMetadata &, CVPixelBufferRef left, CVPixelBufferRef right, int64_t arrival_ns)>
 	        on_frame;
+	int video_idle_ms = 5000; // give up when the video channel stays silent this long (a game still loading: minutes)
 	bool keep_results = true; // false: do not keep every FrameMetadata (long runs)
 };
 

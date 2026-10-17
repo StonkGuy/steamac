@@ -209,7 +209,11 @@ struct VdSession::impl
 	float ipd = default_ipd_m;
 	std::array<Fov, 2> fov = default_fov;
 
+	// only submit() takes it: creating a VideoToolbox session can take seconds when the hardware encoder is busy,
+	// and the accept/control threads must not wait behind it (they request a rebuild with reset_encoders)
 	std::mutex encode_mutex;
+	std::atomic<bool> reset_encoders{false};
+	uint64_t encoded_frames = 0; // under encode_mutex
 	std::array<std::unique_ptr<VtEncoder>, 2> encoders;
 	std::atomic<bool> idr_pending{true};
 	ns last_submit = 0;
@@ -244,9 +248,20 @@ struct VdSession::impl
 		std::lock_guard lock(index_mutex);
 		view_index[view_index_pos++ % view_index.size()] = {frame_id, display, last_tracking_index, latest, have_latest};
 	}
-	int32_t rendered_index(uint64_t frame_id, ns display, ns tolerance)
+	int32_t rendered_index(uint64_t frame_id, ns display, ns tolerance, const std::array<float, 4> * head_orientation = nullptr)
 	{
 		std::lock_guard lock(index_mutex);
+		// Exact: the game renders with the head orientation we handed out for one remembered sample and echoes it
+		// bit for bit (the eye poses only add the IPD offset). Frame ids and display times do not always line up
+		// (the guest continues the cadence itself while it waits, VRChat at 30 fps on a 36 Hz grid): matching by
+		// them named the wrong sample for 17% of the frames in a VRChat run (up to 29 degrees off on fast turns).
+		if (head_orientation)
+			for (size_t k = 0; k < view_index.size(); ++k)
+			{
+				auto & v = view_index[(view_index_pos + view_index.size() - 1 - k) % view_index.size()];
+				if (v.have_poses and v.poses[size_t(Device::head)].pose.orientation == *head_orientation)
+					return v.index;
+			}
 		const ViewIndex * best = nullptr;
 		ns best_d = tolerance;
 		for (auto & v: view_index)
@@ -484,6 +499,15 @@ struct VdSession::impl
 		if (fd < 0)
 			return;
 		tune_socket(fd, c == video);
+		if (c == video)
+		{
+			// Bound what the kernel queues for a slow headset: macOS auto-tunes the send buffer up to megabytes,
+			// which is seconds of video at Wi-Fi rates (measured: sample -> frame p50 32 ms growing to 1.3 s after
+			// ~15 min at a 100 Mbit/s link). With a small buffer the backlog stays in our one-frame queue, where
+			// submit() skips frames instead (latency stays ~1-2 frames).
+			int buf = int(std::clamp<uint64_t>(uint64_t(cfg.bitrate_bps) / 8 * 30 / 1000, 128 << 10, 1 << 20));
+			setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof buf);
+		}
 		auto chan = std::make_shared<Channel>(fd);
 		// VD-FACT(plain-framing): on the LAN the control channel is always encrypted, the others per the record.
 		if (cfg.discovery_key and (c == control or cfg.encrypt_local))
@@ -570,11 +594,7 @@ struct VdSession::impl
 		if (now_connected and not was)
 		{
 			stats.sessions++;
-			{
-				std::lock_guard lock(encode_mutex); // a new headset may want another codec/size/rate
-				encoders = {};
-				last_submit = 0;
-			}
+			reset_encoders = true; // a new headset may want another codec/size/rate (submit() rebuilds them)
 			idr_pending = true;
 			send_video_format(*v, *h);
 			log("vd: headset connected: " + h->name + " " + std::to_string(h->eye_width) + "x" + std::to_string(h->eye_height) +
@@ -785,8 +805,7 @@ struct VdSession::impl
 		// the encoders' frame rate and bitrate follow the render divisor (spacewarp) too: new encoders + key frame
 		if (format_changed or old_divisor != d or old_bitrate != h.bitrate_bps)
 		{
-			std::lock_guard lock(encode_mutex);
-			encoders = {};
+			reset_encoders = true;
 			idr_pending = true;
 		}
 		if (is_connected)
@@ -920,6 +939,8 @@ struct VdSession::impl
 		{
 			// the sample's index and its poses change together: a frame names exactly the sample it rendered
 			std::lock_guard lock(index_mutex);
+			if (s.frame_index < last_tracking_index)
+				view_index = {}; // the headset numbers anew (reconnect): older entries would name its new samples wrongly
 			last_tracking_index = s.frame_index;
 			for (auto & p: poses)
 				latest[size_t(p.device)] = p;
@@ -1136,6 +1157,12 @@ void VdSession::submit(const Frame & f)
 		return;
 	}
 	std::lock_guard lock(p->encode_mutex);
+	if (p->reset_encoders.exchange(false))
+	{
+		p->encoders = {};
+		p->last_submit = 0;
+		p->encoded_frames = 0;
+	}
 	uint32_t d = p->divisor;
 	for (auto & e: p->encoders)
 		if (not e)
@@ -1159,17 +1186,21 @@ void VdSession::submit(const Frame & f)
 	}
 	bool idr = p->idr_pending.exchange(false);
 	std::array<EncodedFrame, 2> out;
-	std::thread right([&] { out[1] = p->encoders[1]->encode(buf[1], f.display_time, idr); });
-	out[0] = p->encoders[0]->encode(buf[0], f.display_time, idr);
+	// Encoder timestamps on the nominal cadence, not the display time: frames skipped for a slow link must not look
+	// like elapsed time to the rate control, which then spent the bits of the skipped frames on the next one (VRChat
+	// run: 80% skipped, ~1.6 MB frames, latency 1 s+; skipping fed itself).
+	ns period = ns(1e9 / p->refresh.load());
+	int64_t pts = int64_t(p->encoded_frames++) * int64_t(d * period);
+	std::thread right([&] { out[1] = p->encoders[1]->encode(buf[1], pts, idr); });
+	out[0] = p->encoders[0]->encode(buf[0], pts, idr);
 	right.join();
 	for (auto b: buf)
 		CVPixelBufferRelease(b);
 
 	ns now = now_ns();
-	ns period = ns(1e9 / p->refresh.load());
 	FrameMetadata md;
 	md.timestamp_us = now / 1000; // VD-FACT(clock): host microseconds, pairs the frame with its slice
-	md.frame_index = p->rendered_index(f.frame_id, f.display_time, ns(d * period));
+	md.frame_index = p->rendered_index(f.frame_id, f.display_time, ns(d * period), &f.pose[0].orientation);
 	md.source = Source::vr;
 	md.is_sync_frame = out[0].idr and out[1].idr;
 	md.frame_time_ms = float(d * period / 1e6);

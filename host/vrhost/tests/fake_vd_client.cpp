@@ -253,9 +253,9 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 		while (complete < o.frames and now_ns() < deadline)
 		{
 			uint8_t tag;
-			if (not video->read_exact(&tag, 1, 5000))
+			if (not video->read_exact(&tag, 1, o.video_idle_ms))
 			{
-				r.error = "video channel: nothing within 5 s";
+				r.error = "video channel: nothing within " + std::to_string(o.video_idle_ms / 1000) + " s";
 				break;
 			}
 			if (tag == tag_video_format_old)
