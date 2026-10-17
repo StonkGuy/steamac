@@ -14,6 +14,8 @@
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <deque>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <netinet/in.h>
@@ -180,6 +182,12 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 		bool mic_sent = false;
 		int complete = 0;
 		int64_t deadline = now_ns() + int64_t(o.timeout_ms) * 1000000;
+		std::array<CVPixelBufferRef, 2> pic{};
+		auto keep = [&](int eye, CVPixelBufferRef pb) {
+			if (pic[eye])
+				CVPixelBufferRelease(pic[eye]);
+			pic[eye] = pb;
+		};
 		auto decode = [&](int eye, std::span<const uint8_t> bits) {
 			std::vector<uint8_t> annexb;
 			bool start_code = bits.size() > 4 and bits[0] == 0 and bits[1] == 0 and bits[2] == 0 and bits[3] == 1;
@@ -202,22 +210,46 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 				r.decoded[eye]++;
 				if (eye == 0)
 					r.decoded_at.push_back(int(r.frames.size()) - 1);
-				CVPixelBufferRelease(pb);
+				if (o.on_frame)
+					keep(eye, pb);
+				else
+					CVPixelBufferRelease(pb);
 			}
 		};
 		std::atomic<bool> tracking_stop{false};
 		std::thread tracker;
 		if (o.tracking_period_ms > 0 and (o.tracking_fn or o.tracking))
 			tracker = std::thread([&] {
+				std::deque<std::pair<int64_t, std::vector<uint8_t>>> pending;
 				for (int32_t n = 1; not tracking_stop; ++n)
 				{
 					TrackingSample s = o.tracking_fn ? o.tracking_fn(n) : *o.tracking;
 					s.frame_index = n;
-					if (not data->send(tracking_packet(s, o.tracking_size)))
-						break;
+					// Wi-Fi: the sample leaves the headset now and reaches the host delay (+ jitter) later; queued
+					// in order (TCP), so jitter only ever adds to the delay of the samples behind it
+					int64_t due = now_ns() + int64_t(o.net_delay_ms) * 1'000'000 +
+					              (o.net_jitter_ms > 0 ? int64_t(arc4random_uniform(uint32_t(o.net_jitter_ms) * 1000)) * 1000 : 0);
+					pending.push_back({std::max(due, pending.empty() ? due : pending.back().first), tracking_packet(s, o.tracking_size)});
+					while (not pending.empty() and pending.front().first <= now_ns())
+					{
+						if (not data->send(pending.front().second))
+							return;
+						pending.pop_front();
+					}
 					std::this_thread::sleep_for(std::chrono::milliseconds(o.tracking_period_ms));
 				}
 			});
+		int64_t rate_t = now_ns();
+		auto throttle = [&](size_t bytes) {
+			if (o.video_rate_bps <= 0)
+				return;
+			rate_t = std::max(rate_t, now_ns() - 20'000'000) + int64_t(bytes * 8 / o.video_rate_bps * 1e9);
+			if (int64_t w = rate_t - now_ns(); w > 0)
+				std::this_thread::sleep_for(std::chrono::nanoseconds(w));
+		};
+		int64_t decode_free = 0;
+		FrameMetadata cur_md{};
+		int64_t cur_arrival = 0;
 		while (complete < o.frames and now_ns() < deadline)
 		{
 			uint8_t tag;
@@ -248,9 +280,22 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 				if (not video->read_exact(&md, sizeof md, 5000))
 					break;
 				std::vector<uint8_t> bits(size_t(md.data_size));
+				throttle(bits.size() + sizeof md);
 				if (not video->read_exact(bits.data(), bits.size(), 5000))
 					break;
-				r.frames.push_back(md);
+				cur_md = md;
+				cur_arrival = now_ns();
+				if (o.keep_results or r.frames.empty())
+					r.frames.push_back(md);
+				else
+					r.frames.back() = md;
+				if (o.decode_cap_fps > 0)
+				{
+					// a decoder that needs 1/cap per frame: wait for it (the socket backs up like on the headset)
+					decode_free = std::max(decode_free, now_ns()) + int64_t(1e9 / o.decode_cap_fps);
+					if (int64_t w = decode_free - now_ns() - int64_t(1e9 / o.decode_cap_fps); w > 0)
+						std::this_thread::sleep_for(std::chrono::nanoseconds(w));
+				}
 				decode(0, bits);
 			}
 			else if (tag == tag_slice)
@@ -259,12 +304,25 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 				if (not video->read_exact(&sh, sizeof sh, 5000))
 					break;
 				std::vector<uint8_t> bits(size_t(sh.data_size));
+				throttle(bits.size() + sizeof sh);
 				if (not video->read_exact(bits.data(), bits.size(), 5000))
 					break;
-				r.slices.push_back(sh);
+				if (o.keep_results or r.slices.empty())
+					r.slices.push_back(sh);
+				else
+					r.slices.back() = sh;
 				if (sh.stream_index == 1)
 					decode(1, bits);
 				++complete;
+				if (o.on_frame)
+				{
+					o.on_frame(cur_md, pic[0], pic[1], cur_arrival);
+					keep(0, nullptr);
+					keep(1, nullptr);
+				}
+				for (auto & [at, type, payload]: o.control_schedule)
+					if (at == complete)
+						ctl->send(control_message(Msg(type), payload));
 				for (auto & [at, k, v]: o.mobile_schedule)
 					if (at == complete)
 						ctl->send(control_message(Msg::mobile_setting_changed, setting_changed_payload(k, v)));
@@ -300,6 +358,8 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 				break;
 			}
 		}
+		keep(0, nullptr);
+		keep(1, nullptr);
 		tracking_stop = true;
 		if (tracker.joinable())
 			tracker.join();

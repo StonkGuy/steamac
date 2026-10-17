@@ -68,6 +68,7 @@ float yaw(const Quat & q) // rotation about +y only
 int main()
 {
 	signal(SIGPIPE, SIG_IGN);
+	setvbuf(stdout, nullptr, _IOLBF, 0);
 	char dir_template[] = "/tmp/vrhost-vds.XXXXXX";
 	REQUIRE(mkdtemp(dir_template) != nullptr);
 	std::string dir = dir_template;

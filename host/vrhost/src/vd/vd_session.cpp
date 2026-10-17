@@ -326,6 +326,11 @@ struct VdSession::impl
 			send_cv.notify_all();
 		}
 	}
+	bool network_behind()
+	{
+		std::lock_guard lock(send_mutex);
+		return not send_queue.empty();
+	}
 	// false = the headset is behind: the frames waiting (and this one, unless it is an IDR that restarts the stream)
 	// were dropped; the caller then asks for an IDR so the next frame decodes without them.
 	bool queue_frame(Outgoing o)
@@ -1115,6 +1120,21 @@ void VdSession::submit(const Frame & f)
 	}
 	if (not p->is_connected or not h or not v)
 		return;
+	// The headset is a whole frame behind (one frame waiting behind the one being sent): skip this frame BEFORE
+	// encoding it. The encoder never sees it, so the stream stays decodable without a key frame; dropping encoded
+	// frames instead forces an IDR, and the large IDR frames made a slow link fall further behind (2026-10-17: 144-255
+	// drops per session, each with a key frame).
+	if (p->network_behind())
+	{
+		p->stats.frames_dropped++;
+		if (ns now = now_ns(); now - p->last_drop_log > 1'000'000'000)
+		{
+			p->last_drop_log = now;
+			p->log("vd: the headset is not reading the video channel fast enough: frames skipped (" +
+			       std::to_string(p->stats.frames_dropped.load()) + " so far)");
+		}
+		return;
+	}
 	std::lock_guard lock(p->encode_mutex);
 	uint32_t d = p->divisor;
 	for (auto & e: p->encoders)

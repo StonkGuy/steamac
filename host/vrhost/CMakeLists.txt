@@ -150,6 +150,10 @@ set_source_files_properties(tests/vt_decode.mm PROPERTIES COMPILE_FLAGS -fobjc-a
 target_sources(test_vd_loopback PRIVATE tests/fake_vd_client.cpp tests/vt_decode.mm)
 target_sources(test_vd_stream PRIVATE tests/fake_vd_client.cpp tests/vt_decode.mm)
 set_tests_properties(encoder loopback control vd_wire vd_loopback vd_key vd_stream PROPERTIES TIMEOUT 60)
+# synthetic Virtual Desktop headset (real-headset conditions) for a running steamac-vrhost --adapter vd
+add_executable(vrhost-test-vd tests/test_vd_tool.mm tests/fake_vd_client.cpp tests/vt_decode.mm)
+set_source_files_properties(tests/test_vd_tool.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+target_link_libraries(vrhost-test-vd PRIVATE vrhost-core "-framework Foundation")
 # the test headset as a tool, for a running steamac-vrhost (docs/vr.md "Testing without a headset")
 add_executable(vrhost-test-headset tests/test_headset_tool.mm tests/fake_headset.cpp tests/vt_decode.mm)
 set_source_files_properties(tests/test_headset_tool.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)

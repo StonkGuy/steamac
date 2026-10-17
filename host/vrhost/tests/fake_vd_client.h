@@ -49,6 +49,16 @@ struct FakeVdOptions
 	std::vector<std::tuple<int, std::string, std::string>> mobile_schedule;
 	// stop reading the video channel for stall_ms after stall_after frames (a headset that falls behind)
 	int stall_after = -1, stall_ms = 0;
+	// --- real-headset conditions (vrhost-test-vd) ---
+	double video_rate_bps = 0;   // read the video channel no faster than this (Wi-Fi throughput cap), 0 = unlimited
+	int net_delay_ms = 0, net_jitter_ms = 0; // one-way delay (+ uniform jitter) of tracking samples to the host
+	double decode_cap_fps = 0;   // the headset decoder's throughput (per eye pair), 0 = unlimited
+	std::vector<std::tuple<int, uint8_t, std::string>> control_schedule; // (frames, Msg, payload) e.g. Recenter
+	// every frame message as it arrives, with the decoded left/right pictures (nullptr if not decoded) and the
+	// arrival time; the pictures are only valid during the call
+	std::function<void(const vrhost::vd::FrameMetadata &, CVPixelBufferRef left, CVPixelBufferRef right, int64_t arrival_ns)>
+	        on_frame;
+	bool keep_results = true; // false: do not keep every FrameMetadata (long runs)
 };
 
 struct FakeVdResult
