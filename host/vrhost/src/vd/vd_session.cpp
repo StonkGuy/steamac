@@ -22,6 +22,8 @@ static_assert(XXH_VERSION_NUMBER >= 800, "XXH3 needs xxHash >= 0.8 (lz4's bundle
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <ifaddrs.h>
 #include <map>
@@ -220,8 +222,101 @@ struct VdSession::impl
 	// VD-FACT(clock): FrameMetadata.frame_index echoes the tracking sample's index the frame was rendered with.
 	std::mutex index_mutex;
 	int32_t last_tracking_index = 0;
-	std::array<std::pair<ns, int32_t>, 16> view_index{}; // display time -> tracking index at views_at
+	// Which tracking sample each frame's poses came from. The host pipeline samples the poses right after
+	// next_frame_timing (VrPipeline::frame_clock -> pose_at), the test producers through views_at; submit looks the
+	// frame up by id and display time. Without this the frame carried the NEWEST index at submit time, so the headset
+	// reprojected from a pose newer than the one rendered and the picture followed the head (2026-10-17 live run).
+	struct ViewIndex
+	{
+		uint64_t frame_id = 0;
+		ns display = 0;
+		int32_t index = 0;
+	};
+	std::array<ViewIndex, 64> view_index{};
 	size_t view_index_pos = 0;
+	void remember_view(uint64_t frame_id, ns display)
+	{
+		std::lock_guard lock(index_mutex);
+		view_index[view_index_pos++ % view_index.size()] = {frame_id, display, last_tracking_index};
+	}
+	int32_t rendered_index(uint64_t frame_id, ns display, ns tolerance)
+	{
+		std::lock_guard lock(index_mutex);
+		const ViewIndex * best = nullptr;
+		ns best_d = tolerance;
+		for (auto & v: view_index)
+		{
+			if (not v.display)
+				continue;
+			ns dt = v.display > display ? v.display - display : display - v.display;
+			if (frame_id and v.frame_id == frame_id and dt <= tolerance)
+				return v.index; // the frame the pacer handed out (the guest echoes its id and display time)
+			if (dt < best_d or (dt == best_d and not best))
+				best = &v, best_d = dt;
+		}
+		return best ? best->index : last_tracking_index;
+	}
+
+	// Network side of the video channel: submit() encodes and queues, this thread sends. A headset that stops
+	// reading (decoder stall, Wi-Fi drop, its spacewarp/menu transitions) must never hold up the VR link thread that
+	// calls submit(): that thread also returns the game's eye images, and a blocked one froze the game.
+	struct Outgoing
+	{
+		std::shared_ptr<Channel> chan;
+		std::vector<uint8_t> frame, slice;
+		bool idr;
+	};
+	std::mutex send_mutex;
+	std::condition_variable send_cv;
+	std::deque<Outgoing> send_queue;
+	bool sending = false;
+	ns last_drop_log = 0;
+	std::thread sender;
+	static constexpr size_t send_queue_max = 2; // frames waiting for the network before older ones are dropped
+	void sender_loop()
+	{
+		std::unique_lock lock(send_mutex);
+		while (true)
+		{
+			send_cv.wait(lock, [&] { return quit or not send_queue.empty(); });
+			if (send_queue.empty())
+				return; // quit
+			Outgoing o = std::move(send_queue.front());
+			send_queue.pop_front();
+			sending = true;
+			lock.unlock();
+			bool ok = o.chan->send(o.frame) and o.chan->send(o.slice);
+			if (ok)
+			{
+				stats.frames_sent++;
+				if (o.idr)
+					stats.idr_sent++;
+				stats.bytes_sent += o.frame.size() + o.slice.size();
+			}
+			lock.lock();
+			sending = false;
+			send_cv.notify_all();
+		}
+	}
+	// false = the headset is behind: the frames waiting (and this one, unless it is an IDR that restarts the stream)
+	// were dropped; the caller then asks for an IDR so the next frame decodes without them.
+	bool queue_frame(Outgoing o)
+	{
+		std::lock_guard lock(send_mutex);
+		if (send_queue.size() >= send_queue_max)
+		{
+			stats.frames_dropped += send_queue.size();
+			send_queue.clear();
+			if (not o.idr)
+			{
+				stats.frames_dropped++;
+				return false;
+			}
+		}
+		send_queue.push_back(std::move(o));
+		send_cv.notify_all();
+		return true;
+	}
 
 	std::mutex haptic_mutex;
 	std::array<float, 2> haptic_amp{};
@@ -575,6 +670,7 @@ struct VdSession::impl
 		bool ssw_logged = false;
 		float old_refresh = refresh;
 		uint32_t old_divisor = divisor;
+		uint32_t old_bitrate = 0;
 		std::shared_ptr<Channel> v;
 		bool format_changed;
 		{
@@ -625,6 +721,7 @@ struct VdSession::impl
 			annexb_out = mobile.boolean(key_annexb).value_or(true);
 			bool ssw = cfg.spacewarp == VdConfig::Spacewarp::on or (cfg.spacewarp == VdConfig::Spacewarp::headset and ssw_headset);
 			d = ssw ? 2 : 1;
+			old_bitrate = info ? info->bitrate_bps : 0;
 			format_changed = info and (info->eye_width != h.eye_width or info->eye_height != h.eye_height or
 			                           info->codecs != h.codecs or info->preferred_refresh_rate != h.preferred_refresh_rate);
 			info = h;
@@ -647,7 +744,8 @@ struct VdSession::impl
 			         h.preferred_refresh_rate, q_logged, ssw_logged ? "on" : "off", d);
 			log(buf);
 		}
-		if (format_changed)
+		// the encoders' frame rate and bitrate follow the render divisor (spacewarp) too: new encoders + key frame
+		if (format_changed or old_divisor != d or old_bitrate != h.bitrate_bps)
 		{
 			std::lock_guard lock(encode_mutex);
 			encoders = {};
@@ -747,6 +845,18 @@ struct VdSession::impl
 		t.pose.position = {p.x, p.y, p.z};
 		t.linear_velocity = {v.x, v.y, v.z};
 		t.angular_velocity = {w.x, w.y, w.z};
+		// a pose that is not a finite unit quaternion + finite position (a sleeping controller, a corrupt sample) is
+		// reported untracked: extrapolating it would hand the game NaN matrices
+		float n2 = o.x * o.x + o.y * o.y + o.z * o.z + o.w * o.w;
+		bool finite = std::isfinite(n2) and std::isfinite(p.x) and std::isfinite(p.y) and std::isfinite(p.z) and
+		              std::isfinite(v.x) and std::isfinite(v.y) and std::isfinite(v.z) and std::isfinite(w.x) and
+		              std::isfinite(w.y) and std::isfinite(w.z);
+		if (not finite or n2 < 0.25f or n2 > 4.f)
+		{
+			t.pose = Pose{};
+			t.linear_velocity = t.angular_velocity = {};
+			valid = false;
+		}
 		t.orientation_valid = t.position_valid = valid;
 		return t;
 	}
@@ -866,6 +976,7 @@ void VdSession::start(SessionListener * l)
 	else
 		p->log("vd: no discovery key: discovery responder off (the headset cannot find this computer)");
 	p->accept_thread = std::thread([this] { p->accept_loop(); });
+	p->sender = std::thread([this] { p->sender_loop(); });
 }
 
 void VdSession::stop()
@@ -875,6 +986,13 @@ void VdSession::stop()
 	if (p->accept_thread.joinable())
 		p->accept_thread.join();
 	p->drop_session("host stopping");
+	{
+		std::lock_guard lock(p->send_mutex);
+		p->send_queue.clear();
+		p->send_cv.notify_all();
+	}
+	if (p->sender.joinable())
+		p->sender.join();
 	std::vector<std::thread> readers;
 	{
 		std::lock_guard lock(p->threads_mutex);
@@ -917,6 +1035,8 @@ FrameTiming VdSession::next_frame_timing()
 	}
 	if (ns now = now_ns(); wake > now)
 		std::this_thread::sleep_for(std::chrono::nanoseconds(wake - now));
+	// the caller samples the poses for this frame now (VrPipeline::frame_clock): remember the tracking sample
+	p->remember_view(id, wake + p->cfg.latency_ns);
 	return {.wake_up = wake, .predicted_display = wake + p->cfg.latency_ns, .frame_id = id, .display_period = period, .render_divisor = d};
 }
 
@@ -928,11 +1048,7 @@ bool VdSession::views_at(ns t, std::array<Pose, 2> & pose, std::array<Fov, 2> & 
 		fov = p->fov;
 		ipd = p->ipd;
 	}
-	{
-		// remember which tracking sample this frame's views come from (FrameMetadata.frame_index)
-		std::lock_guard lock(p->index_mutex);
-		p->view_index[p->view_index_pos++ % p->view_index.size()] = {t, p->last_tracking_index};
-	}
+	p->remember_view(0, t); // which tracking sample this frame's views come from (FrameMetadata.frame_index)
 	auto head = p->history[size_t(Device::head)].at(t);
 	Pose h = head ? head->pose : Pose{};
 	for (int e = 0; e < 2; ++e)
@@ -996,13 +1112,7 @@ void VdSession::submit(const Frame & f)
 	ns period = ns(1e9 / p->refresh.load());
 	FrameMetadata md;
 	md.timestamp_us = now / 1000; // VD-FACT(clock): host microseconds, pairs the frame with its slice
-	{
-		std::lock_guard lock(p->index_mutex);
-		md.frame_index = p->last_tracking_index;
-		for (auto & [t, index]: p->view_index)
-			if (t == f.display_time)
-				md.frame_index = index;
-	}
+	md.frame_index = p->rendered_index(f.frame_id, f.display_time, ns(d * period));
 	md.source = Source::vr;
 	md.is_sync_frame = out[0].idr and out[1].idr;
 	md.frame_time_ms = float(d * period / 1e6);
@@ -1033,13 +1143,17 @@ void VdSession::submit(const Frame & f)
 	md.data_size = int32_t(bits[0].size());
 	auto frame = frame_message(md, bits[0]);
 	auto slice = slice_message({.timestamp_us = md.timestamp_us, .stream_index = 1, .data_size = int32_t(bits[1].size())}, bits[1]);
-	if (not v->send(frame) or not v->send(slice))
-		return;
-	p->stats.frames_sent++;
-	if (md.is_sync_frame)
-		p->stats.idr_sent++;
-	p->stats.bytes_sent += frame.size() + slice.size();
 	p->stats.last_encode_ns = encode_ns;
+	if (not p->queue_frame({std::move(v), std::move(frame), std::move(slice), md.is_sync_frame != 0}))
+	{
+		p->idr_pending = true; // the headset fell behind: restart the stream with a key frame
+		if (now - p->last_drop_log > 1'000'000'000)
+		{
+			p->last_drop_log = now;
+			p->log("vd: the headset is not reading the video channel fast enough: frames dropped (" +
+			       std::to_string(p->stats.frames_dropped.load()) + " so far), key frame next");
+		}
+	}
 }
 
 void VdSession::haptics(Device d, float duration_s, float frequency, float amplitude)

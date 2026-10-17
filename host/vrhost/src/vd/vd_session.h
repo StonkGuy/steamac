@@ -61,7 +61,7 @@ struct VdStats
 {
 	std::atomic<uint64_t> offers{0}, offers_refused{0}, connect_now{0}, sessions{0}, frames_sent{0}, idr_sent{0},
 	        idr_requests{0}, bytes_sent{0}, tracking{0}, inputs{0}, audio_packets{0}, mic_packets{0}, haptics{0},
-	        settings_messages{0}, bad_messages{0}, recenters{0}, commands_sent{0};
+	        settings_messages{0}, bad_messages{0}, recenters{0}, commands_sent{0}, frames_dropped{0};
 	std::atomic<int32_t> last_latency_us{0}; // headset-reported latency (FrameData)
 	std::atomic<int64_t> last_encode_ns{0};
 };

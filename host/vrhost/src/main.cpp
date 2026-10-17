@@ -415,9 +415,9 @@ static Adapter make_vd(const VdOptions & o, uint32_t w, uint32_t h, uint32_t bit
 	a.report = [&s] {
 		static ns last_report = now_ns();
 		auto & st = s.stats();
-		printf("frames %" PRIu64 " idr %" PRIu64 " (requests %" PRIu64 ") tracking %" PRIu64 " inputs %" PRIu64
+		printf("frames %" PRIu64 " dropped %" PRIu64 " idr %" PRIu64 " (requests %" PRIu64 ") tracking %" PRIu64 " inputs %" PRIu64
 		       " render divisor %u, last encode %.2f ms, %.1f Mbit/s\n",
-		       st.frames_sent.load(), st.idr_sent.load(), st.idr_requests.load(), st.tracking.load(), st.inputs.load(),
+		       st.frames_sent.load(), st.frames_dropped.load(), st.idr_sent.load(), st.idr_requests.load(), st.tracking.load(), st.inputs.load(),
 		       s.render_divisor(), st.last_encode_ns / 1e6, st.bytes_sent * 8 / 1e6 / ((now_ns() - last_report) / 1e9));
 		last_report = now_ns();
 	};

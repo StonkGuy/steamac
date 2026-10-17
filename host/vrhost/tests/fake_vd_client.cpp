@@ -13,6 +13,7 @@
 #include <xxhash.h>
 
 #include <arpa/inet.h>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <netinet/in.h>
@@ -199,9 +200,24 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 			if (auto pb = dec[eye]->decode(annexb))
 			{
 				r.decoded[eye]++;
+				if (eye == 0)
+					r.decoded_at.push_back(int(r.frames.size()) - 1);
 				CVPixelBufferRelease(pb);
 			}
 		};
+		std::atomic<bool> tracking_stop{false};
+		std::thread tracker;
+		if (o.tracking_period_ms > 0 and (o.tracking_fn or o.tracking))
+			tracker = std::thread([&] {
+				for (int32_t n = 1; not tracking_stop; ++n)
+				{
+					TrackingSample s = o.tracking_fn ? o.tracking_fn(n) : *o.tracking;
+					s.frame_index = n;
+					if (not data->send(tracking_packet(s, o.tracking_size)))
+						break;
+					std::this_thread::sleep_for(std::chrono::milliseconds(o.tracking_period_ms));
+				}
+			});
 		while (complete < o.frames and now_ns() < deadline)
 		{
 			uint8_t tag;
@@ -249,7 +265,12 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 				if (sh.stream_index == 1)
 					decode(1, bits);
 				++complete;
-				if (o.tracking)
+				for (auto & [at, k, v]: o.mobile_schedule)
+					if (at == complete)
+						ctl->send(control_message(Msg::mobile_setting_changed, setting_changed_payload(k, v)));
+				if (complete == o.stall_after)
+					std::this_thread::sleep_for(std::chrono::milliseconds(o.stall_ms));
+				if (o.tracking and o.tracking_period_ms <= 0)
 				{
 					TrackingSample s = *o.tracking;
 					s.frame_index = 1000 + complete;
@@ -279,6 +300,9 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 				break;
 			}
 		}
+		tracking_stop = true;
+		if (tracker.joinable())
+			tracker.join();
 		if (r.error.empty() and complete < o.frames)
 			r.error = "timeout after " + std::to_string(complete) + " frames";
 		std::this_thread::sleep_for(std::chrono::milliseconds(50)); // let late control replies arrive

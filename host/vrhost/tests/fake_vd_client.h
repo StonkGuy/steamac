@@ -16,6 +16,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 struct FakeVdOptions
@@ -40,6 +41,14 @@ struct FakeVdOptions
 	bool decode = true;
 	bool annexb = true; // expect Annex-B (default) or 4-byte BE length-prefixed NALs (UseAnnexB=false)
 	bool extra_requests = false; // UpdateRequired + WakeUpComputer after the first frame
+	// Tracking on its own clock like the real headset (instead of one sample per received frame): every period,
+	// sample n (frame_index n, from 1) = tracking_fn(n), or *tracking when no function is set.
+	int tracking_period_ms = 0;
+	std::function<vrhost::vd::TrackingSample(int32_t n)> tracking_fn;
+	// mobile setting changes sent when this many frames have arrived (e.g. the headset toggling UseSpacewarp)
+	std::vector<std::tuple<int, std::string, std::string>> mobile_schedule;
+	// stop reading the video channel for stall_ms after stall_after frames (a headset that falls behind)
+	int stall_after = -1, stall_ms = 0;
 };
 
 struct FakeVdResult
@@ -55,6 +64,7 @@ struct FakeVdResult
 	std::vector<vrhost::vd::SliceHeader> slices;
 	std::array<int, 2> decoded{}, idr{};
 	int framing_errors = 0; // eye data not in the expected NAL framing
+	std::vector<int> decoded_at; // r.frames index of each frame whose left eye decoded
 	std::vector<int16_t> speaker;
 	int speaker_packets = 0, speaker_max_packet = 0;
 };
