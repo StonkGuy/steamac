@@ -76,14 +76,13 @@ swift build "${SWIFT_FLAGS[@]}"
 
 if xcrun --find xcstringstool >/dev/null 2>&1; then
     python3 "$HERE/l10n.py" sync "$HERE/.build/stringsdata"
-    python3 "$HERE/l10n.py" check
-    python3 "$HERE/l10n.py" compile "$HERE/.build/l10n"
 else
-    # Command Line Tools only (no Xcode): no xcstringstool, so the catalogs are neither synced nor compiled;
-    # the app shows its English source strings.
-    echo "warning: xcstringstool not found (needs Xcode): building without localizations" >&2
-    mkdir -p "$HERE/.build/l10n"
+    # Command Line Tools only (no Xcode): no xcstringstool, so the catalog is not synced (check lists the
+    # extracted keys it lacks) and l10n.py compiles the tables itself.
+    echo "warning: xcstringstool not found (needs Xcode): Localizable.xcstrings not synced" >&2
 fi
+python3 "$HERE/l10n.py" check --stringsdata "$HERE/.build/stringsdata"
+python3 "$HERE/l10n.py" compile "$HERE/.build/l10n"
 
 # Debug files for crash reports (dist.sh uploads them with sentry-cli): the launcher's dSYM and
 # dSYMs of the libraries the .app bundles (their builds carry no DWARF, so these hold the symbol
@@ -114,7 +113,7 @@ codesign --force --sign - --entitlements "$HERE/steamac-vm.entitlements" "$tmp"
 mv -f "$tmp" "$OUT/steamac-vm"
 # Bundle.main of the bare dev binary resolves its .lproj directories next to it.
 for lproj in "$HERE/.build/l10n"/*.lproj; do
-    [[ -d $lproj ]] || continue   # none without Xcode (see above)
+    [[ -d $lproj ]] || continue
     rm -rf "$OUT/$(basename "$lproj")"
     cp -R "$lproj" "$OUT/"
 done
