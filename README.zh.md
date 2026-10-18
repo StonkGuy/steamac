@@ -96,7 +96,7 @@ EAC 在 SteamOS 内由 Valve 的 FEX 模拟器运行。本分支打过补丁的 
 
 - 仅验证了一台机器（M2、16 GB、macOS 27.0）。VRChat 已在两条路径上于游戏中验证；Mini Royale 的 EAC 启动器可达到 `301`（未继续游玩）。其他游戏未测试，结果因游戏而异。
 - 16 GB 的 Mac：重型游戏可能超出可用内存。Unigine Superposition（720p，Low）在两条路径上、虚拟机 8 GiB 时，应用内存都超过了 14 GB。
-- VR 不在本次发布中（实验性，位于 `vr-live` 分支）。
+- VR 不在本次发布中（实验性，位于 `vr-polish` 分支，指南见该分支的 `docs/vr.md`）。
 - DXMT：Direct3D 11/10。其 Direct3D 12 受限（功能级别 11_1，仅 DXBC，无 DXIL，无光线追踪；ExecuteIndirect 会使 GPU 停顿）；Direct3D 12 游戏请用 *Vulkan*。
 - 不包含 D3DMetal。
 - DXMT 设置对所有游戏生效；此时游戏的 Metal 层覆盖整个虚拟机视图（窗口化游戏或 alt-tab 会显示游戏层）。

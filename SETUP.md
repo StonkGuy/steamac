@@ -97,6 +97,8 @@ falls back to Vulkan.
 - The default is **Vulkan (classic)**. DXMT measured faster on the one verified Mac (see Known limits), but the
   default has not been changed.
 - DXMT covers Direct3D 11 and 10, and Direct3D 12 within the limits above.
+- Direct3D 11 stream output with rasterization, or from a geometry shader, is not implemented in DXMT upstream. Games
+  that use it render wrongly on DXMT (Unigine Superposition shows black shadow areas); use **Vulkan** for them.
 
 Settings > Advanced > **Vulkan driver** (KosmicKrisp or MoltenVK) applies to the Vulkan path only.
 
@@ -175,7 +177,7 @@ on an external APFS, Mac OS Extended or exFAT volume (FAT32 is rejected). exFAT 
   ([docs/eac-performance.md](docs/eac-performance.md)). GPU-bound and power-limited.
 - 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
   memory on both paths with an 8 GiB VM.
-- VR is not part of this release (experimental, `vr-live` branch).
+- VR is not part of this branch (experimental, [`vr-polish`](https://github.com/StonkGuy/steamac/tree/vr-polish) branch, guide in `docs/vr.md` there).
 - Anti-cheat that blocks virtual machines will not work.
 - DXMT: Direct3D 11/10. Direct3D 12 under the DXMT setting is limited (see above); use Vulkan for those games.
 - The DXMT setting applies to every game; there is no per-game opt-out.
