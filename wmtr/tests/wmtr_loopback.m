@@ -215,6 +215,18 @@ raw_request(uint16_t call, uint32_t params_size, uint32_t payload_size, const ui
  * host memory outside the request (32-bit wrap-around, or sizes larger than the reply slot / the arena blob). */
 static void
 test_hostile_requests(id<MTLDevice> dev) {
+  { /* a ring blob smaller than the ring layout: the executor would read and write past it */
+    uint64_t sz = WMTR_RING_BLOB_BYTES;
+    void *small = pages(sz);
+    ((struct wmtr_ring *)small)->magic = WMTR_RING_MAGIC; ((struct wmtr_ring *)small)->version = WMTR_VERSION;
+    void *save_b = blob_base[0]; uint64_t save_s = blob_size[0];
+    blob_base[0] = small; blob_size[0] = WMTR_PAGE;
+    struct wmtr_host *hs = wmtr_host_create(small, &host_ops, NULL);
+    CHECK(hs == NULL, "executor started on a %u-byte ring blob", WMTR_PAGE);
+    if (hs) wmtr_host_destroy(hs);
+    blob_base[0] = save_b; blob_size[0] = save_s;
+    free(small);
+  }
   const uint32_t inval = 0xC000000D;
   struct wmtr_slot *slots = (struct wmtr_slot *)((uint8_t *)blob_base[0] + WMTR_SLOTS_OFFSET);
   uint64_t payload[64] = {0};

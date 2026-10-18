@@ -873,6 +873,13 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   const char *l = getenv("WMTR_LOG");
   if (l) log_level = atoi(l);
   struct wmtr_ring *R = ring;
+  /* the guest sizes blob 0: the executor reads the ring header, the request ring and the reply slots, and writes
+   * the slots, all at fixed offsets up to WMTR_RING_BLOB_BYTES */
+  uint64_t ring_size = 0;
+  if (!ops->blob_ptr || ops->blob_ptr(ctx, 0, &ring_size) != ring || ring_size < WMTR_RING_BLOB_BYTES) {
+    LOG(0, "ring blob of %llu bytes, need %llu\n", (unsigned long long)ring_size, (unsigned long long)WMTR_RING_BLOB_BYTES);
+    return NULL;
+  }
   if (R->magic != WMTR_RING_MAGIC || R->version != WMTR_VERSION) {
     LOG(0, "ring magic/version mismatch (%x/%u)\n", R->magic, R->version);
     return NULL;
