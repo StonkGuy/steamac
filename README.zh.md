@@ -37,7 +37,7 @@ Epic Games、VRChat 及 DXMT 作者均无关联。
 
 ## 安装与首次启动
 
-1. 从本分支的 `main` 分支或某个[发布](https://github.com/StonkGuy/steamac/releases)标签构建应用：`./build.sh`（[要求与构建](docs/upstream/requirements-and-building.md)；DXMT 路径还需在 layer 步骤之前于 `wmtr/` 中运行 `make dxmt-payload`）。本分支暂不发布预构建的 DMG。把 `work/out/` 中的 **FX Steam Launcher.app** 复制到“应用程序”并打开（见下文*首次打开*）。
+1. 从本分支的 `main` 分支或某个[发布](https://github.com/StonkGuy/steamac/releases)标签构建应用：`./build.sh`（[要求与构建](docs/upstream/requirements-and-building.md)；DXMT 路径还需在 layer 步骤之前于 `wmtr/` 中运行 `make dxmt-payload`）。也可以下载[发布](https://github.com/StonkGuy/steamac/releases)附带的 DMG（自 v1.9-eac.1 起，由 GitHub Actions 构建，ad-hoc 签名）。把 `work/out/`（或 DMG）中的 **FX Steam Launcher.app** 复制到“应用程序”并打开（见下文*首次打开*）。
 2. 首次启动时选择**新建磁盘…**。应用会下载 Valve 的 SteamOS 映像，校验并完成设置。此过程较久，但只需一次。
 3. 在窗口中登录 Steam。保持 **16:10** 的窗口大小（设置 > 显示 > 默认窗口大小；默认的 1280×800 即 16:10）。16:9 的游戏
    在 16:10 窗口中会出现黑边。

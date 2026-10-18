@@ -37,6 +37,9 @@
 # geometry shaders + pixel checks; draws with a VK_NULL_HANDLE pipeline bound; robustBufferAccess2
 # bounds; null set layouts and unsupported sample counts; ... see repro/run.sh). Only then is it
 # installed, by temp file + rename (a running VM may have the old dylib mapped).
+# MVK_SKIP_REPRO=1 skips the repros (the probe still runs): they need the GPU features of real Apple
+# silicon, which a virtual machine's paravirtual Metal device lacks (no mesh shaders, so the geometry
+# shader repro aborts). For CI release builds; run repro/run.sh on the built dylib on a Mac instead.
 set -eu
 
 MVK_REPO=https://github.com/utmapp/MoltenVK.git
@@ -140,10 +143,14 @@ if grep -q 'MVK-BUILD-ERROR' "$probe_log"; then
 fi
 
 # --- repros: gamescope compute pipelines, geometry shaders, null pipeline binds
+if [ "${MVK_SKIP_REPRO:-0}" = 1 ]; then
+	echo ">> repro skipped: MVK_SKIP_REPRO=1"
+else
 echo ">> repro: gamescope compute pipelines, geometry shaders, null pipeline binds"
 repro_log=$work/repro.log
 "$here/repro/run.sh" "$stage/lib" > "$repro_log" 2>&1 || { cat "$repro_log"; exit 1; }
 grep -v '^\[mvk-info\]\|^	' "$repro_log"
+fi
 
 # --- install (temp + rename, never rewrite a mapped dylib in place)
 mkdir -p "$out/lib" "$out/share/vulkan/icd.d" "$out/include"

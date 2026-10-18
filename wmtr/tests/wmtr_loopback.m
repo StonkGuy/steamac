@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sched.h>
+#include <libproc.h>
+#include <sys/mman.h>
+#include <time.h>
 
 #define WINEMETAL_API
 #include "winemetal_thunks.h"
@@ -108,7 +111,25 @@ static NTSTATUS f_newfunction(void *a) {
   p->ret = strlen((const char *)(uintptr_t)p->arg) * 1000 + p->handle;
   return 0;
 }
-const void *wmtr_impl_funcs[146] = {[1] = f_release, [25] = f_newlibrary, [76] = f_sm50compile, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
+/* encoders: autoreleased objects; the log records (call, receiver or result) in execution order */
+static uint64_t enc_log[64][2]; static int n_enc_log;
+static void enc_note(uint64_t call, uint64_t v) { if (n_enc_log < 64) { enc_log[n_enc_log][0] = call; enc_log[n_enc_log][1] = v; } n_enc_log++; }
+static NTSTATUS f_new_encoder(uint64_t *ret, uint64_t call, int fail) {
+  *ret = fail ? 0 : (obj_handle_t)[[[NSObject alloc] init] autorelease];
+  enc_note(call, *ret);
+  return 0;
+}
+static NTSTATUS f_blit_enc(void *a) { return f_new_encoder(&((struct unixcall_generic_obj_obj_ret *)a)->ret, 30, 0); }
+static NTSTATUS f_compute_enc(void *a) { struct unixcall_generic_obj_uint64_obj_ret *p = a; return f_new_encoder(&p->ret, 31, p->arg == 99); }
+static NTSTATUS f_render_enc(void *a) {
+  struct unixcall_generic_obj_uint64_obj_ret *p = a;
+  const struct WMTRenderPassInfo *i = (const void *)(uintptr_t)p->arg;
+  return f_new_encoder(&p->ret, 32, !i || i->render_target_width != 640);
+}
+static NTSTATUS f_end_encoding(void *a) { enc_note(33, ((struct unixcall_generic_obj_noret *)a)->handle); return 0; }
+static NTSTATUS f_compute_encode(void *a) { enc_note(37, ((struct unixcall_generic_obj_cmd_noret *)a)->encoder); return 0; }
+const void *wmtr_impl_funcs[146] = {[1] = f_release, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
+                                    [33] = f_end_encoding, [37] = f_compute_encode, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
                                     [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes};
 
 /* ---------------- loopback transport ---------------- */
@@ -128,12 +149,24 @@ static void *t_open_ring(struct wmtr_transport *t, uint64_t size) {
   H = wmtr_host_create(R, &host_ops, NULL);
   return R;
 }
-static void *t_add_blob(struct wmtr_transport *t, uint32_t b, uint64_t size) { blob_base[b] = pages(size); blob_size[b] = size; return blob_base[b]; }
+/* arena blobs are their own mappings, like the shm blobs of the real transports */
+static void *t_add_blob(struct wmtr_transport *t, uint32_t b, uint64_t size) {
+  void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+  if (p == MAP_FAILED) return NULL;
+  blob_base[b] = p; blob_size[b] = size; return p;
+}
+static int n_blob_released;
+static void t_release_blob(struct wmtr_transport *t, uint32_t b, void *base, uint64_t size) {
+  if (base == blob_base[b] && size == blob_size[b]) { munmap(blob_base[b], size); blob_base[b] = NULL; blob_size[b] = 0; n_blob_released++; }
+}
+static uint64_t arena_bytes(void) { uint64_t n = 0; for (int b = 1; b < WMTR_MAX_BLOBS; b++) n += blob_base[b] ? blob_size[b] : 0; return n; }
+static uint64_t footprint(void) { struct rusage_info_v2 ri; return proc_pid_rusage(getpid(), RUSAGE_INFO_V2, (rusage_info_t *)&ri) ? 0 : ri.ri_phys_footprint; }
 static void t_kick(struct wmtr_transport *t) { wmtr_host_kick(H); }
 static void t_wait(struct wmtr_transport *t, volatile uint64_t *d, uint64_t seq, uint32_t slot, uint64_t spin_ns) { (void)spin_ns; while (__atomic_load_n(d, __ATOMIC_ACQUIRE) < seq) sched_yield(); }
 struct wmtr_transport *wmtr_transport_create(void) {
   struct wmtr_transport *t = calloc(1, sizeof *t);
   t->open_ring = t_open_ring; t->add_blob = t_add_blob; t->kick = t_kick; t->wait = t_wait;
+  t->release_blob = t_release_blob;
   return t;
 }
 static NTSTATUS remote(int call, void *p) { return ((fn_t)__wine_unix_call_funcs[call])(p); }
@@ -145,6 +178,7 @@ int main(void) {
     snprintf(frames_path, sizeof frames_path, "/tmp/wmtr_frames_%d.csv", (int)getpid());
     unlink(frames_path);
     setenv("WMTR_FRAMES", frames_path, 1);
+    setenv("WMTR_ARENA_TRIM_MS", "300", 1); /* section 7 */
     char stats_path[] = "/tmp/wmtr_callstats_XXXXXX";
     close(mkstemp(stats_path));
     /* WMTR_TEST_TRIGGER=1: statistics turned on at runtime through the trigger file instead of the environment */
@@ -261,6 +295,88 @@ int main(void) {
             "caller-placed buffer ret %llx mem %p", cb2.ret, ci.memory.ptr);
       free(own);
     }
+    /* 7. after a peak, idle arena blobs beyond the 128 MiB reserve go back to the host once they have
+          been idle for WMTR_ARENA_TRIM_MS; blobs reused within that time are kept */
+    {
+      enum { NB = 8 };
+      struct wmtr_ring *R = blob_base[0];
+      uint64_t a0 = arena_bytes();
+      obj_handle_t bh[NB];
+      for (int i = 0; i < NB; i++) {
+        struct WMTBufferInfo pi = {60u << 20, WMTResourceStorageModeShared, {NULL}, 0};
+        struct unixcall_mtldevice_newbuffer pb = {(obj_handle_t)dev, {&pi}, 0};
+        remote(18, &pb);
+        bh[i] = pb.ret;
+        if (pi.memory.ptr) memset(pi.memory.ptr, i + 1, 60u << 20);
+      }
+      uint64_t a_peak = arena_bytes(), fp_peak = footprint();
+      CHECK(bh[NB - 1] && a_peak >= a0 + (NB - 1) * (60ull << 20), "peak: %llu arena MiB", a_peak >> 20);
+      uint64_t fh = R->free_head;
+      for (int i = 0; i < NB; i++) remote(1, &bh[i]);
+      remote(26, &fb);
+      for (int i = 0; i < 2000 && R->free_head < fh + NB; i++) usleep(1000);
+      remote(26, &fb); /* takes the frees: the blobs are idle, but not for long enough yet */
+      CHECK(n_blob_released == 0 && arena_bytes() == a_peak, "released %d blobs before the idle time", n_blob_released);
+      usleep(400000);
+      remote(26, &fb);
+      uint64_t a_after = arena_bytes(), fp_after = footprint();
+      printf("arena trim: arena %llu -> %llu MiB, footprint %llu -> %llu MiB, %d blobs released\n",
+             a_peak >> 20, a_after >> 20, fp_peak >> 20, fp_after >> 20, n_blob_released);
+      CHECK(a_after <= a0 + (128ull << 20), "arena kept %llu MiB after the peak (before %llu MiB)", a_after >> 20, a0 >> 20);
+      CHECK(fp_after + (256ull << 20) <= fp_peak, "footprint %llu -> %llu MiB", fp_peak >> 20, fp_after >> 20);
+      /* the arena still works: a released blob number is reused */
+      struct WMTBufferInfo ri = {100u << 20, WMTResourceStorageModeShared, {NULL}, 0};
+      struct unixcall_mtldevice_newbuffer rb = {(obj_handle_t)dev, {&ri}, 0};
+      remote(18, &rb);
+      CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
+      if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
+    }
+    /* 8. client-assigned handles: a frame's pool + encoder creations do not wait for the host (one sync call
+          apart from the calls that return values); each use reaches the host after its creation and gets the object;
+          a failed creation makes the calls using its handle no-ops. WMTR_CLIENT_HANDLES=0: every creation waits. */
+    {
+      int on = !getenv("WMTR_CLIENT_HANDLES") || atoi(getenv("WMTR_CLIENT_HANDLES"));
+      struct wmtr_host_stats s0, s1;
+      wmtr_host_get_stats(H, &s0);
+      n_enc_log = 0;
+      struct unixcall_generic_obj_ret pool = {0};
+      remote(10, &pool);
+      struct unixcall_generic_obj_ret ar = {0};
+      remote(53, &ar); /* autoreleased into the pool */
+      struct WMTRenderPassInfo rpi; memset(&rpi, 0, sizeof rpi); rpi.render_target_width = 640;
+      struct unixcall_generic_obj_uint64_obj_ret re = {0x77, (uint64_t)(uintptr_t)&rpi, 0}, ce = {0x77, 1, 0}, bad = {0x77, 99, 0};
+      struct unixcall_generic_obj_obj_ret be = {0x77, 0};
+      remote(32, &re);
+      struct unixcall_generic_obj_noret end = {re.ret}; remote(33, &end);
+      remote(31, &ce);
+      struct unixcall_generic_obj_cmd_noret enc = {ce.ret, {NULL}}; remote(37, &enc);
+      end.handle = ce.ret; remote(33, &end);
+      remote(30, &be);
+      end.handle = be.ret; remote(33, &end);
+      remote(31, &bad); /* fails on the host */
+      enc.encoder = bad.ret; remote(37, &enc);
+      end.handle = bad.ret; remote(33, &end);
+      obj_handle_t ph = pool.ret;
+      int alive_in_pool = 0;
+      struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); /* sync: all of the above has executed */
+      alive_in_pool = probe_alive;
+      remote(1, &ph);
+      remote(39, &q);
+      wmtr_host_get_stats(H, &s1);
+      uint64_t waits = s1.sync_requests - s0.sync_requests;
+      CHECK(waits == (on ? 3u : 8u), "pool+encoders: %llu sync requests (want %d)", waits, on ? 3 : 8); /* 53 and 39 twice */
+      CHECK(pool.ret && re.ret && ce.ret && be.ret && (on ? bad.ret != 0 : bad.ret == 0), "handles %llx %llx %llx %llx %llx",
+            pool.ret, re.ret, ce.ret, be.ret, bad.ret);
+      CHECK(alive_in_pool && !probe_alive, "pool handle: object alive in pool %d, after release %d", alive_in_pool, probe_alive);
+      /* host order: 32 r, 33 r, 31 c, 37 c, 33 c, 30 b, 33 b, 31 0 (failed; its uses are skipped) */
+      static const uint64_t want[8] = {32, 33, 31, 37, 33, 30, 33, 31};
+      int ok = n_enc_log == (on ? 8 : 10);
+      for (int i = 0; ok && i < 8; i++) ok = enc_log[i][0] == want[i];
+      ok = ok && enc_log[0][1] && enc_log[1][1] == enc_log[0][1] && enc_log[3][1] == enc_log[2][1] &&
+           enc_log[4][1] == enc_log[2][1] && enc_log[6][1] == enc_log[5][1] && enc_log[7][1] == 0;
+      CHECK(ok, "encoder order/objects: %d log entries", n_enc_log);
+      CHECK(end.handle == bad.ret, "the caller's receiver handle was changed to %llx", end.handle);
+    }
     struct wmtr_host_stats st; wmtr_host_get_stats(H, &st);
     printf("requests=%llu sync=%llu bytes=%llu\n", st.requests, st.sync_requests, st.bytes);
     { /* an autoreleased result outside any client pool must outlive the request (DXMT reads it next) */
@@ -329,10 +445,20 @@ int main(void) {
         wmtr_host_set_spin(H, 20000000);
         { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); }
         wmtr_host_get_stats(H, &st1);
-        for (int i = 0; i < 20; i++) { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); usleep(300); }
+        /* a gap that really lasted longer than the budget (this thread descheduled on a loaded or
+           virtualized machine, e.g. a CI runner) is allowed to end in a sleep */
+        unsigned long long long_gaps = 0;
+        for (int i = 0; i < 20; i++) {
+          struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q);
+          uint64_t g0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+          usleep(300);
+          if (clock_gettime_nsec_np(CLOCK_MONOTONIC) - g0 >= 20000000) long_gaps++;
+        }
         wmtr_host_get_stats(H, &st2);
         CHECK(st1.idle_sleeps - st0.idle_sleeps >= 15, "no spin: %llu sleeps in 20 gaps", st1.idle_sleeps - st0.idle_sleeps);
-        CHECK(st2.idle_sleeps - st1.idle_sleeps <= 1, "20 ms spin: %llu sleeps in 20 gaps of 0.3 ms", st2.idle_sleeps - st1.idle_sleeps);
+        CHECK(long_gaps <= 5 && st2.idle_sleeps - st1.idle_sleeps <= 1 + long_gaps,
+              "20 ms spin: %llu sleeps in 20 gaps of 0.3 ms (%llu gaps lasted >= 20 ms)",
+              st2.idle_sleeps - st1.idle_sleeps, long_gaps);
         wmtr_host_set_spin(H, WMTR_HOST_SPIN_US_DEFAULT * 1000);
       }
       wmtr_host_destroy(H);

@@ -10,7 +10,14 @@
 #
 #   host/launcher/dist.sh [--no-notarize]
 #
+# DIST_SIGN=adhoc builds the same DMG without an Apple Developer account (CI release builds, forks):
+# the copy is signed ad hoc (codesign -s -, no hardened runtime, no timestamp) with the same
+# entitlements, exactly as bundle.sh signs the local app, and nothing is notarized. Gatekeeper does
+# not open such a download by itself: the user allows it once in System Settings > Privacy &
+# Security ("Open Anyway"). The DMG itself stays unsigned (publish its sha256 next to it).
+#
 # Env:
+#   DIST_SIGN              developer-id (default) or adhoc (see above; implies --no-notarize)
 #   STEAMAC_SIGN_IDENTITY  codesign identity, SHA-1 or name (default: the keychain's only valid
 #                          "Developer ID Application"; signed by SHA-1, so an expired or revoked
 #                          certificate of the same name does not make codesign's lookup ambiguous)
@@ -39,6 +46,12 @@ case ${1:-} in
     --no-notarize) notarize=0 ;;
     *) die "usage: $0 [--no-notarize]" ;;
 esac
+mode=${DIST_SIGN:-developer-id}
+case $mode in
+    developer-id) ;;
+    adhoc) notarize=0 ;;
+    *) die "DIST_SIGN must be developer-id or adhoc, not '$mode'" ;;
+esac
 [[ -d $SRC ]] || die "missing $SRC (run host/launcher/build.sh)"
 # An already assembled app is not an escape hatch around guest provenance.
 # Check its own sealed resource bytes and receipts before touching dist/.
@@ -46,22 +59,28 @@ python3 "$ROOT/scripts/guest-artifacts.py" check-bundle "$SRC/Contents/Resources
 # Releases ship every UI string in every language (build.sh only warns).
 python3 "$HERE/l10n.py" check --strict
 
-# Valid identities only, as "<SHA-1> <name>".
-valid=$(security find-identity -v -p codesigning \
-    | sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) "\(Developer ID Application: .*\)"$/\1 \2/p' | sort -u)
-want=${STEAMAC_SIGN_IDENTITY:-}
-if [[ -n $want ]]; then
-    match=$(awk -v w="$want" '$1 == w || substr($0, 42) == w' <<<"$valid")
+if [[ $mode == adhoc ]]; then
+    sign_id=-
+    identity='ad hoc'
+    team=
 else
-    match=$valid
+    # Valid identities only, as "<SHA-1> <name>".
+    valid=$(security find-identity -v -p codesigning \
+        | sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) "\(Developer ID Application: .*\)"$/\1 \2/p' | sort -u)
+    want=${STEAMAC_SIGN_IDENTITY:-}
+    if [[ -n $want ]]; then
+        match=$(awk -v w="$want" '$1 == w || substr($0, 42) == w' <<<"$valid")
+    else
+        match=$valid
+    fi
+    [[ -n $match ]] || die "no valid \"Developer ID Application\" identity${want:+ matching '$want'} in the keychain"
+    [[ $(wc -l <<<"$match") -eq 1 ]] \
+        || die "several Developer ID identities, pick one (SHA-1 or name) with STEAMAC_SIGN_IDENTITY:"$'\n'"$match"
+    sign_id=${match%% *}
+    identity=${match#* }
+    team=$(sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p' <<<"$identity")
+    [[ -n $team ]] || die "cannot read the team ID from identity '$identity'"
 fi
-[[ -n $match ]] || die "no valid \"Developer ID Application\" identity${want:+ matching '$want'} in the keychain"
-[[ $(wc -l <<<"$match") -eq 1 ]] \
-    || die "several Developer ID identities, pick one (SHA-1 or name) with STEAMAC_SIGN_IDENTITY:"$'\n'"$match"
-sign_id=${match%% *}
-identity=${match#* }
-team=$(sed -n 's/.*(\([A-Z0-9]\{10\}\))$/\1/p' <<<"$identity")
-[[ -n $team ]] || die "cannot read the team ID from identity '$identity'"
 
 profile=${NOTARY_PROFILE:-steamac-notary}
 if [[ $notarize == 1 ]]; then
@@ -92,8 +111,13 @@ if [[ $notarize == 1 ]]; then
     /usr/libexec/PlistBuddy -c "Add :SteamacDistTeamID string $team" "$APP/Contents/Info.plist"
 fi
 
-echo "=== signing with \"$identity\" (hardened runtime)"
-sign() { codesign --force --timestamp --options runtime --sign "$sign_id" "$@"; }
+if [[ $mode == adhoc ]]; then
+    echo "=== signing ad hoc (no Developer ID, not notarized)"
+    sign() { codesign --force --timestamp=none --sign - "$@"; }
+else
+    echo "=== signing with \"$identity\" (hardened runtime)"
+    sign() { codesign --force --timestamp --options runtime --sign "$sign_id" "$@"; }
+fi
 main_exe="$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
 nested=()
 while IFS= read -r -d '' f; do
@@ -106,9 +130,13 @@ sign --entitlements "$ENTITLEMENTS" "$APP"
 codesign --verify --deep --strict "$APP"
 for f in "$main_exe" "${nested[@]}"; do
     info=$(codesign -dv "$f" 2>&1)
-    grep -q "TeamIdentifier=$team" <<<"$info" || die "${f#"$APP/"}: not signed by team $team"
-    grep -q 'flags=0x10000(runtime)' <<<"$info" || die "${f#"$APP/"}: hardened runtime flag missing"
-    grep -q '^Timestamp=' <<<"$info" || die "${f#"$APP/"}: no secure timestamp"
+    if [[ $mode == adhoc ]]; then
+        grep -q '^Signature=adhoc$' <<<"$info" || die "${f#"$APP/"}: not signed ad hoc"
+    else
+        grep -q "TeamIdentifier=$team" <<<"$info" || die "${f#"$APP/"}: not signed by team $team"
+        grep -q 'flags=0x10000(runtime)' <<<"$info" || die "${f#"$APP/"}: hardened runtime flag missing"
+        grep -q '^Timestamp=' <<<"$info" || die "${f#"$APP/"}: no secure timestamp"
+    fi
     echo "  ok ${f#"$APP/"}"
 done
 codesign -d --entitlements - --xml "$APP" 2>/dev/null | plutil -p - | sed 's/^/  /'
@@ -141,7 +169,7 @@ mkdir -p "$WORK/dmg"
 ditto "$APP" "$WORK/dmg/$NAME.app"
 ln -s /Applications "$WORK/dmg/Applications"
 hdiutil create -quiet -volname "$NAME" -srcfolder "$WORK/dmg" -fs HFS+ -format ULFO -ov "$WORK/$DMG_NAME"
-codesign --force --timestamp --sign "$sign_id" "$WORK/$DMG_NAME"
+[[ $mode == adhoc ]] || codesign --force --timestamp --sign "$sign_id" "$WORK/$DMG_NAME"
 
 if [[ $notarize == 1 ]]; then
     echo "=== notarizing the DMG"
@@ -156,7 +184,11 @@ mv "$APP" "$DIST/$NAME.app"
 mv "$WORK/$DMG_NAME" "$DIST/$DMG_NAME"
 echo "built $DIST/$DMG_NAME ($(du -h "$DIST/$DMG_NAME" | cut -f1), sha256 $(shasum -a 256 "$DIST/$DMG_NAME" | cut -d' ' -f1))"
 echo "GPL sources: $GPL_SOURCES ($(du -h "$GPL_SOURCES" | cut -f1), sha256 $(shasum -a 256 "$GPL_SOURCES" | cut -d' ' -f1))"
-[[ $notarize == 1 ]] || echo "NOT notarized (--no-notarize): Gatekeeper blocks this DMG once downloaded"
+if [[ $mode == adhoc ]]; then
+    echo "ad hoc signed, NOT notarized (DIST_SIGN=adhoc): a downloaded copy needs \"Open Anyway\" in System Settings > Privacy & Security"
+elif [[ $notarize != 1 ]]; then
+    echo "NOT notarized (--no-notarize): Gatekeeper blocks this DMG once downloaded"
+fi
 
 # Debug files for symbolicated crash reports (CrashReporting.swift). Never a hardcoded token.
 if [[ -z ${SENTRY_AUTH_TOKEN:-} || -z ${SENTRY_ORG:-} || -z ${SENTRY_PROJECT:-} ]]; then

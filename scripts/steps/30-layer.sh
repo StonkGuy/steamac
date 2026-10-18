@@ -75,11 +75,15 @@ grep -q 'fx-progress-agent pad$' "$ST/usr/lib/systemd/system/fx-pad.service" \
 grep -q 'fx-progress-agent sleep suspend$' "$ST/usr/lib/systemd/system/systemd-suspend.service.d/50-steamac-sleep.conf" \
     || { echo "[layer] systemd-suspend.service drop-in (fx-progress-agent sleep) missing" >&2; exit 1; }
 
+# Once per boot: drop the boot's clean page cache so free page reporting returns it to the Mac.
+[[ -L $ST/usr/lib/systemd/system/timers.target.wants/steamac-mem-trim.timer ]] \
+    && grep -q '^ExecStart=/usr/lib/steamac/mem-trim$' "$ST/usr/lib/systemd/system/steamac-mem-trim.service" \
+    || { echo "[layer] steamac-mem-trim timer/service missing" >&2; exit 1; }
 # Sanity: the pieces the initramfs and the A/B flow depend on.
 for f in usr/bin/splctl usr/lib/rauc/post-install.sh usr/lib/steamac/kernelsetup.sh \
          usr/lib/steamac/rauc-shims/steamos-chroot usr/lib/steamac/steam-gfx-env \
          usr/lib/steamac/steam-shader-defaults usr/lib/steamac/steam-client \
-         usr/lib/steamac/nested-desktop usr/lib/steamac/steam-gfx-path usr/lib/steamac/steam-frame-latency \
+         usr/lib/steamac/nested-desktop usr/lib/steamac/steam-gfx-path usr/lib/steamac/steam-frame-latency usr/lib/steamac/mem-trim usr/lib/steamac/steam-ui-gpu \
          usr/lib/steamac/desktop-bin/kwin_wayland_wrapper \
          usr/lib/steamac/desktop-bin/steamosctl usr/lib/steamos/gamescope-session; do
     [[ -x $ST/$f ]] || { echo "[layer] $f missing or not executable" >&2; exit 1; }

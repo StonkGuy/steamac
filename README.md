@@ -38,8 +38,9 @@ DXMT (single runs, see [docs/eac-performance.md](docs/eac-performance.md)).
 
 1. Build the app from this fork's `main` branch or a [release](https://github.com/StonkGuy/steamac/releases) tag:
    `./build.sh` ([requirements and building](docs/upstream/requirements-and-building.md); the DXMT path also needs
-   `make dxmt-payload` in `wmtr/` before the layer step). This fork does not publish a prebuilt DMG yet. Copy
-   **FX Steam Launcher.app** from `work/out/` to Applications and open it (see *First open* below).
+   `make dxmt-payload` in `wmtr/` before the layer step). Or download the DMG
+   attached to a [release](https://github.com/StonkGuy/steamac/releases) (from v1.9-eac.1, built by GitHub Actions, ad-hoc signed). Copy
+   **FX Steam Launcher.app** from `work/out/` (or the DMG) to Applications and open it (see *First open* below).
 2. On first start, choose **Create New Disk…**. The app downloads Valve's SteamOS image, verifies it and sets it up.
    This takes a while, once.
 3. Sign in to Steam in the window. Keep a **16:10** window size (Settings > Display > Default window

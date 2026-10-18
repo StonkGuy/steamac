@@ -1,0 +1,10 @@
+# steamac: drop the boot's clean page cache once so free page reporting hands it back to the Mac
+# (see /usr/lib/steamac/mem-trim; steamac.mem_trim=0 turns it off). Started by its timer.
+[Unit]
+Description=FX Steam Launcher: return boot page cache to the Mac
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/steamac/mem-trim
+Nice=19
+IOSchedulingClass=idle

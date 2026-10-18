@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "winemetal_thunks.h"
 #include "airconv_thunks.h"
@@ -26,6 +27,9 @@ typedef int32_t NTSTATUS;
 #define INLINE_OUT_MAX (48u << 10) /* reply-slot budget for outputs */
 
 static int wmtr_log_level = 1;
+/* WMTR_CLIENT_HANDLES=0 turns off client-assigned handles (wmtr_proto.h): pool and encoder creations wait for
+ * the host's result again */
+static int client_handles = 1;
 
 /* small decimal parser: libc's atoi binds to a glibc 2.38 symbol in new headers (see wmtr_glibc_compat.h) */
 static int
@@ -56,6 +60,15 @@ static struct arena_blob blobs[WMTR_MAX_BLOBS];
 static struct arena_free blob_free[WMTR_MAX_BLOBS];
 static uint32_t nblobs = 1; /* blob 0 is the ring */
 static pthread_mutex_t arena_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Trim after a peak: a blob with no live range is "idle". Idle blobs beyond a warm reserve
+ * (WMTR_ARENA_KEEP_MB, default 128) that stay idle for WMTR_ARENA_TRIM_MS (default 1000) go back
+ * to the host (transport release_blob), so the Mac stops paying for them. The steady-state cost
+ * is one compare per sync call; the clock is read only while idle bytes exceed the reserve. */
+static uint64_t blob_idle_since[WMTR_MAX_BLOBS]; /* CLOCK_MONOTONIC ns; 0 = in use */
+static _Atomic uint64_t arena_idle_bytes;
+static uint64_t arena_keep_bytes = UINT64_MAX; /* UINT64_MAX: never release (no transport support) */
+static uint64_t arena_trim_ns = 1000000000ull;
+uint64_t wmtr_arena_released_blobs, wmtr_arena_released_bytes; /* tests */
 
 static void
 slot_release(void *p) {
@@ -83,6 +96,8 @@ static void
 wmtr_init(void) {
   const char *l = getenv("WMTR_LOG");
   if (l) wmtr_log_level = env_int(l);
+  const char *ch = getenv("WMTR_CLIENT_HANDLES");
+  if (ch && *ch) client_handles = env_int(ch) != 0;
   const char *tp = getenv("WMTR_TRACE");
   if (tp && *tp) {
     char path[512];
@@ -98,6 +113,12 @@ wmtr_init(void) {
   ring_data = base + WMTR_RING_DATA_OFFSET;
   slots = (struct wmtr_slot *)(base + WMTR_SLOTS_OFFSET);
   blobs[0].base = base; blobs[0].size = WMTR_RING_BLOB_BYTES; blobs[0].id = 0;
+  if (T->release_blob) {
+    const char *k = getenv("WMTR_ARENA_KEEP_MB"), *tm = getenv("WMTR_ARENA_TRIM_MS");
+    int keep_mb = k && *k ? env_int(k) : 128, trim_ms = tm && *tm ? env_int(tm) : 1000;
+    if (keep_mb >= 0) arena_keep_bytes = (uint64_t)keep_mb << 20;
+    if (trim_ms >= 0) arena_trim_ns = (uint64_t)trim_ms * 1000000ull;
+  }
   init_ok = 1;
   LOG(1, "connected: ring %llu bytes, %d slots\n", (unsigned long long)WMTR_RING_BLOB_BYTES, WMTR_SLOTS);
 }
@@ -140,14 +161,54 @@ range_add(struct arena_free *f, uint64_t off, uint64_t size) {
   f->r[i].off = off; f->r[i].size = size; f->n++;
 }
 
+static uint64_t now_ns(void);
+
+/* returns a range to blob `b`; a blob whose whole size is free becomes idle */
+static void
+arena_put_locked(uint32_t b, uint64_t off, uint64_t size) {
+  struct arena_free *f = &blob_free[b];
+  range_add(f, off, size);
+  if (!blob_idle_since[b] && f->n == 1 && f->r[0].off == 0 && f->r[0].size == blobs[b].size) {
+    blob_idle_since[b] = arena_keep_bytes == UINT64_MAX ? 1 : now_ns();
+    atomic_fetch_add_explicit(&arena_idle_bytes, blobs[b].size, memory_order_relaxed);
+  }
+}
+
 static void
 drain_host_frees_locked(void) {
   uint64_t h = __atomic_load_n(&R->free_head, __ATOMIC_ACQUIRE), t = R->free_tail;
   for (; t < h; t++) {
     struct wmtr_free_entry e = R->free_ring[t % WMTR_FREE_RING];
-    if (e.blob && e.blob < nblobs) range_add(&blob_free[e.blob], e.offset, e.size);
+    if (e.blob && e.blob < nblobs && blobs[e.blob].base) arena_put_locked(e.blob, e.offset, e.size);
   }
   __atomic_store_n(&R->free_tail, t, __ATOMIC_RELEASE);
+}
+
+static uint64_t
+now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* releases blobs that have been idle for arena_trim_ns while idle bytes exceed the reserve,
+ * highest blob number first (low blobs stay as the warm pool) */
+static void
+arena_trim_locked(void) {
+  if (atomic_load_explicit(&arena_idle_bytes, memory_order_relaxed) <= arena_keep_bytes) return;
+  uint64_t now = now_ns();
+  for (uint32_t b = nblobs - 1; b >= 1; b--) {
+    if (atomic_load_explicit(&arena_idle_bytes, memory_order_relaxed) <= arena_keep_bytes) break;
+    if (!blob_idle_since[b] || now - blob_idle_since[b] < arena_trim_ns) continue;
+    uint64_t size = blobs[b].size;
+    T->release_blob(T, b, blobs[b].base, size);
+    blobs[b].base = NULL; blobs[b].size = 0;
+    blob_free[b].n = 0;
+    blob_idle_since[b] = 0;
+    atomic_fetch_sub_explicit(&arena_idle_bytes, size, memory_order_relaxed);
+    wmtr_arena_released_blobs++; wmtr_arena_released_bytes += size;
+    LOG(2, "arena blob %u released: %llu MiB\n", b, (unsigned long long)(size >> 20));
+  }
 }
 
 static void *
@@ -159,6 +220,10 @@ arena_alloc(uint64_t size, uint32_t *blob_out, uint32_t *off_out) {
     struct arena_free *f = &blob_free[b];
     for (int i = 0; i < f->n; i++) {
       if (f->r[i].size >= size) {
+        if (blob_idle_since[b]) {
+          blob_idle_since[b] = 0;
+          atomic_fetch_sub_explicit(&arena_idle_bytes, blobs[b].size, memory_order_relaxed);
+        }
         uint64_t off = f->r[i].off;
         f->r[i].off += size; f->r[i].size -= size;
         if (!f->r[i].size) { memmove(&f->r[i], &f->r[i + 1], (f->n - i - 1) * sizeof(*f->r)); f->n--; }
@@ -168,13 +233,14 @@ arena_alloc(uint64_t size, uint32_t *blob_out, uint32_t *off_out) {
       }
     }
   }
-  if (nblobs == WMTR_MAX_BLOBS) { pthread_mutex_unlock(&arena_lock); return NULL; }
+  uint32_t b = 1;
+  while (b < nblobs && blobs[b].base) b++; /* reuse the number of a released blob */
+  if (b == WMTR_MAX_BLOBS) { pthread_mutex_unlock(&arena_lock); return NULL; }
   uint64_t bsize = size > WMTR_ARENA_BLOB_BYTES ? size : WMTR_ARENA_BLOB_BYTES;
-  uint32_t b = nblobs;
   uint8_t *p = T->add_blob(T, b, bsize);
   if (!p) { pthread_mutex_unlock(&arena_lock); LOG(0, "add_blob %u (%llu bytes) failed\n", b, (unsigned long long)bsize); return NULL; }
   blobs[b].base = p; blobs[b].size = bsize; blobs[b].id = b;
-  nblobs++;
+  if (b == nblobs) nblobs++;
   if (bsize > size) range_add(&blob_free[b], size, bsize - size);
   pthread_mutex_unlock(&arena_lock);
   LOG(2, "arena blob %u: %llu MiB\n", b, (unsigned long long)(bsize >> 20));
@@ -186,7 +252,20 @@ static void
 arena_free(uint32_t blob, uint32_t off, uint64_t size) {
   size = (size + WMTR_PAGE - 1) & ~(uint64_t)(WMTR_PAGE - 1);
   pthread_mutex_lock(&arena_lock);
-  range_add(&blob_free[blob], off, size);
+  arena_put_locked(blob, off, size);
+  arena_trim_locked();
+  pthread_mutex_unlock(&arena_lock);
+}
+
+/* after a sync call: take the host's frees and trim, only when there is something to do */
+static void
+arena_maintain(void) {
+  if (__atomic_load_n(&R->free_head, __ATOMIC_RELAXED) == R->free_tail &&
+      atomic_load_explicit(&arena_idle_bytes, memory_order_relaxed) <= arena_keep_bytes)
+    return;
+  pthread_mutex_lock(&arena_lock);
+  drain_host_frees_locked();
+  arena_trim_locked();
   pthread_mutex_unlock(&arena_lock);
 }
 
@@ -396,6 +475,7 @@ send_built_flags(uint16_t call, uint16_t extra_flags, void *params, uint32_t par
     o += WMTR_ALIGN8(B.outs[i].size);
   }
   for (int i = 0; i < B.n_stage; i++) arena_free(B.stages[i].blob, B.stages[i].off, B.stages[i].size);
+  arena_maintain();
   return st;
 }
 
@@ -633,8 +713,35 @@ texture_format(obj_handle_t tex) {
   return (uint32_t)p.ret;
 }
 
+/* NSAutoreleasePool_alloc_init and the command encoder creations: the client assigns the handle and does not
+ * wait (WMTR_F_CLIENT_HANDLE). DXMT only passes these results back to later calls, which the ring orders after
+ * the creation; a failed creation is reported by the host and the calls using its handle fail there. */
+static _Atomic uint64_t next_handle;
+static __thread uint32_t next_pool;
+
+static NTSTATUS
+send_client_handle(uint16_t call, void *params, uint32_t size) {
+  uint64_t handle;
+  uint32_t ret_off;
+  b_begin(params, size);
+  if (call == 10) {
+    handle = WMTR_HANDLE_TAG | WMTR_HANDLE_POOL | (uint64_t)my_slot() << 32 | ++next_pool;
+    ret_off = OFF(struct unixcall_generic_obj_ret, ret);
+  } else {
+    handle = WMTR_HANDLE_TAG | ((atomic_fetch_add_explicit(&next_handle, 1, memory_order_relaxed) + 1) & (WMTR_HANDLE_POOL - 1));
+    ret_off = call == 30 ? OFF(struct unixcall_generic_obj_obj_ret, ret) : OFF(struct unixcall_generic_obj_uint64_obj_ret, ret);
+    if (call == 32)
+      b_in(OFF(struct unixcall_generic_obj_uint64_obj_ret, arg),
+           (const void *)(uintptr_t)((struct unixcall_generic_obj_uint64_obj_ret *)params)->arg, sizeof(struct WMTRenderPassInfo));
+  }
+  memcpy(B.buf + ret_off, &handle, 8);
+  memcpy((uint8_t *)params + ret_off, &handle, 8);
+  return send_built_flags(call, WMTR_F_CLIENT_HANDLE, params, size); /* sync only if the request needs a reply */
+}
+
 static NTSTATUS
 dispatch(uint16_t call, void *params, uint32_t size, int sync) {
+  if (client_handles && (call == 10 || (call >= 30 && call <= 32))) return send_client_handle(call, params, size);
   switch (call) {
   case 8: { /* NSString_getCString */
     struct unixcall_nsstring_getcstring *p = params;

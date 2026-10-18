@@ -16,7 +16,7 @@
 #define WMTR_PROTO_H
 #include <stdint.h>
 
-#define WMTR_VERSION 1
+#define WMTR_VERSION 2 /* 2: client-assigned handles (WMTR_F_CLIENT_HANDLE) */
 #define WMTR_PAGE 16384u                 /* host page size on Apple silicon */
 #define WMTR_RING_BYTES (8u << 20)       /* request ring */
 #define WMTR_SLOTS 64                    /* reply slots (one per client thread) */
@@ -42,6 +42,16 @@ struct wmtr_req {
 #define WMTR_F_SYNC 1u    /* caller waits for a reply */
 #define WMTR_F_WRAP 2u    /* padding record: skip to ring start */
 #define WMTR_F_CONTROL 4u /* transport control (call = WMTR_CTL_*) */
+#define WMTR_F_CLIENT_HANDLE 8u /* the call's `ret` holds a handle the client assigned (see below) */
+
+/* Client-assigned handles: creations whose result the caller only passes back to later calls (autorelease
+ * pools, command encoders) are sent async with `ret` set to a handle the client chose. The host records
+ * handle -> object; a later call whose first params word (the receiver: retain/release, endEncoding,
+ * encodeCommands, setLabel) is such a handle gets the object. Ring order puts every use after its creation.
+ * A creation that failed is reported by the host's log, and the calls that use its handle fail there. */
+#define WMTR_HANDLE_TAG 0x5743000000000000ull  /* "WC"; never a host pointer (bits 63..48) */
+#define WMTR_HANDLE_POOL 0x0000800000000000ull /* | slot << 32 | n: autorelease pool of reply slot `slot` */
+#define WMTR_HANDLE_SLOTS 65536                /* encoder handles live in host table entry (handle & mask) */
 
 enum {
   WMTR_CTL_HELLO = 1,    /* params: struct wmtr_hello */

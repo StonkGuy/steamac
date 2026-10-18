@@ -104,16 +104,24 @@ in_chroot() {
     chroot "$r" /usr/bin/env -i PATH=/usr/bin:/bin HOME=/tmp "$@"
 }
 
+# check_ldd <root> <lib>: ldd -r inside the chroot. PASS only when ldd itself ran (exit 0) and printed a usable
+# report (a loader or dependency line) without missing libraries or undefined symbols.
+check_ldd() {
+    r=$1 f=$2
+    out=$(in_chroot "$r" /usr/bin/ldd -r "$f" 2>&1) && rc=0 || rc=$?
+    echo "$out" | sed 's/^/    /'
+    if [ "$rc" -eq 0 ] && echo "$out" | grep -qE '=>|ld-linux|ld-musl|linux-vdso' \
+        && ! echo "$out" | grep -qE 'not found|undefined symbol|not a dynamic'; then
+        pass "ldd -r $f (root ${r#/merged})"
+    else
+        fail "ldd -r $f (root ${r#/merged}) rc=$rc"
+    fi
+}
+
 # check_runtime <root> <lib> <vkprobe binary>
 check_runtime() {
     r=$1 f=$2 probe=$3
-    out=$(in_chroot "$r" /usr/bin/ldd -r "$f" 2>&1) || true
-    echo "$out" | sed 's/^/    /'
-    if echo "$out" | grep -qE 'not found|undefined symbol|not a dynamic'; then
-        fail "ldd -r $f (root ${r#/merged})"
-    else
-        pass "ldd -r $f (root ${r#/merged})"
-    fi
+    check_ldd "$r" "$f"
     cp "/work/bin/$probe" "$r/tmp/$probe"
     out=$(in_chroot "$r" VK_LOADER_DEBUG=driver "/tmp/$probe" "$f" 2>&1) && rc=0 || rc=$?
     echo "$out" | grep -iE 'virtio|^OK|^FAIL|^loader:' | sed 's/^/    /'

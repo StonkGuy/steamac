@@ -70,6 +70,10 @@ conn_thread(void *arg) {
         char ack = 1;
         write(c->fd, &ack, 1);
       }
+    } else if (m.type == WMTR_SOCK_BLOB_DEL && m.blob && m.blob < WMTR_MAX_BLOBS && c->blob_base[m.blob]) {
+      /* the client released an idle arena blob: no live range or buffer is left in it */
+      munmap(c->blob_base[m.blob], c->blob_size[m.blob]);
+      c->blob_base[m.blob] = NULL; c->blob_size[m.blob] = 0;
     } else if (m.type == WMTR_SOCK_KICK && c->host) {
       wmtr_host_kick(c->host);
     }
