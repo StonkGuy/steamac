@@ -9,6 +9,8 @@ EXE=$1; shift
 D=$HOME/vrc/d3dr
 P=${PROTON:-"$HOME/.local/share/Steam/steamapps/common/Proton - Experimental"}/files
 DLL=${D3DR_DLL:-$D/d3d11.dll}
+# Proton keeps vkd3d-shader (needed by wined3d -> d3dcompiler_47) outside the default DLL path
+for f in "$P"/lib/vkd3d/x86_64-windows/*.dll; do [ -e "$(dirname "$EXE")/${f##*/}" ] || cp -f "$f" "$(dirname "$EXE")/"; done
 cmp -s "$DLL" "$(dirname "$EXE")/d3d11.dll" || cp -f "$DLL" "$(dirname "$EXE")/d3d11.dll" || exit 1
 export WINEPREFIX=$D/pfx
 export WINEDLLOVERRIDES="mscoree,mshtml=;d3d11=n"
