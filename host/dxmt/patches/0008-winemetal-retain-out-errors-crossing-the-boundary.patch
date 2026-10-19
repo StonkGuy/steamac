@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: osy <osy@turing.llc>
 Date: Fri, 17 Jul 2026 10:17:06 -0700
-Subject: [PATCH 08/24] winemetal: retain out-errors crossing the boundary
+Subject: [PATCH 08/27] winemetal: retain out-errors crossing the boundary
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

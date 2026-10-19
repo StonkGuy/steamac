@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: osy <osy@turing.llc>
 Date: Fri, 9 Oct 2026 22:20:44 -0700
-Subject: [PATCH 05/24] d3d11: UpdateSubresource into STAGING buffers and
+Subject: [PATCH 05/27] d3d11: UpdateSubresource into STAGING buffers and
  textures
 
 MSDN excludes only IMMUTABLE and DYNAMIC resources as UpdateSubresource

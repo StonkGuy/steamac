@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: hanzpo <hanznathanpo@gmail.com>
 Date: Fri, 2 Oct 2026 22:00:11 -0400
-Subject: [PATCH 14/24] feat(d3d11): implement SwapDeviceContextState
+Subject: [PATCH 14/27] feat(d3d11): implement SwapDeviceContextState
 
 Wine's d2d1 wraps every primitive it draws in a pair of
 SwapDeviceContextState calls. The method was a stub, so D2D rendering on

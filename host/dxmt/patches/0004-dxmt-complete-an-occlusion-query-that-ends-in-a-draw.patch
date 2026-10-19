@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: David Grinberg <green.grinya@gmail.com>
 Date: Tue, 6 Oct 2026 18:54:12 -0700
-Subject: [PATCH 04/24] dxmt: complete an occlusion query that ends in a
+Subject: [PATCH 04/27] dxmt: complete an occlusion query that ends in a
  draw-less chunk
 
 A query can span command chunks and end in one that recorded no

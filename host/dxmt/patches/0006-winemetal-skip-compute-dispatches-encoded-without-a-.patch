@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Holly Hamilton <hollyvhamilton@gmail.com>
 Date: Thu, 27 Aug 2026 19:57:51 -0400
-Subject: [PATCH 06/24] winemetal: skip compute dispatches encoded without a
+Subject: [PATCH 06/27] winemetal: skip compute dispatches encoded without a
  pipeline state
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Holly Hamilton <hollyvhamilton@gmail.com>
 Date: Sun, 6 Sep 2026 18:51:15 -0400
-Subject: [PATCH 07/24] d3d11,dxmt,winemetal: drop draws and dispatches whose
+Subject: [PATCH 07/27] d3d11,dxmt,winemetal: drop draws and dispatches whose
  pipeline failed to compile
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: SteveTanSaMa <1519364926@qq.com>
 Date: Fri, 9 Oct 2026 17:19:32 +0800
-Subject: [PATCH 10/24] fix(d3d11): join compiler workers before destroying
+Subject: [PATCH 10/27] fix(d3d11): join compiler workers before destroying
  cached tasks
 
 (cherry picked from commit def87758c04e635f4cad90d0dda1defa91bc7661)

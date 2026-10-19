@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jakey-Jakey <Jakey-Jakey@users.noreply.github.com>
 Date: Thu, 1 Oct 2026 05:33:31 -0400
-Subject: [PATCH 23/24] feat(dxmt): use residency set instead of useResource
+Subject: [PATCH 23/27] feat(dxmt): use residency set instead of useResource
 
 (cherry picked from commit c4fe91ec765da5835845ed4b5aca1d055143d64e)
 ---

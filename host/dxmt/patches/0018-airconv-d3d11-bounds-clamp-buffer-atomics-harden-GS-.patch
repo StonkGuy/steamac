@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Holly Hamilton <hollyvhamilton@gmail.com>
 Date: Thu, 27 Aug 2026 16:58:03 -0400
-Subject: [PATCH 18/24] airconv,d3d11: bounds-clamp buffer atomics; harden GS
+Subject: [PATCH 18/27] airconv,d3d11: bounds-clamp buffer atomics; harden GS
  mesh pipeline on non-Apple GPUs
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
