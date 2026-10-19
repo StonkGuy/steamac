@@ -41,6 +41,15 @@ static const uint8_t call_class[146] = {
 #include "wmtr_calls.inc"
 #undef X
 };
+/* the params struct each call's implementation reads and writes (the client sends exactly this) */
+static const uint32_t call_params_size[146] = {
+#define X(i, n, t, c) [i] = sizeof(t),
+#include "wmtr_calls.inc"
+#undef X
+};
+/* zeroed bytes after every request copy: a WMTR_REF_EXTRA pointer is only checked to start inside the payload,
+ * the struct the implementation reads there may run past its end */
+#define WMTR_COPY_SLACK 4096u
 
 struct wmtr_host {
   struct wmtr_ring *ring;
@@ -334,22 +343,25 @@ resolve(struct wmtr_host *h, uint64_t v, uint8_t *payload, uint32_t payload_size
   return NULL;
 }
 
+/* payload = NULL: the request's sizes could not be trusted (malformed request): status only */
 static void
-reply(struct wmtr_host *h, const struct wmtr_req_ext *r, const struct wmtr_out *outs, uint8_t *payload,
+reply(struct wmtr_host *h, const struct wmtr_req_ext *r, const struct wmtr_out *outs, uint32_t n_out, uint8_t *payload,
       NTSTATUS st) {
   if (!(r->h.flags & WMTR_F_SYNC) || r->h.slot >= WMTR_SLOTS) return;
   struct wmtr_slot *s = &h->slots[r->h.slot];
-  uint32_t o = r->h.params_size;
-  memcpy(s->data, payload, o);
+  /* every size here is the client's: 64-bit sums, bounded by the slot and by the payload */
+  uint64_t o = r->h.params_size;
+  if (!payload || o > WMTR_SLOT_BYTES || o > r->payload_size) { o = 0; n_out = 0; if (payload) st = STATUS_INVALID_PARAMETER; }
+  if (o) memcpy(s->data, payload, o);
   o = WMTR_ALIGN8(o);
-  for (int i = 0; i < r->n_out; i++) {
+  for (uint32_t i = 0; i < n_out; i++) {
     if (!outs[i].size) continue; /* arena output: already in shared memory */
-    if (o + outs[i].size > WMTR_SLOT_BYTES || outs[i].off + outs[i].size > r->payload_size) break;
+    if (o + outs[i].size > WMTR_SLOT_BYTES || (uint64_t)outs[i].off + outs[i].size > r->payload_size) break;
     memcpy(s->data + o, payload + outs[i].off, outs[i].size);
-    o += WMTR_ALIGN8(outs[i].size);
+    o += WMTR_ALIGN8((uint64_t)outs[i].size);
   }
   s->status = (uint32_t)st;
-  s->out_size = o;
+  s->out_size = (uint32_t)o;
   __atomic_store_n(&s->done_seq, r->h.seq, __ATOMIC_RELEASE);
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
   if (__atomic_load_n(&s->waiting, __ATOMIC_SEQ_CST)) h->ops->wake(h->ctx, r->h.slot);
@@ -493,9 +505,19 @@ host_new_buffer(struct wmtr_host *h, struct unixcall_mtldevice_newbuffer *p, uin
   id<MTLDevice> device = (id<MTLDevice>)p->device;
   struct WMTBufferInfo *info = p->info.ptr;
   id<MTLBuffer> buffer;
+  if (!info) return STATUS_INVALID_PARAMETER;
   if (info->memory.ptr) {
+    /* client memory: the buffer must lie inside the arena blob the reference names (page-aligned, whole pages),
+     * or the GPU and the NoCopy buffer would reach host memory past it */
     uint32_t blob = (uint32_t)((arena_ref >> 32) & 0xffff), off = (uint32_t)arena_ref;
+    uint64_t blob_size = 0;
+    uint8_t *base = arena_ref ? h->ops->blob_ptr(h->ctx, blob, &blob_size) : NULL;
+    if (info->length > blob_size) return STATUS_INVALID_PARAMETER;
     uint64_t len = (info->length + WMTR_PAGE - 1) & ~(uint64_t)(WMTR_PAGE - 1);
+    if (!base || info->memory.ptr != base + off || (off & (WMTR_PAGE - 1)) || !len || len > blob_size - off) {
+      LOG(0, "newBuffer: memory outside its arena blob (blob %u off %u len %llu)\n", blob, off, (unsigned long long)len);
+      return STATUS_INVALID_PARAMETER;
+    }
     buffer = [device newBufferWithBytesNoCopy:info->memory.ptr
                                        length:len
                                       options:(MTLResourceOptions)info->options
@@ -694,9 +716,10 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
   const struct wmtr_out *outs = (const void *)(rec + sizeof *r + 4u * r->n_reloc);
   uint32_t poff = wmtr_req_payload_offset(r);
   uint8_t *payload = rec + poff;
-  if (poff + r->payload_size > len || r->h.params_size > r->payload_size) {
+  /* poff <= 16 + 4 * 65535 + 8 * 65535: no 32-bit overflow; the payload size is checked by subtraction */
+  if (poff > len || r->payload_size > len - poff || r->h.params_size > r->payload_size) {
     LOG(0, "malformed request call=%u\n", r->h.call);
-    reply(h, r, outs, payload, STATUS_INVALID_PARAMETER);
+    reply(h, r, outs, 0, NULL, STATUS_INVALID_PARAMETER);
     return;
   }
   uint64_t orig_small[512];
@@ -705,7 +728,7 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
   NTSTATUS st = STATUS_SUCCESS;
   uint64_t w0 = 0, cid = 0;
   for (int i = 0; i < nr; i++) {
-    if (relocs[i] + 8 > r->payload_size) { st = STATUS_INVALID_PARAMETER; break; }
+    if (r->payload_size < 8 || relocs[i] > r->payload_size - 8) { st = STATUS_INVALID_PARAMETER; break; }
     uint64_t v;
     memcpy(&v, payload + relocs[i], 8);
     orig[i] = v;
@@ -717,7 +740,10 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
     if (r->h.flags & WMTR_F_CONTROL) {
       st = STATUS_SUCCESS; /* PING and HELLO need no work */
     } else if (r->h.call < 146) {
-      if (__atomic_load_n(&h->faulted, __ATOMIC_ACQUIRE)) {
+      if (r->h.params_size < call_params_size[r->h.call]) {
+        st = STATUS_INVALID_PARAMETER; /* the implementation would read and write past the params */
+        LOG(0, "call %u: params %u bytes, expected %u\n", r->h.call, r->h.params_size, call_params_size[r->h.call]);
+      } else if (__atomic_load_n(&h->faulted, __ATOMIC_ACQUIRE)) {
         st = STATUS_ACCESS_VIOLATION; /* this client already faulted the executor: refuse further work */
       } else if (!handles_in(h, r, payload, &w0, &cid)) {
         st = STATUS_INVALID_HANDLE; /* a client handle whose creation failed (logged) */
@@ -763,7 +789,7 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
     } else st = STATUS_INVALID_PARAMETER;
   }
   if (w0) memcpy(payload, &w0, 8); /* the caller gets its own handle back */
-  reply(h, r, outs, payload, st);
+  reply(h, r, outs, r->n_out, payload, st);
   if (orig != orig_small) free(orig);
 }
 
@@ -779,8 +805,8 @@ static void *
 executor(void *arg) {
   struct wmtr_host *h = arg;
   struct wmtr_ring *R = h->ring;
-  uint8_t *scratch = malloc(1 << 20);
   uint32_t scratch_cap = 1 << 20;
+  uint8_t *scratch = calloc(1, scratch_cap + WMTR_COPY_SLACK);
   pthread_setname_np("wmtr-executor");
   for (;;) {
     uint64_t tail = R->tail;
@@ -820,8 +846,9 @@ executor(void *arg) {
       LOG(0, "ring corrupt at %llu (size %u); stopping\n", (unsigned long long)tail, hdr.size);
       break;
     }
-    if (hdr.size > scratch_cap) { scratch_cap = hdr.size; scratch = realloc(scratch, scratch_cap); }
+    if (hdr.size > scratch_cap) { scratch_cap = hdr.size; scratch = realloc(scratch, scratch_cap + WMTR_COPY_SLACK); }
     memcpy(scratch, h->data + pos, hdr.size);
+    memset(scratch + hdr.size, 0, WMTR_COPY_SLACK);
     __atomic_store_n(&R->tail, tail + hdr.size, __ATOMIC_RELEASE);
     atomic_fetch_add(&h->n_req, 1);
     atomic_fetch_add(&h->n_bytes, hdr.size);
@@ -829,7 +856,7 @@ executor(void *arg) {
     uint8_t cls = hdr.call < 146 && !(hdr.flags & WMTR_F_CONTROL) ? call_class[hdr.call] : WMTR_CLASS_S;
     if (cls == WMTR_CLASS_B || cls == WMTR_CLASS_C) {
       struct job *j = malloc(sizeof *j);
-      j->h = h; j->len = hdr.size; j->copy = malloc(hdr.size);
+      j->h = h; j->len = hdr.size; j->copy = calloc(1, hdr.size + WMTR_COPY_SLACK);
       memcpy(j->copy, scratch, hdr.size);
       atomic_fetch_add(&h->n_worker, 1);
       dispatch_async_f(cls == WMTR_CLASS_B ? h->block_q : h->compile_q, j, job_run);
@@ -846,6 +873,13 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   const char *l = getenv("WMTR_LOG");
   if (l) log_level = atoi(l);
   struct wmtr_ring *R = ring;
+  /* the guest sizes blob 0: the executor reads the ring header, the request ring and the reply slots, and writes
+   * the slots, all at fixed offsets up to WMTR_RING_BLOB_BYTES */
+  uint64_t ring_size = 0;
+  if (!ops->blob_ptr || ops->blob_ptr(ctx, 0, &ring_size) != ring || ring_size < WMTR_RING_BLOB_BYTES) {
+    LOG(0, "ring blob of %llu bytes, need %llu\n", (unsigned long long)ring_size, (unsigned long long)WMTR_RING_BLOB_BYTES);
+    return NULL;
+  }
   if (R->magic != WMTR_RING_MAGIC || R->version != WMTR_VERSION) {
     LOG(0, "ring magic/version mismatch (%x/%u)\n", R->magic, R->version);
     return NULL;
