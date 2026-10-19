@@ -61,6 +61,7 @@ enum class FoveationModel : uint8_t
 {
 	wivrn, // WiVRn's foveation_parameter (compositor/foveation_params.h); the client undoes it
 	none,  // no host foveation: the guest renders at the stream size and the headset scales the decoded image
+	vd,    // Virtual Desktop's fixed foveated encoding (compositor/foveation_params.h); the headset undoes it
 };
 
 // Interleaved S16 PCM as the headset plays/records it.

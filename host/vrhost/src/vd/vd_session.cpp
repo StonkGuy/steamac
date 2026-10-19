@@ -745,10 +745,18 @@ struct VdSession::impl
 				log("vd: headset type " + std::to_string(hmd) + " has no preset table here; using the Quest 3 sizes");
 			h.eye_width = cfg.width ? cfg.width : stream.width;
 			h.eye_height = cfg.height ? cfg.height : stream.height;
-			// The guest renders at the stream size and the headset upscales the decoded image (no host foveation).
-			h.render_eye_width = h.eye_width;
-			h.render_eye_height = h.eye_height;
-			h.foveation = FoveationModel::none;
+			// VD-FACT(foveated-encoding): the Quest client undoes VD's fixed foveated encoding on every frame (the
+			// Streamer applies it for every headset but XREAL Aura). A plain scaled image therefore looked like a
+			// magnifying glass (2026-10-19 live). The guest renders at VD's render size (1.5x the stream, the
+			// centre then maps 1:1) and the compositor applies the same encoding (foveation_params.h).
+			h.nominal_render_width = (h.eye_width * 3 / 2 + 1) & ~1u;
+			h.nominal_render_height = (h.eye_height * 3 / 2 + 1) & ~1u;
+			auto scaled = [&](uint32_t v) {
+				return cfg.render_scale == 1 ? v : std::clamp(uint32_t(std::lround(v * cfg.render_scale)) & ~1u, 256u, 8192u);
+			};
+			h.render_eye_width = scaled(h.nominal_render_width);
+			h.render_eye_height = scaled(h.nominal_render_height);
+			h.foveation = FoveationModel::vd;
 			h.refresh_rates = {72, 80, 90, 96, 100, 120};
 			int rate = int(user.number(key_framerate).value_or(0));
 			if (rate == 0)
@@ -828,7 +836,7 @@ struct VdSession::impl
 		f.frame_rate = int32_t(h.preferred_refresh_rate); // VD-FACT(ssw-cadence): the display rate
 		f.frame_size = {int32_t(h.eye_width), int32_t(h.eye_height)};
 		f.stream_count = 2;
-		f.bounds = {0, 0, int32_t(h.render_eye_width), int32_t(h.render_eye_height)};
+		f.bounds = {0, 0, int32_t(h.nominal_render_width), int32_t(h.nominal_render_height)};
 		v.send(video_format_message(f));
 	}
 
@@ -1221,8 +1229,8 @@ void VdSession::submit(const Frame & f)
 		for (int hand = 0; hand < 2; ++hand)
 			md.haptic[hand].amplitude = now < p->haptic_until[hand] ? p->haptic_amp[hand] : 0;
 	}
-	md.render_width = int32_t(h->render_eye_width);
-	md.render_height = int32_t(h->render_eye_height);
+	md.render_width = int32_t(h->nominal_render_width);
+	md.render_height = int32_t(h->nominal_render_height);
 
 	// VD-FACT(eye-delivery, annexb-default): eye 0 in the frame message, eye 1 as slice 1, same timestamp.
 	std::array<std::vector<uint8_t>, 2> bits;

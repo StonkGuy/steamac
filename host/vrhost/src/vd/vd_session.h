@@ -53,6 +53,10 @@ struct VdConfig
 		off,
 		on,
 	} spacewarp = Spacewarp::headset;
+	// The game renders at render_scale x VD's render size (1.5x the stream); below 1 the compositor upscales to the
+	// render size before the foveated encoding. Default 2/3: the game renders at the stream size (the GPU load of
+	// the adapter before the encoding fix; the centre is upscaled instead of 1:1). 1 = VD's own quality.
+	float render_scale = 2.f / 3;
 	ns latency_ns = 30'000'000; // wake-up to display (render + encode + network + decode), for predicted_display
 	std::function<void(const std::string &)> log = nullptr;
 };

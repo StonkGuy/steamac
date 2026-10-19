@@ -159,6 +159,12 @@ set_source_files_properties(tests/vt_decode.mm PROPERTIES COMPILE_FLAGS -fobjc-a
 target_sources(test_vd_loopback PRIVATE tests/fake_vd_client.cpp tests/vt_decode.mm)
 target_sources(test_vd_stream PRIVATE tests/fake_vd_client.cpp tests/vt_decode.mm)
 set_tests_properties(encoder loopback control vd_wire vd_loopback vd_key vd_stream PROPERTIES TIMEOUT 60)
+# VD fixed foveated encoding: picture geometry as the Quest shows it (Metal compositor, no DXMT checkout needed)
+add_executable(test_vd_foveation tests/test_vd_foveation.mm)
+set_source_files_properties(tests/test_vd_foveation.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+target_link_libraries(test_vd_foveation PRIVATE vrhost-core vrhost-compositor "-framework Metal" "-framework IOSurface" "-framework Foundation")
+add_test(NAME vd_foveation COMMAND test_vd_foveation)
+set_tests_properties(vd_foveation PROPERTIES TIMEOUT 120)
 # synthetic Virtual Desktop headset (real-headset conditions) for a running steamac-vrhost --adapter vd
 add_executable(vrhost-test-vd tests/test_vd_tool.mm tests/fake_vd_client.cpp tests/vt_decode.mm)
 set_source_files_properties(tests/test_vd_tool.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)

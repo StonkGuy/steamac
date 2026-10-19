@@ -378,12 +378,15 @@ struct VdOptions
 	int discovery_key_fd = -1;
 	VdConfig::Spacewarp spacewarp = VdConfig::Spacewarp::headset;
 	bool encrypt = true;
+	float render_scale = 0; // 0 = the VD adapter's default
 };
 
 static Adapter make_vd(const VdOptions & o, uint32_t w, uint32_t h, uint32_t bitrate, bool pair)
 {
 	VdConfig cfg{.encrypt_local = o.encrypt, .pairing = pair, .bitrate_bps = bitrate, .width = w, .height = h,
 	             .spacewarp = o.spacewarp, .log = log_line};
+	if (o.render_scale > 0)
+		cfg.render_scale = o.render_scale;
 	if (o.discovery_key_fd >= 0)
 	{
 		// C1: the caller hands over the constant (48 bytes); it lives only in memory.
@@ -763,6 +766,7 @@ int main(int argc, char ** argv)
 		else if (a == "--render-scale")
 		{
 			cfg.render_scale = std::stof(next());
+			vd_opts.render_scale = cfg.render_scale;
 			if (not (cfg.render_scale >= 0.5f and cfg.render_scale <= 2.0f))
 			{
 				fprintf(stderr, "steamac-vrhost: --render-scale 0.5 to 2\n");

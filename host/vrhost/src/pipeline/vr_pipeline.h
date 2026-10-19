@@ -89,6 +89,7 @@ private:
 	VrSession & session;
 	std::mutex m;
 	uint32_t w = 0, h = 0, up_w = 0;
+	bool vd_fov = false;
 	std::array<uint32_t, 6> last_geometry{}; // eye image sizes, format, flags of the last frame (logged on change)
 	std::unique_ptr<SessionEncoderSink> sink;
 	std::unique_ptr<CompositorBridge> bridge;

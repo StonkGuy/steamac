@@ -243,8 +243,8 @@ int main()
 	REQUIRE(not r.formats.empty());
 	auto & f0 = r.formats.front();
 	CHECK(f0.source == Source::vr and f0.codec == VideoCodec::hevc and f0.frame_size.width == 1152 and
-	      f0.frame_size.height == 1216 and f0.stream_count == 2 and f0.frame_rate == 90 and f0.bounds.width == 1152 and
-	      f0.bounds.height == 1216);
+	      f0.frame_size.height == 1216 and f0.stream_count == 2 and f0.frame_rate == 90 and f0.bounds.width == 1728 and
+	      f0.bounds.height == 1824);
 	CHECK(r.formats.size() == 2 and r.formats.back().frame_rate == 72);
 
 	// frames: both eyes decode, Annex-B (the default), IDR first and again after ForceKeyFrame / the format change
@@ -261,7 +261,7 @@ int main()
 	for (size_t i = 0; i < r.frames.size(); ++i)
 	{
 		auto & md = r.frames[i];
-		fields_ok = fields_ok and md.source == Source::vr and md.render_width == 1152 and md.render_height == 1216 and
+		fields_ok = fields_ok and md.source == Source::vr and md.render_width == 1728 and md.render_height == 1824 and
 		            md.pose.has_valid_pose and std::abs(md.pose.fov[0].left - 1.3f) < 1e-3f and
 		            std::abs(md.pose.fov[1].right - 1.3f) < 1e-3f and std::abs(md.pose.fov[0].down - 1.2f) < 1e-3f;
 		fields_ok = fields_ok and r.slices[i].timestamp_us == md.timestamp_us and r.slices[i].stream_index == 1;
@@ -289,7 +289,8 @@ int main()
 		CHECK(listener.right and std::abs(listener.right->pose.position[2] + 0.3f) < 1e-4f and listener.right->orientation_valid);
 		CHECK(listener.connected == 1 and listener.info.name == "Meta Quest 3" and listener.info.eye_width == 1152 and
 		      listener.info.eye_height == 1216);
-		CHECK(listener.info.foveation == FoveationModel::none and listener.info.render_eye_width == 1152);
+		CHECK(listener.info.foveation == FoveationModel::vd and listener.info.nominal_render_width == 1728 and listener.info.nominal_render_height == 1824 and
+		      listener.info.render_eye_width == 1152 and listener.info.render_eye_height == 1216); // default render scale 2/3
 		CHECK(std::abs(listener.info.fov[0].left + std::atan(1.3f)) < 1e-4f and listener.info.fov[0].up > 0);
 		// 300 -> cap 200 -> measured bandwidth 150 -> halved while the headset had SSW off
 		CHECK(listener.info.max_bitrate_bps == 200'000'000 and listener.info.bitrate_bps == 75'000'000);
