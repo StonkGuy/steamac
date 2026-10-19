@@ -79,7 +79,8 @@ float convergence_angle(float distance, float eye_x, float gaze_yaw)
 	return std::atan2(target_x - eye_x, target_z);
 }
 
-void fill_param_2d(float c, size_t foveated_dim, size_t source_dim, std::vector<uint16_t> & out)
+// false (out untouched) when the parameters do not form a strictly increasing source mapping
+bool fill_param_2d(float c, size_t foveated_dim, size_t source_dim, std::vector<uint16_t> & out)
 {
 	float scale = float(foveated_dim) / source_dim;
 	auto [a, b] = solve_foveation(scale, c);
@@ -91,8 +92,12 @@ void fill_param_2d(float c, size_t foveated_dim, size_t source_dim, std::vector<
 	{
 		double u = (i * 2.) / foveated_dim - 1;
 		auto f = defoveate(a, b, scale, c, u);
-		uint16_t n = std::clamp<uint16_t>((f * 0.5 + 0.5) * source_dim + 0.5, 0, source_dim);
-		assert(n > last);
+		double v = (f * 0.5 + 0.5) * source_dim + 0.5;
+		if (not(v > last) or v >= double(source_dim))
+			return false; // not strictly increasing (NaN included): the caller falls back to no foveation
+		uint16_t n = uint16_t(v);
+		if (n <= last)
+			return false;
 		size_t count = n - last;
 		auto & vec = u < c ? left : right;
 		if (count > vec.size())
@@ -100,7 +105,6 @@ void fill_param_2d(float c, size_t foveated_dim, size_t source_dim, std::vector<
 		vec[count - 1]++;
 		last = n;
 	}
-	assert(last < source_dim);
 	size_t count = source_dim - last;
 	if (count > right.size())
 		right.resize(count);
@@ -115,6 +119,7 @@ void fill_param_2d(float c, size_t foveated_dim, size_t source_dim, std::vector<
 	if (right.size() > 1)
 		out.insert(out.end(), right.begin() + 1, right.end());
 	out.resize(count * 2 - 1);
+	return true;
 }
 } // namespace
 
@@ -125,19 +130,16 @@ FoveationParams compute_foveation(const EyeFov & fov, float eye_x, uint32_t src_
 	const float convergence_distance = 1;
 	const float angle_offset = 10 * M_PI / 180;
 	FoveationParams p;
-	if (out_w < src_w)
-	{
-		float angle_x = convergence_angle(convergence_distance, eye_x, 0);
-		fill_param_2d(angles_to_center(angle_x, fov.left, fov.right), out_w, src_w, p.x);
-	}
-	else
+	// The eye rect comes from the guest's submit (vrlink_server checks it against the image): sizes past the
+	// wire format's 16-bit counts, or foveation that does not solve, fall back to the identity parameter.
+	bool big = src_w > max_foveation_source or src_h > max_foveation_source;
+	src_w = std::min(src_w, max_foveation_source);
+	src_h = std::min(src_h, max_foveation_source);
+	float angle_x = convergence_angle(convergence_distance, eye_x, 0);
+	if (big or out_w == 0 or out_w >= src_w or not fill_param_2d(angles_to_center(angle_x, fov.left, fov.right), out_w, src_w, p.x))
 		p.x = {uint16_t(src_w)};
-	if (out_h < src_h)
-	{
-		float angle_y = angle_offset;
-		fill_param_2d(angles_to_center(-angle_y, fov.up, fov.down), out_h, src_h, p.y);
-	}
-	else
+	float angle_y = angle_offset;
+	if (big or out_h == 0 or out_h >= src_h or not fill_param_2d(angles_to_center(-angle_y, fov.up, fov.down), out_h, src_h, p.y))
 		p.y = {uint16_t(src_h)};
 	return p;
 }

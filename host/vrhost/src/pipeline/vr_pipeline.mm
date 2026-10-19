@@ -67,12 +67,18 @@ void SessionEncoderSink::encode(int eye, CVPixelBufferRef buffer, const LinkFram
 	}
 }
 
-VrPipeline::VrPipeline(VrSession & session, int link_fd, const std::string & mach_name) : session(session)
+VrPipeline::VrPipeline(VrSession & session, int link_fd, const std::string & mach_name, CompositorOptions opt) :
+        session(session), opt(opt)
 {
 	server = std::make_unique<VrLinkServer>(
 	        link_fd, mach_name, [this](const LinkFrame & f) { on_frame(f); },
 	        [this](const void * m, size_t n) { on_message(m, n); }, [this] { on_frame_error(); });
 	clock = std::thread([this] { frame_clock(); });
+}
+
+const char * VrPipeline::upscaler() const
+{
+	return last_upscaler.load();
 }
 
 VrPipeline::~VrPipeline()
@@ -95,6 +101,22 @@ static vrl_pose to_vrl(const std::optional<TrackedPose> & t)
 	std::copy(t->angular_velocity.begin(), t->angular_velocity.end(), p.ang_vel);
 	p.flags = (t->orientation_valid ? VRL_POSE_VALID : 0) | (t->position_valid ? VRL_POSE_TRACKED : 0) | VRL_POSE_VEL;
 	return p;
+}
+
+vrl_state VrPipeline::default_view()
+{
+	// Meta Quest 3 under WiVRn v26.9 (live 2026-10-16/17): 1836x1924 per eye, 90 Hz, its asymmetric FOV
+	vrl_state s{};
+	s.h = {VRL_STATE, sizeof s};
+	s.eye_width = 1836;
+	s.eye_height = 1924;
+	s.refresh_hz = 90;
+	s.ipd_m = 0.064f;
+	const float fov[2][4] = {{-0.96f, 0.79f, 0.87f, -0.91f}, {-0.79f, 0.96f, 0.87f, -0.91f}};
+	memcpy(s.fov, fov, sizeof fov);
+	s.profile = VRL_PROFILE_TOUCH;
+	snprintf(s.name, sizeof s.name, "Meta Quest 3");
+	return s;
 }
 
 void VrPipeline::send_state(bool connected)
@@ -125,6 +147,15 @@ void VrPipeline::send_state(bool connected)
 		s.ipd_m = d2 > 0 ? std::sqrt(d2) : 0.064f;
 		s.profile = VRL_PROFILE_TOUCH; // WiVRn clients: Quest/Pico touch-style controllers
 		snprintf(s.name, sizeof s.name, "%s", info->name.c_str());
+		last_view = s;
+	}
+	else
+	{
+		// No headset (not yet, or it left): the game keeps an HMD with the last headset's view, or a Quest 3's before
+		// the first one, as SteamVR keeps an HMD in standby. A game that starts now never sees a 0x0 / zero-FOV
+		// headset, and one already running keeps its projection; only `connected` changes.
+		s = last_view.eye_width ? last_view : default_view();
+		s.connected = 0;
 	}
 	server->send(&s, sizeof s);
 }
@@ -260,11 +291,18 @@ void VrPipeline::on_frame(const LinkFrame & f)
 		return; // VrLinkServer releases the images
 	}
 	std::lock_guard lock(m);
-	if (info->eye_width != w or info->eye_height != h)
+	CompositorOptions o = opt;
+	if (info->nominal_render_width > info->render_eye_width) // render scale < 1: upscale to the headset's size
+	{
+		o.upscale_w = info->nominal_render_width;
+		o.upscale_h = info->nominal_render_height;
+	}
+	if (info->eye_width != w or info->eye_height != h or not bridge or o.upscale_w != up_w)
 	{
 		bridge.reset();
 		sink = std::make_unique<SessionEncoderSink>(session, info->eye_width, info->eye_height);
-		bridge = std::make_unique<CompositorBridge>(info->eye_width, info->eye_height, *sink);
+		bridge = std::make_unique<CompositorBridge>(info->eye_width, info->eye_height, *sink, o);
+		up_w = o.upscale_w;
 		w = info->eye_width;
 		h = info->eye_height;
 	}
@@ -280,7 +318,19 @@ void VrPipeline::on_frame(const LinkFrame & f)
 		       info->render_eye_width, info->render_eye_height, f.fov[0].left, f.fov[0].right, f.fov[0].up, f.fov[0].down);
 		fflush(stdout);
 	}
-	(*bridge)(f);
+	// A frame rendered with a zero FOV (a runtime that got no view, an older guest): foveate with the headset's own
+	// FOV instead of degenerate parameters.
+	const LinkFrame * frame = &f;
+	LinkFrame fixed;
+	if (f.fov[0].right - f.fov[0].left <= 0 or f.fov[1].right - f.fov[1].left <= 0)
+	{
+		fixed = f;
+		for (int e = 0; e < 2; e++)
+			fixed.fov[e] = {info->fov[e].left, info->fov[e].right, info->fov[e].up, info->fov[e].down};
+		frame = &fixed;
+	}
+	(*bridge)(*frame);
+	last_upscaler = bridge->last_upscaler();
 	int64_t sent = now_ns();
 	st.submitted++;
 	st.last_compose_gpu_ns = bridge->last_timing().compose_gpu_ns;

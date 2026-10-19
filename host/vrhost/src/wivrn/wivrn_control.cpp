@@ -41,9 +41,30 @@ SessionControl::Counters WivrnControl::counters() const
 	return {
 	        .frames_sent = st.frames_sent.load(),
 	        .idr_sent = st.idr_sent.load(),
+	        .idr_requests = st.idr_requests.load(),
 	        .bytes_sent = st.bytes_sent.load(),
 	        .last_encode_ns = st.last_encode_ns.load(),
 	        .last_decode_ns = st.last_feedback_decode_ns.load(),
 	};
+}
+
+std::optional<SessionControl::Battery> WivrnControl::battery() const
+{
+	if (auto b = s.battery())
+		return Battery{b->charge, b->charging};
+	return std::nullopt;
+}
+
+std::optional<SessionControl::PairingRequest> WivrnControl::pairing_request() const
+{
+	if (auto r = s.pairing_request())
+		return PairingRequest{r->name, r->at, r->refused};
+	return std::nullopt;
+}
+
+SessionControl::AppRequest WivrnControl::app_request() const
+{
+	auto a = s.app_request();
+	return {a.id, a.seq};
 }
 } // namespace vrhost

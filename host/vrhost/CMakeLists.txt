@@ -8,6 +8,15 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OBJCXX_STANDARD 23)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(VRHOST_FUZZ)
+	# -fsanitize=function breaks C++ exception handling on macOS (uncaught throws) with LLVM 23; alignment, bool and
+	# enum: WiVRn's deserializer reads unaligned u32 and raw bool/enum bytes by design (benign on arm64/clang)
+	add_compile_options(-fsanitize=address,undefined,fuzzer-no-link -fno-sanitize=function,alignment,bool,enum -fno-omit-frame-pointer)
+	# lld: Apple ld rejects some LLVM 23 objects ("invalid r_symbolnum")
+	add_link_options(-fsanitize=address,undefined -fno-sanitize=function -fuse-ld=lld)
+	# LLVM's libc++ does not pull <array> in transitively where Apple's does (third_party crypto.cpp)
+	add_compile_options($<$<COMPILE_LANGUAGE:CXX,OBJCXX>:-includearray>)
+endif()
 
 if(NOT APPLE)
 	message(FATAL_ERROR "steamac-vrhost is macOS only")
@@ -154,6 +163,9 @@ set_tests_properties(encoder loopback control vd_wire vd_loopback vd_key vd_stre
 add_executable(vrhost-test-vd tests/test_vd_tool.mm tests/fake_vd_client.cpp tests/vt_decode.mm)
 set_source_files_properties(tests/test_vd_tool.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
 target_link_libraries(vrhost-test-vd PRIVATE vrhost-core "-framework Foundation")
+add_executable(test_vrlink_validate tests/test_vrlink_validate.cpp src/compositor/foveation_params.cpp)
+target_link_libraries(test_vrlink_validate PRIVATE vrhost-core)
+add_test(NAME vrlink_validate COMMAND test_vrlink_validate)
 # the test headset as a tool, for a running steamac-vrhost (docs/vr.md "Testing without a headset")
 add_executable(vrhost-test-headset tests/test_headset_tool.mm tests/fake_headset.cpp tests/vt_decode.mm)
 set_source_files_properties(tests/test_headset_tool.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
@@ -186,6 +198,21 @@ if(VRHOST_DXMT_DIR)
 else()
 	message(STATUS "vr_e2e test off: set VRHOST_DXMT_DIR to a StonkGuy/dxmt vr-export checkout")
 endif()
+endif()
+
+# --- fuzzing (libFuzzer; needs an LLVM clang, not Apple's); each target describes itself in its header ---
+# cmake -DVRHOST_FUZZ=ON -DCMAKE_CXX_COMPILER=$(brew --prefix llvm)/bin/clang++ ... builds every library with
+# ASan + UBSan and the targets fuzz_packets (headset message decoder), fuzz_session (TCP stream into a live session)
+# and fuzz_seeds (seed corpus writer).
+option(VRHOST_FUZZ "Build the libFuzzer targets (instruments everything with ASan + UBSan)" OFF)
+if(VRHOST_FUZZ)
+	foreach(t fuzz_packets fuzz_session)
+		add_executable(${t} tests/fuzz/${t}.cpp)
+		target_link_libraries(${t} PRIVATE vrhost-core)
+		target_link_options(${t} PRIVATE -fsanitize=fuzzer)
+	endforeach()
+	add_executable(fuzz_seeds tests/fuzz/fuzz_seeds.cpp)
+	target_link_libraries(fuzz_seeds PRIVATE vrhost-core)
 endif()
 
 # --- packaging check: the executable must not load OpenSSL (or anything else) from Homebrew ---

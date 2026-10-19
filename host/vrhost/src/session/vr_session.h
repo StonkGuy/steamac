@@ -73,6 +73,8 @@ struct HeadsetInfo
 {
 	uint32_t eye_width = 0, eye_height = 0; // stream size per eye
 	uint32_t render_eye_width = 0, render_eye_height = 0;
+	// the headset's own render size, before the host's render scale (render_eye_* is what the game is asked for)
+	uint32_t nominal_render_width = 0, nominal_render_height = 0;
 	std::vector<float> refresh_rates;
 	float preferred_refresh_rate = 0;
 	std::array<Fov, 2> fov;

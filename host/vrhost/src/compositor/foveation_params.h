@@ -24,6 +24,9 @@ struct EyeFov
 // Parameters for one eye. src_w/h: eye image size; out_w/h: encoded (foveated) size. eye_x: eye position
 // along x in metres (head space; +-IPD/2), used for the convergence point like WiVRn without eye gaze.
 // If out >= src on an axis the parameter is the identity {src}.
+// largest eye rect side the parameters describe (Metal's texture limit; the wire counts are 16-bit)
+inline constexpr uint32_t max_foveation_source = 16384;
+
 FoveationParams compute_foveation(const EyeFov & fov, float eye_x, uint32_t src_w, uint32_t src_h, uint32_t out_w,
                                   uint32_t out_h);
 

@@ -13,7 +13,10 @@
 #include "wivrn_sockets.h"
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <chrono>
+#include <deque>
+#include <random>
 #include <cmath>
 #include <magic_enum.hpp>
 #include <map>
@@ -58,18 +61,71 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 
 		auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(o.timeout_ms);
 		bool from_control = false; // the last packet receive() returned came over TCP
+		// Network shaping of video shards (FakeHeadsetOptions::Network): queued with their release time
+		using clk = std::chrono::steady_clock;
+		std::deque<std::pair<clk::time_point, th::packets>> delayed;
+		clk::time_point last_release{}, rate_free{}, net_start = clk::now();
+		std::mt19937 rng(12345);
+		std::uniform_real_distribution<float> uni(0, 1);
+		const bool shaping = o.net.delay_ms > 0 or o.net.jitter_ms > 0 or o.net.loss_pct > 0 or o.net.mbps > 0 or o.net.burst_ms > 0;
+		// a stream packet through the shaper: false = dropped (or queued for later)
+		auto shape = [&](th::packets && p) -> bool {
+			auto * shard = std::get_if<th::video_stream_data_shard>(&p);
+			if (not shaping or not shard)
+				return true;
+			auto now = clk::now();
+			double since = std::chrono::duration<double>(now - net_start).count();
+			if (o.net.burst_ms > 0 and o.net.burst_every_s > 0 and
+			    std::fmod(since, o.net.burst_every_s) < o.net.burst_ms / 1000.0)
+			{
+				res.net_dropped++;
+				return false;
+			}
+			if (uni(rng) * 100 < o.net.loss_pct)
+			{
+				res.net_dropped++;
+				return false;
+			}
+			auto at = now + std::chrono::microseconds(int64_t((o.net.delay_ms + o.net.jitter_ms * uni(rng)) * 1000));
+			if (o.net.mbps > 0)
+			{
+				// serialisation behind the rate cap: each shard occupies the link for its bytes / rate
+				auto start = std::max(rate_free, now);
+				rate_free = start + std::chrono::nanoseconds(int64_t((shard->payload.size() + 60) * 8 * 1000 / o.net.mbps));
+				at = std::max(at, rate_free);
+			}
+			at = std::max(at, last_release); // a Wi-Fi link does not reorder
+			last_release = at;
+			delayed.emplace_back(at, std::move(p));
+			return false;
+		};
 		auto receive = [&](stream_socket * stream) -> th::packets {
 			while (std::chrono::steady_clock::now() < deadline)
 			{
+				if (not delayed.empty() and delayed.front().first <= clk::now())
+				{
+					from_control = false;
+					auto p = std::move(delayed.front().second);
+					delayed.pop_front();
+					return p;
+				}
 				from_control = true;
 				if (auto p = control.receive_pending())
 					return std::move(*p);
 				from_control = false;
 				if (stream)
 					if (auto p = stream->receive_pending())
-						return std::move(*p);
+					{
+						if (shape(std::move(*p)))
+							return std::move(*p);
+						continue;
+					}
 				pollfd fds[2] = {{.fd = control.get_fd(), .events = POLLIN}, {.fd = stream ? stream->get_fd() : -1, .events = POLLIN}};
-				if (::poll(fds, 2, 50) <= 0)
+				int wait_ms = 50;
+				if (not delayed.empty())
+					wait_ms = int(std::clamp<int64_t>(
+					        std::chrono::duration_cast<std::chrono::milliseconds>(delayed.front().first - clk::now()).count(), 0, 50));
+				if (::poll(fds, 2, wait_ms) <= 0)
 					continue;
 				if (fds[0].revents & POLLIN)
 				{
@@ -91,7 +147,11 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 					throw std::runtime_error("server closed the connection");
 				if (stream and (fds[1].revents & POLLIN))
 					if (auto p = stream->receive())
-						return std::move(*p);
+					{
+						if (shape(std::move(*p)))
+							return std::move(*p);
+						continue;
+					}
 			}
 			throw std::runtime_error("timeout");
 		};
@@ -189,8 +249,15 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 		if (o.mic_channels)
 			info.microphone = fh::headset_info_packet::audio_description{o.mic_channels, o.mic_rate};
 		control.send(std::move(info));
+		if (o.battery_charge >= 0)
+			control.send(fh::battery{.charge = o.battery_charge, .present = true, .charging = true});
+		if (not o.start_app.empty())
+		{
+			control.send(fh::get_application_list{.language = "en"});
+			control.send(fh::start_app{.app_id = o.start_app});
+		}
 
-		std::array<VtDecoder, 2> dec{VtDecoder(true), VtDecoder(true)};
+		std::array<VtDecoder, 2> dec{VtDecoder(not o.expect_h264), VtDecoder(not o.expect_h264)};
 		std::array<std::map<uint64_t, pending_frame>, 2> frames;
 		std::array<bool, 2> need_idr{true, true};
 		bool dropped = false;
@@ -330,7 +397,8 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 			else if (std::holds_alternative<th::video_stream_description>(pkt))
 			{
 				auto & d = std::get<th::video_stream_description>(pkt);
-				res.got_stream_description = d.width == o.eye_width and d.height == o.eye_height and d.codec[0] == wivrn::video_codec::h265;
+				res.got_stream_description = d.width == o.eye_width and d.height == o.eye_height and
+				                             d.codec[0] == (o.expect_h264 ? wivrn::video_codec::h264 : wivrn::video_codec::h265);
 			}
 			else if (auto * ad = std::get_if<th::audio_stream_description>(&pkt))
 			{
@@ -363,6 +431,17 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 					res.max_speaker_packet_frames = std::max(res.max_speaker_packet_frames, int(samples / o.speaker_channels));
 					res.speaker_arrivals.emplace_back(vrhost::now_ns(), res.speaker.size() / o.speaker_channels);
 				}
+			}
+			else if (auto * al = std::get_if<th::application_list>(&pkt))
+			{
+				res.app_ids.clear();
+				for (auto & a: al->applications)
+					res.app_ids.push_back(a.id);
+			}
+			else if (auto * rc = std::get_if<th::refresh_rate_change>(&pkt))
+			{
+				res.refresh_changes.push_back(rc->hz);
+				control.send(fh::refresh_rate_changed{.from = o.refresh_hz, .to = rc->hz});
 			}
 			else if (auto * hp = std::get_if<th::haptics>(&pkt))
 				res.haptics.push_back({int(hp->id), int64_t(hp->duration.count()), hp->frequency, hp->amplitude});
@@ -418,7 +497,7 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 
 				bool is_idr = false;
 				for (auto n: vrhost::annexb::split(au))
-					is_idr |= vrhost::annexb::hevc_nal_type(n) == vrhost::annexb::hevc_vps;
+					is_idr |= o.expect_h264 ? (n[0] & 0x1f) == 7 : vrhost::annexb::hevc_nal_type(n) == vrhost::annexb::hevc_vps; // VPS / SPS
 				if (is_idr)
 				{
 					res.idr[idx]++;

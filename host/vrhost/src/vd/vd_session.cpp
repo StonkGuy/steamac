@@ -1403,6 +1403,6 @@ int VdControl::unpair(const std::string & name)
 SessionControl::Counters VdControl::counters() const
 {
 	auto & st = s.stats();
-	return {.frames_sent = st.frames_sent.load(), .idr_sent = st.idr_sent.load(), .bytes_sent = st.bytes_sent.load(), .last_encode_ns = st.last_encode_ns.load()};
+	return {.frames_sent = st.frames_sent.load(), .idr_sent = st.idr_sent.load(), .idr_requests = st.idr_requests.load(), .bytes_sent = st.bytes_sent.load(), .last_encode_ns = st.last_encode_ns.load()};
 }
 } // namespace vrhost

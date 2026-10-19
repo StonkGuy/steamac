@@ -10,7 +10,8 @@ add_library(vrhost-compositor STATIC
 	src/compositor/vrlink_server.mm)
 target_include_directories(vrhost-compositor PUBLIC src include)
 target_link_libraries(vrhost-compositor PUBLIC
-	"-framework Foundation" "-framework Metal" "-framework IOSurface" "-framework CoreVideo")
+	"-framework Foundation" "-framework Metal" "-framework MetalFX" "-framework MetalPerformanceShaders"
+	"-framework IOSurface" "-framework CoreVideo")
 target_compile_options(vrhost-compositor PRIVATE -Wall -Wextra -Wno-unused-parameter)
 set_source_files_properties(src/compositor/eye_compositor.mm src/compositor/vrlink_server.mm
 	PROPERTIES COMPILE_FLAGS -fobjc-arc)

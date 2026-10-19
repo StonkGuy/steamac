@@ -16,7 +16,7 @@
 #define WINEMETAL_API
 #include "winemetal_thunks.h"
 #include "airconv_thunks.h"
-#include "wmtr_proto.h"
+#include "wmtr_wire.h"
 #include "wmtr_transport.h"
 #include "wmtr_host.h"
 #include "wmtr_vr.h"
@@ -124,13 +124,15 @@ static NTSTATUS f_signal(void *p) { /* encodeSignalEvent, as DXMT's unix side */
   [(id<MTLCommandBuffer>)a->handle encodeSignalEvent:(id<MTLSharedEvent>)a->arg0 value:a->arg1];
   return 0;
 }
-const void *wmtr_impl_funcs[WMTR_NCALLS] = {[1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
+static NTSTATUS f_rce(void *a) { ((struct unixcall_generic_obj_uint64_obj_ret *)a)->ret = 0; return 0; } /* pass profile only */
+static NTSTATUS f_commit(void *a) { [(id<MTLCommandBuffer>)((struct unixcall_generic_obj_noret *)a)->handle commit]; return 0; }
+const void *wmtr_impl_funcs[WMTR_NCALLS] = {[32] = f_rce, [12] = f_commit, [1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
                                     [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes};
 
 /* ---------------- loopback transport ---------------- */
 static struct wmtr_host *H;
 static void *blob_base[WMTR_MAX_BLOBS]; static uint64_t blob_size[WMTR_MAX_BLOBS];
-static void *t_blob_ptr(void *c, uint32_t b, uint64_t *s) { *s = blob_size[b]; return blob_base[b]; }
+static void *t_blob_ptr(void *c, uint32_t b, uint64_t *s) { if (b >= WMTR_MAX_BLOBS) return NULL; *s = blob_size[b]; return blob_base[b]; }
 static void t_wake(void *c, uint32_t s) {}
 static uint64_t next_view = 0x1000, released[8]; static int n_released;
 static uint64_t t_create_view(void *c, uint64_t hwnd, void *dev, uint64_t *layer) { *layer = 0x77; return next_view++; }
@@ -224,8 +226,10 @@ static void test_vr_query(struct wmtr_vr *vr, int host_fd) {
 
   struct vrl_state st = {{VRL_STATE, sizeof st}, 1, 1832, 1920, 72.0f, 0.065f, {{-0.9f, 0.8f, 0.85f, -0.85f}, {-0.8f, 0.9f, 0.85f, -0.85f}},
                          VRL_PROFILE_INDEX, 0, "Quest 3"};
-  struct vrl_timing tm = {{VRL_TIMING, sizeof tm}, 500, 1000000, 1000000 + 27777778, 72.0f, 0};
-  struct vrl_poses po = {{VRL_POSES, sizeof po}, 1000000 + 27777778};
+  /* host clock = this process's (CLOCK_UPTIME_RAW, as steamac-vrhost): a current pacer frame */
+  const int64_t t0 = (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 5000000;
+  struct vrl_timing tm = {{VRL_TIMING, sizeof tm}, 500, t0, t0 + 27777778, 72.0f, 0};
+  struct vrl_poses po = {{VRL_POSES, sizeof po}, t0 + 27777778};
   for (int d = 0; d < VRL_DEV_COUNT; d++) {
     po.pose[d].orientation[3] = 1;
     po.pose[d].position[0] = (float)d;
@@ -240,13 +244,14 @@ static void test_vr_query(struct wmtr_vr *vr, int host_fd) {
   CHECK(wmtr_vr_call(&hq, sizeof hq, &hr, sizeof hr) == 0 && hr.connected && hr.eye_width == 1832 && hr.refresh_hz == 72.0f &&
         hr.profile == SVR_PROFILE_INDEX && !strcmp(hr.name, "Quest 3") && hr.fov[1][1] == 0.9f, "hello from VRL_STATE");
   fq.last_frame_id = 0;
-  CHECK(wmtr_vr_call(&fq, sizeof fq, &fr, sizeof fr) == 0 && fr.frame_id == 500 && fr.wake_up == 1000000 &&
-        fr.predicted_display == 1000000 + 27777778 && fr.pose_time == po.time && fr.pose[SVR_DEV_RIGHT_AIM].position[0] == 4.0f &&
+  CHECK(wmtr_vr_call(&fq, sizeof fq, &fr, sizeof fr) == 0 && fr.frame_id == 500 && fr.wake_up == t0 &&
+        fr.predicted_display == t0 + 27777778 && fr.pose_time == po.time && fr.pose[SVR_DEV_RIGHT_AIM].position[0] == 4.0f &&
         fr.input[1][SVR_IN_TRIGGER_VALUE] == 0.5f && fr.input[0][SVR_IN_THUMBSTICK_X] == -1.0f && fr.connected,
         "frame from VRL_TIMING/POSES/INPUT");
   fq.last_frame_id = 500; /* the guest already rendered it: continue the cadence */
+  /* no newer host frame: the next one a period later (wmtr_vr_frame_cadence) */
   CHECK(wmtr_vr_call(&fq, sizeof fq, &fr, sizeof fr) == 0 && fr.frame_id == 501 &&
-        fr.predicted_display == 1000000 + 27777778 + (int64_t)(1e9f / 72.0f), "frame after the pacer's");
+        fr.wake_up == t0 + (int64_t)(1e9f / 72.0f), "frame after the pacer's");
 
   struct svr_haptic_req hp = {{SVR_HAPTIC, sizeof hp}, 1, 0.05f, 160.0f, 0.75f};
   struct svr_ack ack;
@@ -366,6 +371,26 @@ static void test_vr(id<MTLDevice> dev) {
   rel.swapchain = held.eye[1].swapchain; rel.image = held.eye[1].image; send(sv[1], &rel, sizeof rel, 0);
   sub.info.frame_id = 20; remote(146, &sub); remote(39, &sync);
   CHECK(vr_next(sv[1], VRL_SUBMIT, &u, sizeof u) && u.s.frame_id == 20, "frame after release not sent");
+  /* a stalled host (link buffer full): the copy's completion handler must not block on the send (it would stall
+   * Metal's completion thread for the whole process); the frame is dropped and its images freed */
+  {
+    rel.swapchain = u.s.eye[0].swapchain; rel.image = u.s.eye[0].image; send(sv[1], &rel, sizeof rel, 0);
+    rel.swapchain = u.s.eye[1].swapchain; rel.image = u.s.eye[1].image; send(sv[1], &rel, sizeof rel, 0);
+    remote(39, &sync);
+    struct vrl_submit junk; memset(&junk, 0, sizeof junk); /* the size of the frame's packet: no room for it after */
+    int filled = 0;
+    while (send(sv[0], &junk, sizeof junk, MSG_DONTWAIT) > 0) filled++;
+    struct wmtr_vr_stats s0; wmtr_vr_get_stats(vr, &s0);
+    sub.info.frame_id = 25; remote(146, &sub); remote(39, &sync);
+    int64_t t_wait = (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    struct wmtr_vr_stats s1;
+    do { usleep(2000); wmtr_vr_get_stats(vr, &s1); }
+    while (s1.dropped == s0.dropped && s1.sent == s0.sent && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t_wait < 2000000000ull);
+    CHECK(filled > 0 && s1.dropped == s0.dropped + 1 && s1.sent == s0.sent,
+          "stalled host: filled %d, dropped %llu -> %llu, sent %llu -> %llu", filled, s0.dropped, s1.dropped, s0.sent, s1.sent);
+    char drain[4096];
+    while (recv(sv[1], drain, sizeof drain, MSG_DONTWAIT) > 0) {}
+  }
   /* a size change recreates the swapchain (new ports, new id) */
   sub.info.eye[0].w = 128; sub.info.eye[0].h = 64; sub.info.frame_id = 21;
   remote(146, &sub); remote(39, &sync);
@@ -390,10 +415,14 @@ static void test_vr(id<MTLDevice> dev) {
  * VRL_HELLO) shared by every context: a second context (the game after Proton's steam.exe did VR_Init) uses the
  * same link instead of being refused; the last context closes its dup, leaving the launcher's end open. */
 static void *pages(uint64_t n);
+/* an idle context: its own ring blob (ctx), nothing else */
+static void *idle_blob_ptr(void *c, uint32_t b, uint64_t *s) { if (b) return NULL; *s = WMTR_RING_BLOB_BYTES; return c; }
+static void t_wake(void *c, uint32_t s);
+static const struct wmtr_host_ops idle_ops = {idle_blob_ptr, t_wake, NULL, NULL, NULL};
 static struct wmtr_host *idle_host(void) {
-  struct wmtr_ring *R = pages(1 << 20);
+  struct wmtr_ring *R = pages(WMTR_RING_BLOB_BYTES);
   R->magic = WMTR_RING_MAGIC; R->version = WMTR_VERSION;
-  return wmtr_host_create(R, &host_ops, NULL);
+  return wmtr_host_create(R, &idle_ops, R);
 }
 static void test_vr_fd(void) {
   char name[64]; snprintf(name, sizeof name, "com.steamac.vrhost.fdtest.%d", (int)getpid());
@@ -464,8 +493,136 @@ static void test_vr_fd(void) {
 }
 
 static char frames_path[64];
+/* SVR_FRAME cadence across headset connect / disconnect / reconnect (live 2026-10-17: VRChat started without a
+ * headset ran ~9050 locally paced frames; after the reconnect the host pacer restarted at id 1 and the guest was
+ * told to wake ~9000 frames later, i.e. froze). Each step: ids grow, wake-up within two frames of now. */
+static void test_vr_cadence(void) {
+  const int64_t P = 11111111; /* 90 Hz */
+  struct wmtr_vr_cadence c = {0};
+  int64_t now = 1000000000000ll, wake, disp;
+  uint64_t last = 0, id;
+  int bad = 0;
+#define STEP(hid, hwake) do { \
+    wmtr_vr_frame_cadence(&c, (hid), (hwake), (hwake) + 2 * P, last, now, P, &id, &wake, &disp); \
+    if (id <= last || wake > now + 2 * P || wake < now - 2 * P || disp < wake) bad++; \
+    last = id; now += P; } while (0)
+  for (int i = 0; i < 9050; i++) STEP(0, 0);                 /* game started, no headset ever connected */
+  CHECK(bad == 0 && last == 9050, "no-headset cadence: %d bad, last %llu", bad, (unsigned long long)last);
+  for (uint64_t h = 1; h <= 300; h++) STEP(h, now + P / 2);  /* headset connects: pacer ids from 1 */
+  CHECK(bad == 0 && last == 9350, "connect: %d bad, last %llu", bad, (unsigned long long)last);
+  CHECK(wake == now - P + P / 2, "connect: host wake not used");
+  for (int i = 0; i < 500; i++) STEP(300, now - 3 * P - i * P); /* disconnect: the host's last timing goes stale */
+  CHECK(bad == 0 && last == 9850, "disconnect: %d bad, last %llu", bad, (unsigned long long)last);
+  for (uint64_t h = 1; h <= 300; h++) STEP(h, now + P / 3);  /* reconnect: pacer restarts at 1 again */
+  CHECK(bad == 0 && last == 10150, "reconnect: %d bad, last %llu", bad, (unsigned long long)last);
+  CHECK(wake == now - P + P / 3, "reconnect: host wake not used");
+  STEP(9999, now + 500 * P); /* a timing far ahead is clamped */
+  CHECK(bad == 0, "far-ahead timing: wake %lld ms ahead", (long long)((wake - now + P) / 1000000));
+#undef STEP
+  printf("vr cadence: no headset / connect / disconnect / reconnect / far-ahead ok\n");
+}
+
+/* ---------------- hostile requests (a guest that writes the ring itself) ---------------- */
+/* One raw record built here, not by the client: header fields, relocs, outs and payload exactly as given. Sent
+ * on reply slot 60 (no client thread uses it); returns the reply status, *out_size the reply's size. */
+#define RAW_SLOT 60
+static uint32_t
+raw_request(uint16_t call, uint32_t params_size, uint32_t payload_size, const uint32_t *relocs, uint16_t n_reloc,
+            const struct wmtr_out *outs, uint16_t n_out, const void *payload, uint32_t payload_bytes, uint32_t *out_size) {
+  struct wmtr_ring *R = blob_base[0];
+  uint8_t *data = (uint8_t *)R + WMTR_RING_DATA_OFFSET;
+  struct wmtr_slot *slot = (struct wmtr_slot *)((uint8_t *)R + WMTR_SLOTS_OFFSET) + RAW_SLOT;
+  struct wmtr_req_ext hdr = {0};
+  hdr.h.call = call; hdr.h.flags = WMTR_F_SYNC; hdr.h.slot = RAW_SLOT; hdr.h.params_size = params_size;
+  hdr.h.seq = slot->done_seq + 1;
+  hdr.n_reloc = n_reloc; hdr.n_out = n_out; hdr.payload_size = payload_size;
+  uint32_t poff = wmtr_req_payload_offset(&hdr);
+  uint32_t total = WMTR_ALIGN8(poff + payload_bytes);
+  hdr.h.size = total;
+  while (R->tail != R->head) sched_yield(); /* the client's own requests are consumed */
+  uint64_t head = R->head;
+  uint32_t pos = (uint32_t)(head % WMTR_RING_BYTES), to_end = WMTR_RING_BYTES - pos;
+  if (to_end < total) {
+    struct wmtr_req w = {0}; w.size = to_end; w.flags = WMTR_F_WRAP;
+    if (to_end >= sizeof w) memcpy(data + pos, &w, sizeof w);
+    head += to_end; pos = 0;
+  }
+  uint8_t *dst = data + pos;
+  memset(dst, 0, total);
+  memcpy(dst, &hdr, sizeof hdr);
+  memcpy(dst + sizeof hdr, relocs, 4u * n_reloc);
+  memcpy(dst + sizeof hdr + 4u * n_reloc, outs, sizeof *outs * n_out);
+  memcpy(dst + poff, payload, payload_bytes);
+  __atomic_store_n(&R->head, head + total, __ATOMIC_RELEASE);
+  wmtr_host_kick(H);
+  while (__atomic_load_n(&slot->done_seq, __ATOMIC_ACQUIRE) < hdr.h.seq) sched_yield();
+  if (out_size) *out_size = slot->out_size;
+  return slot->status;
+}
+
+/* Every size, offset and reference in a request is the guest's. Before the checks each of these wrote or read
+ * host memory outside the request (32-bit wrap-around, or sizes larger than the reply slot / the arena blob). */
+static void
+test_hostile_requests(id<MTLDevice> dev) {
+  { /* a ring blob smaller than the ring layout: the executor would read and write past it */
+    uint64_t sz = WMTR_RING_BLOB_BYTES;
+    void *small = pages(sz);
+    ((struct wmtr_ring *)small)->magic = WMTR_RING_MAGIC; ((struct wmtr_ring *)small)->version = WMTR_VERSION;
+    void *save_b = blob_base[0]; uint64_t save_s = blob_size[0];
+    blob_base[0] = small; blob_size[0] = WMTR_PAGE;
+    struct wmtr_host *hs = wmtr_host_create(small, &host_ops, NULL);
+    CHECK(hs == NULL, "executor started on a %u-byte ring blob", WMTR_PAGE);
+    if (hs) wmtr_host_destroy(hs);
+    blob_base[0] = save_b; blob_size[0] = save_s;
+    free(small);
+  }
+  const uint32_t inval = 0xC000000D;
+  struct wmtr_slot *slots = (struct wmtr_slot *)((uint8_t *)blob_base[0] + WMTR_SLOTS_OFFSET);
+  uint64_t payload[64] = {0};
+  uint32_t out = 0;
+  /* reloc offset near 4 GiB: offset + 8 wrapped below payload_size, the host rewrote 8 bytes 4 GiB away */
+  uint32_t far = 0xfffffffcu;
+  CHECK(raw_request(39, 16, 64, &far, 1, NULL, 0, payload, 64, NULL) == inval, "reloc offset wrap accepted");
+  /* payload_size near 4 GiB: poff + payload_size wrapped below the record size */
+  uint32_t r0 = 0;
+  CHECK(raw_request(39, 16, 0xfffffff8u, &r0, 1, NULL, 0, payload, 64, NULL) == inval, "payload size wrap accepted");
+  /* output range near 4 GiB: off + size wrapped, the reply copied from 4 GiB past the payload */
+  struct wmtr_out wrap = {0xffffff00u, 0x200};
+  uint32_t st = raw_request(39, 16, 64, NULL, 0, &wrap, 1, payload, 64, &out);
+  CHECK(out <= 16, "wrapped output range copied (%u bytes, status %x)", out, st);
+  /* params larger than a reply slot: the reply overwrote the next slot (and past the ring blob for the last) */
+  static uint8_t big[WMTR_SLOT_BYTES + 4096];
+  memset(slots[RAW_SLOT + 1].data, 0x5a, 64);
+  st = raw_request(39, sizeof big, sizeof big, NULL, 0, NULL, 0, big, sizeof big, &out);
+  CHECK(st == inval && out == 0, "params past the reply slot: status %x, %u bytes", st, out);
+  CHECK(slots[RAW_SLOT + 1].data[0] == 0x5a && slots[RAW_SLOT + 1].data[63] == 0x5a, "next reply slot overwritten");
+  /* params shorter than the call's struct: the implementation read and wrote past the request */
+  CHECK(raw_request(8, 0, 0, NULL, 0, NULL, 0, NULL, 0, NULL) == inval, "short params accepted");
+  /* newBuffer over arena memory longer than the blob: the NoCopy MTLBuffer reached host memory past it */
+  uint32_t blob = 0;
+  for (uint32_t b = 1; b < WMTR_MAX_BLOBS && !blob; b++) if (blob_base[b]) blob = b;
+  CHECK(blob != 0, "no arena blob to test with");
+  if (blob) {
+    struct { struct unixcall_mtldevice_newbuffer p; struct WMTBufferInfo info; } nb;
+    memset(&nb, 0, sizeof nb);
+    nb.p.device = (obj_handle_t)dev;
+    nb.p.info.ptr = (void *)(uintptr_t)(WMTR_REF_EXTRA | sizeof nb.p);
+    nb.info.length = blob_size[blob] + WMTR_PAGE;
+    nb.info.options = WMTResourceStorageModeShared;
+    nb.info.memory.ptr = (void *)(uintptr_t)(WMTR_REF_ARENA | (uint64_t)blob << 32);
+    uint32_t rel[2] = {offsetof(struct unixcall_mtldevice_newbuffer, info), sizeof nb.p + offsetof(struct WMTBufferInfo, memory)};
+    st = raw_request(18, sizeof nb.p, sizeof nb, rel, 2, NULL, 0, &nb, sizeof nb, NULL);
+    CHECK(st == inval, "newBuffer past its arena blob: status %x", st);
+    nb.info.length = WMTR_PAGE; /* the same request inside the blob still works */
+    st = raw_request(18, sizeof nb.p, sizeof nb, rel, 2, NULL, 0, &nb, sizeof nb, &out);
+    CHECK(st == 0, "newBuffer inside its arena blob: status %x", st);
+    /* kept alive: its deallocator would hand the client a free range the client never allocated */
+  }
+}
+
 int main(void) {
   @autoreleasepool {
+    test_vr_cadence();
     snprintf(frames_path, sizeof frames_path, "/tmp/wmtr_frames_%d.csv", (int)getpid());
     unlink(frames_path);
     setenv("WMTR_FRAMES", frames_path, 1);
@@ -677,6 +834,28 @@ int main(void) {
       remote(73, &r1); /* a second release of the same view is ignored */
       struct unixcall_generic_obj_uint64_ret pf = {0}; remote(39, &pf); /* sync call: the releases above are done */
       CHECK(n_released == 1 && released[0] == v1.ret_view, "ReleaseMetalView: %d releases", n_released);
+      /* render-pass profile (rows 220-239, with the statistics): a 4x MSAA pass that stores its samples and
+       * resolves, and the GPU time of its committed command buffer */
+      id<MTLDevice> pdev = MTLCreateSystemDefaultDevice();
+      MTLTextureDescriptor *md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
+      md.textureType = MTLTextureType2DMultisample; md.sampleCount = 4; md.usage = MTLTextureUsageRenderTarget; md.storageMode = MTLStorageModePrivate;
+      id<MTLTexture> msaa = [pdev newTextureWithDescriptor:md];
+      MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:64 height:64 mipmapped:NO];
+      rd.usage = MTLTextureUsageRenderTarget; rd.storageMode = MTLStorageModePrivate;
+      id<MTLTexture> res = [pdev newTextureWithDescriptor:rd];
+      id<MTLCommandQueue> pq = [pdev newCommandQueue];
+      id<MTLCommandBuffer> pcb = [pq commandBuffer];
+      struct WMTRenderPassInfo pinfo; memset(&pinfo, 0, sizeof pinfo);
+      pinfo.colors[0].texture = (obj_handle_t)msaa; pinfo.colors[0].load_action = WMTLoadActionClear;
+      pinfo.colors[0].store_action = WMTStoreActionStoreAndMultisampleResolve; pinfo.colors[0].resolve_texture = (obj_handle_t)res;
+      struct unixcall_generic_obj_uint64_obj_ret rce = {.handle = (obj_handle_t)pcb, .arg = (uint64_t)(uintptr_t)&pinfo};
+      remote(32, &rce);
+      struct unixcall_generic_obj_noret cm = {.handle = (obj_handle_t)pcb};
+      remote(12, &cm);
+      { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); }
+      [pcb waitUntilCompleted];
+      usleep(20000); /* the completion handler runs after waitUntilCompleted returns */
+      test_hostile_requests(dev);
       /* a call that faults (bad handle) fails, the process lives, and the client is refused from then on */
       struct unixcall_generic_obj_uint64_ret fz = {0};
       NTSTATUS fs = remote(5, &fz);
@@ -714,6 +893,18 @@ int main(void) {
       while (sf && fgets(sl, sizeof sl, sf)) if (strstr(sl, ",200,_executor_sleeps,9,")) found = 1;
       if (sf) fclose(sf);
       CHECK(found, "WMTR_CALLSTATS: no executor sleep row");
+      int msaa_row = 0, gpu_row = 0, sig_row = 0;
+      sf = fopen(stats_path, "r");
+      while (sf && fgets(sl, sizeof sl, sf)) {
+        unsigned long long t, n, sy, ns; int call; char name[96]; unsigned cls;
+        if (sscanf(sl, "%llu,%d,%95[^,],%u,%llu,%llu,%llu", &t, &call, name, &cls, &n, &sy, &ns) != 7) continue;
+        if (call == 224 && n >= 1 && ns >= 64ull * 64 * 4 * 4) msaa_row = 1;
+        if (call == 220 && n >= 1 && ns > 0) gpu_row = 1;
+        if (call >= 230 && strstr(name, "c64x64/f70/s4/L2/S3")) sig_row = 1;
+      }
+      if (sf) fclose(sf);
+      CHECK(msaa_row && gpu_row && sig_row, "pass profile rows: msaa store %d, command buffer GPU time %d, signature %d",
+            msaa_row, gpu_row, sig_row);
       unlink(stats_path);
       unlink(trigger_path);
     }

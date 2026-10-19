@@ -256,12 +256,22 @@ The default path is `~/Library/Application Support/steamac/vrhost/control.sock`.
 
 | request | response |
 |---|---|
-| `status` | Current host/session state and stream counters. Includes `state` (`waiting`, `pairing`, `connected`), `port`, `bonjour`, `encryption`, `pin`, nullable `headset`, and `stream` statistics. |
+| `status` | Current host/session state and stream counters. Includes `state` (`waiting`, `pairing`, `connected`), `port`, `bonjour`, `encryption`, `pin`, nullable `headset` (with the current `refresh_hz`, `refresh_rates`, `codec` `hevc`/`h264` and, once the headset reported it, `battery` `{charge 0..1, charging}`), nullable `pairing_request` (`{name, at, refused}`: the last unpaired headset that connected; `refused` = pairing was off and `--pair-on-request` not given), `app_request` (`{id, seq}`: the headset's last start request from the app list given with `--app`; `seq` counts requests, 0 = none), and `stream` statistics (frames, bitrate, encode/decode/pipeline ms, `idr_requests`; with the game path also
+`game_fps`, `received`, `no_headset`, `compose_gpu_ms`, `submit_copied_ms`, `upscaler`). |
 | `headsets` | `{"v":1,"headsets":[{"name":"…","last_connection":UNIX_TIME},…]}` for paired headsets. |
 | `pair on` | Enable pairing and generate a fresh PIN; returns the updated `status`. |
 | `pair off` | Stop accepting new pairings; already paired headsets can reconnect; returns the updated `status`. |
 | `unpair NAME` | Remove the named headset; returns the updated paired-headset list. |
 | `unpair-all` | Remove all paired headsets; returns the updated list. |
+| `bitrate MBPS` | Total bitrate (1-400 Mbit/s) for the running encoders and the next connections; returns `status`. |
+| `refresh HZ` | Ask the connected headset to switch to a refresh rate it offers (WiVRn `refresh_rate_change`); returns `status`, or an error without a headset or for a rate it does not offer. |
+
+Fields are only added within protocol version 1; a launcher reads the new ones as optional (older hosts lack them).
+Host options that shape these replies: `--render-scale` (the `render_width/height` reported, below 1 with the
+`stream.upscaler` in use), `--pair-on-request` (an unpaired headset opens pairing with a fresh PIN instead
+of being refused; pairing closes after it pairs), `--codec auto|hevc|h264`, `--app ID=NAME` (repeatable; the WiVRn
+`application_list` the headset shows; its `start_app` only moves `app_request`, the launcher starts the game in the
+guest through fx-progress-agent `launch-vr ID`).
 
 Unknown requests and invalid unpair commands return `{"v":1,"error":"…"}`. If encryption is disabled, `pair on`
 returns an error because pairing is unavailable. Pairing PINs are local status data and are never sent to the headset by

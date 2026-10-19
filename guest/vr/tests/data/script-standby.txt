@@ -1,0 +1,3 @@
+# vr-fakehost script for vr-testapp --standby: the headset leaves at frame 40 and comes back at frame 80
+40 disconnect
+80 connect

@@ -4,7 +4,10 @@
 * Licence: GPL-3.0-or-later (`host/vrhost/COPYING`); `external/magic_enum.hpp` is MIT (v0.9.5, as vendored by WiVRn).
 * Files: `common/{wivrn_packets.h, wivrn_serialization.h, wivrn_serialization_types.h, packed_quaternion.h,
   protocol_version.h, crypto.*, smp.*, secrets.*, wivrn_sockets.*}`, `server/compositor/pacer.{h,cpp}`,
-  `server/driver/clock_offset.h` and `external/magic_enum.hpp`, **unmodified**.
+  `server/driver/clock_offset.h` and `external/magic_enum.hpp`, **unmodified** except one hardening change marked
+  `steamac` in `common/wivrn_serialization.h`: a vector of non-trivial elements reserves at most the bytes left in the
+  packet instead of the element count from the wire (up to ~2^31; found by `tests/fuzz/fuzz_packets`). Re-apply it on
+  a re-vendor unless WiVRn has an equivalent check.
 * The pacer builds against minimal Monado stand-ins in `host/vrhost/compat/monado/` (`main/comp_target.h` timing-point
   enum, `util/u_var.h` no-op debug-GUI registration, `util/u_debug.h` env option, `os/os_time.h` = the host clock
   `CLOCK_UPTIME_RAW`) and `src/wivrn/clock_offset_compat.cpp` (the two conversion functions of

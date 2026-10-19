@@ -260,7 +260,17 @@ int main()
 		std::map<uint64_t, uint64_t> picture_of_wire;
 		std::vector<double> latency_ms;
 		std::atomic<bool> stop{false};
-		std::atomic<int> frames_from_pacer{0};
+		std::atomic<int> frames_from_pacer{0}, frames_without_headset{0};
+		std::atomic<int64_t> max_sleep_ns{0};
+		{
+			// before any headset: the guest already gets a usable HMD view (the default Quest 3), not 0x0 / zero FOV
+			svr_hello_rep hello{};
+			reinterpret_cast<svr_hello_req &>(hello) = {{SVR_HELLO, sizeof(svr_hello_req)}, SVR_VERSION, uint32_t(getpid()), "vr_e2e"};
+			CHECK(wmtr_vr_query(vr, &hello, sizeof hello) == 0);
+			printf("guest view before any headset: connected=%u eye %ux%u fov L %.2f..%.2f\n", hello.connected, hello.eye_width,
+			       hello.eye_height, hello.fov[0][0], hello.fov[0][1]);
+			CHECK(not hello.connected and hello.eye_width == 1836 and hello.eye_height == 1924 and hello.fov[0][1] - hello.fov[0][0] > 1);
+		}
 		std::thread producer([&] {
 			Producer prod(src_w, src_h, layout);
 			WMTVRSubmitInfo info{};
@@ -277,13 +287,20 @@ int main()
 				// answers from the host's newest VRL_TIMING / VRL_POSES / VRL_STATE
 				svr_frame_rep r{};
 				reinterpret_cast<svr_frame_req &>(r) = {{SVR_FRAME, sizeof(svr_frame_req)}, last_frame};
-				if (wmtr_vr_query(vr, &r, sizeof r) != 0 or not r.connected or not (r.pose[SVR_DEV_HEAD].flags & SVR_POSE_VALID))
+				if (wmtr_vr_query(vr, &r, sizeof r) != 0)
 				{
 					std::this_thread::sleep_for(std::chrono::milliseconds(2));
-					continue; // no headset / no tracking yet: an OpenVR runtime reports no valid pose either
+					continue;
 				}
-				if (r.wake_up > now_ns())
-					std::this_thread::sleep_for(std::chrono::nanoseconds(r.wake_up - now_ns()));
+				// As VRChat does: it keeps rendering with no headset (from before the first one, between connections), on
+				// the exporter's local cadence; the host drops those frames. The wait must never be long (live
+				// 2026-10-17: after a reconnect the game was told to wake ~9000 frames later and froze).
+				int64_t sleep_ns = r.wake_up - now_ns();
+				max_sleep_ns = std::max<int64_t>(max_sleep_ns, sleep_ns);
+				if (not r.connected)
+					frames_without_headset++;
+				if (sleep_ns > 0)
+					std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(sleep_ns, 1'000'000'000)));
 				uint64_t frame = r.frame_id; // the pacer's id: WiVRn matches the headset's feedback by it
 				last_frame = frame;
 				frames_from_pacer++;
@@ -316,8 +333,9 @@ int main()
 				{
 					std::lock_guard l(m);
 					submit_ns[frame] = now_ns();
-					render_orientation[frame & 0xffff] = {head.orientation[0], head.orientation[1], head.orientation[2],
-					                                      head.orientation[3]};
+					if (head.flags & SVR_POSE_VALID) // frames rendered before tracking arrived carry no head pose to compare
+						render_orientation[frame & 0xffff] = {head.orientation[0], head.orientation[1], head.orientation[2],
+						                                      head.orientation[3]};
 				}
 				wmtr_vr_submit(vr, &info);
 			}
@@ -328,6 +346,8 @@ int main()
 		// the picture's runs ahead by one for every frame timing the producer got without a frame reaching the host
 		// (wmtr drops a submit while the previous blit is in flight): the lead never shrinks within a connection.
 		std::array<int64_t, 2> lead{};
+		std::array<bool, 2> lead_set{}; // the first frame of a connection sets the lead (the guest's ids keep counting
+		                                // across connections, the host's restart)
 		// guest protocol through the link while a headset is connected (once): state, input mapping, haptics
 		bool guest_checked = false;
 		auto check_guest = [&] {
@@ -390,6 +410,8 @@ int main()
 				if (eye == 0)
 					picture_of_wire[frame] = uint64_t(read);
 				int64_t ahead = (read - int64_t(frame & 0xffff)) & 0xffff;
+				if (not lead_set[eye])
+					lead[eye] = ahead, lead_set[eye] = true;
 				if ((ahead < lead[eye] or ahead > lead[eye] + 100) and wrong_index++ < 3)
 					fprintf(stderr, "eye %d frame %llu: carries frame %lld (lead was %lld)\n", eye, (unsigned long long)frame,
 					        (long long)read, (long long)lead[eye]);
@@ -403,6 +425,7 @@ int main()
 		};
 
 		// 1. stream size = eye size: identity foveation, frame numbers readable after the full path
+		std::this_thread::sleep_for(std::chrono::milliseconds(400)); // the game runs a while before any headset
 		auto r = run_fake_headset({.port = session.port(), .frames = frames, .eye_width = uint16_t(src_w), .eye_height = uint16_t(src_h), .pin = "271828", .on_decoded = on_decoded});
 		printf("identity: handshake=%s decoded=%d/%d mismatch=%d/%d idr=%d/%d view_info_ok=%d error='%s'\n",
 		       r.handshake_state.c_str(), r.decoded[0], r.decoded[1], r.index_mismatch[0], r.index_mismatch[1], r.idr[0], r.idr[1],
@@ -465,12 +488,15 @@ int main()
 			std::lock_guard l(m);
 			bad_colour = checked = wrong_index = unreadable = 0;
 			lead = {};
+			lead_set = {};
 			latency_ms.clear();
 		}
 
+		std::this_thread::sleep_for(std::chrono::milliseconds(400)); // between headsets the game keeps rendering
 		// 2. smaller stream: the compositor foveates; its parameters reach the headset in view_info
 		auto f = run_fake_headset({.port = session.port(), .frames = frames, .eye_width = uint16_t(out_w), .eye_height = uint16_t(out_h),
-		                           .pin = "271828", .identity_foveation = false, .on_decoded = on_decoded});
+		                           .pin = "271828", .identity_foveation = false, .on_decoded = on_decoded,
+		                           .refresh_hz = 90}); // reconnect: another size and refresh rate
 		printf("foveated: decoded=%d/%d idr=%d/%d foveation x %zu entries y %zu entries error='%s'\n", f.decoded[0], f.decoded[1],
 		       f.idr[0], f.idr[1], f.foveation_x[0].size(), f.foveation_y[0].size(), f.error.c_str());
 		CHECK(f.error.empty());
@@ -486,6 +512,9 @@ int main()
 		       pct(latency_ms, .99), pct(latency_ms, 1), latency_ms.size());
 
 		CHECK(frames_from_pacer >= 120);
+		printf("guest frames without a headset %d, longest wait %.1f ms\n", frames_without_headset.load(), max_sleep_ns / 1e6);
+		CHECK(frames_without_headset > 30);              // rendered before the first headset and between the two
+		CHECK(max_sleep_ns < 3 * 1'000'000'000ll / 72);  // never more than ~2 frames ahead
 		CHECK(pipeline->timings_sent() > 0);
 		CHECK(guest_checked);
 		stop = true;

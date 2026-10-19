@@ -50,6 +50,8 @@ using namespace vrhost;
 static std::atomic<bool> g_quit{false};
 static std::string g_control_socket;              // --control-socket
 static std::atomic<double> g_pipeline_p50_ms{0}; // last link report, for the control socket
+static std::atomic<double> g_compose_gpu_p50_ms{0}, g_submit_copied_p50_ms{0}, g_game_fps{0};
+static CompositorOptions g_quality;                // --upscaler / --sharpness / --force-srgb
 
 static void usage()
 {
@@ -64,6 +66,13 @@ static void usage()
 	        "  --audio-fd N        VR audio region fd from steamac-vm (game audio to the headset, its microphone back)\n"
 	        "  --pair              accept new headsets (PIN pairing); default only when no headset is paired yet\n"
 	        "  --pin NNNNNN        pairing PIN (default: random, printed and readable with --show-pin)\n"
+	        "  --pair-on-request   an unpaired headset opens pairing (fresh PIN) instead of being refused\n"
+	        "  --render-scale F    game render size = headset render size x F (0.5-2; below 1 upscaled on the Mac)\n"
+	        "  --upscaler metalfx|bilinear  upscaler for --render-scale below 1 (default metalfx)\n"
+	        "  --sharpness F       sharpening in the compositor, 0-1 (default 0)\n"
+	        "  --force-srgb        decode 8-bit eye images as sRGB even when the format is not marked sRGB\n"
+	        "  --keyframe-interval S  an IDR at least every S seconds (default: only when the headset asks)\n"
+	        "  --prioritize-speed  VideoToolbox: encoding speed over quality\n"
 	        "  --no-encryption     WiVRn's 'encryption disabled' mode (trusted LAN only)\n"
 	        "  --port N            TCP/UDP port (default 9757)\n"
 	        "  --no-advertise      do not publish _wivrn._tcp via Bonjour\n"
@@ -71,7 +80,8 @@ static void usage()
 	        "  --size WxH          stream size per eye (default: headset's; self-test 1832x1920)\n"
 	        "  --frames N          self-test frames (default 600)\n"
 	        "  --fps F             self-test frame rate (default 90)\n"
-	        "  --codec hevc|h264   self-test codec (default hevc)\n"
+	        "  --codec auto|hevc|h264  video codec (default auto: HEVC when the headset has it; self-test hevc)\n"
+	        "  --app ID=NAME       offer an app in the headset's app list; start requests show in the control status\n"
 	        "  --bitrate BPS       total bitrate (default 50000000)\n"
 	        "  self-test tuning:   --layout eyes|serial|sbs  --prioritize-speed  --max-frame-delay N  --qp N\n"
 	        "                      --no-low-latency-rc  --csv (one summary line)\n"
@@ -310,7 +320,7 @@ static void write_pin(const std::string & pin)
 }
 
 // The launcher's status/pairing socket, when asked for (never fatal: the host serves without it).
-static std::unique_ptr<ControlServer> make_control(SessionControl & control)
+static std::unique_ptr<ControlServer> make_control(SessionControl & control, std::function<std::string()> stream_json = nullptr)
 {
 	if (g_control_socket.empty())
 		return nullptr;
@@ -320,6 +330,7 @@ static std::unique_ptr<ControlServer> make_control(SessionControl & control)
 		                                       ControlServer::Hooks{
 		                                               .pipeline_latency_ms = [] { return g_pipeline_p50_ms.load(); },
 		                                               .pin_changed = write_pin,
+		                                               .stream_json = std::move(stream_json),
 		                                       });
 	}
 	catch (std::exception & e)
@@ -530,7 +541,7 @@ static int accept_link(int & link_fd, const std::string & link_socket)
 static int serve_link(Adapter & adapter, int link_fd, const std::string & mach_name, int audio_fd)
 {
 	VrSession & session = *adapter.session;
-	VrPipeline pipeline(session, link_fd, mach_name);
+	VrPipeline pipeline(session, link_fd, mach_name, g_quality);
 	vra_region * audio_region = nullptr;
 	std::unique_ptr<AudioBridge> audio;
 	if (audio_fd >= 0)
@@ -541,7 +552,17 @@ static int serve_link(Adapter & adapter, int link_fd, const std::string & mach_n
 		audio = std::make_unique<AudioBridge>(audio_region, session, &pipeline);
 	}
 	session.start(audio ? static_cast<SessionListener *>(audio.get()) : &pipeline); // state / input / audio to the guest
-	auto control = make_control(*adapter.control);
+	// the panel's live stats (Settings > VR "Show live stats"): the last 5 s link report
+	auto control = make_control(*adapter.control, [&pipeline] {
+		char b[256];
+		auto & ps = pipeline.stats();
+		snprintf(b, sizeof b,
+		         ",\"game_fps\":%.1f,\"received\":%" PRIu64 ",\"no_headset\":%" PRIu64 ",\"compose_gpu_ms\":%.2f,"
+		         "\"submit_copied_ms\":%.2f,\"upscaler\":\"%s\"",
+		         g_game_fps.load(), ps.received.load(), ps.no_headset.load(), g_compose_gpu_p50_ms.load(),
+		         g_submit_copied_p50_ms.load(), pipeline.upscaler());
+		return std::string(b);
+	});
 	printf("steamac-vrhost: VR link fd %d, mach name %s, ", link_fd, mach_name.c_str());
 	adapter.announce();
 	fflush(stdout);
@@ -557,6 +578,9 @@ static int serve_link(Adapter & adapter, int link_fd, const std::string & mach_n
 			auto l = pipeline.take_latency();
 			auto q = [](const std::vector<double> & v, double p) { return v.empty() ? 0.0 : pct(v, p); };
 			g_pipeline_p50_ms = q(l.total, .5);
+			g_compose_gpu_p50_ms = q(l.compose_gpu, .5);
+			g_submit_copied_p50_ms = q(l.submit_to_copied, .5);
+			g_game_fps = l.total.size() / ((now_ns() - last_report) / 1e9);
 			printf("link frames %" PRIu64 " submitted %" PRIu64 " (no headset %" PRIu64 ") sent %" PRIu64 " idr %" PRIu64
 			       " | ms p50/p99: submit->copied %.2f/%.2f copied->host %.3f/%.3f host->sent %.2f/%.2f total %.2f/%.2f"
 			       " compositor GPU %.2f | last encode %.2f, headset decode %.2f\n",
@@ -695,7 +719,7 @@ int main(int argc, char ** argv)
 		else if (a == "--no-low-latency-rc")
 			st.enc.low_latency_rc = false;
 		else if (a == "--prioritize-speed")
-			st.enc.prioritize_speed = true;
+			st.enc.prioritize_speed = cfg.prioritize_speed = true;
 		else if (a == "--max-frame-delay")
 			st.enc.max_frame_delay = std::stoi(next());
 		else if (a == "--qp")
@@ -726,7 +750,46 @@ int main(int argc, char ** argv)
 		else if (a == "--vd-no-encryption")
 			vd_opts.encrypt = false;
 		else if (a == "--codec")
-			st.enc.codec = next() == "h264" ? EncoderConfig::Codec::h264 : EncoderConfig::Codec::hevc;
+		{
+			auto c = next();
+			if (c != "auto" and c != "hevc" and c != "h264")
+			{
+				usage();
+				return 2;
+			}
+			st.enc.codec = c == "h264" ? EncoderConfig::Codec::h264 : EncoderConfig::Codec::hevc;
+			cfg.codec = c == "h264" ? WivrnConfig::Codec::h264 : c == "hevc" ? WivrnConfig::Codec::hevc : WivrnConfig::Codec::automatic;
+		}
+		else if (a == "--render-scale")
+		{
+			cfg.render_scale = std::stof(next());
+			if (not (cfg.render_scale >= 0.5f and cfg.render_scale <= 2.0f))
+			{
+				fprintf(stderr, "steamac-vrhost: --render-scale 0.5 to 2\n");
+				return 2;
+			}
+		}
+		else if (a == "--upscaler")
+			g_quality.upscaler = next() == "bilinear" ? CompositorOptions::Upscaler::bilinear : CompositorOptions::Upscaler::metalfx;
+		else if (a == "--sharpness")
+			g_quality.sharpness = std::clamp(std::stof(next()), 0.0f, 1.0f);
+		else if (a == "--force-srgb")
+			g_quality.force_srgb = true;
+		else if (a == "--keyframe-interval")
+			cfg.keyframe_interval_s = std::stof(next());
+		else if (a == "--pair-on-request")
+			cfg.pair_on_request = true;
+		else if (a == "--app")
+		{
+			auto v = next();
+			auto eq = v.find('=');
+			if (eq == std::string::npos or eq == 0 or eq + 1 == v.size())
+			{
+				usage();
+				return 2;
+			}
+			cfg.applications.emplace_back(v.substr(0, eq), v.substr(eq + 1));
+		}
 		else
 		{
 			usage();
@@ -793,6 +856,7 @@ int main(int argc, char ** argv)
 					                         : WivrnConfig::Encryption::enabled;
 				cfg.width = w;
 				cfg.height = h;
+				cfg.on_pin = write_pin; // pairing opened by a headset (--pair-on-request): --show-pin follows
 				if (mode == link and not accept_link(link_fd, link_socket))
 					return 0;
 				{

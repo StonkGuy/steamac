@@ -60,6 +60,16 @@ struct FakeHeadsetOptions
 	uint32_t mic_rate = 48000;
 	double mic_tone_hz = 440;
 	int mic_marker_ms = 300;
+	bool expect_h264 = false;   // the server was told to use H.264 (both codecs are offered either way)
+	float battery_charge = -1;  // >= 0: send one battery packet (charging) after the headset info
+	std::string start_app;      // non-empty: ask for the app list, then to start this app id
+	// Wi-Fi-like conditions on the video stream (UDP shards), applied as they arrive: one-way delay plus uniform
+	// jitter (order kept, as a Wi-Fi link keeps it), random loss, a rate cap (bytes queue behind it) and loss
+	// bursts (every burst_every_s seconds all shards for burst_ms). 0 = off.
+	struct Network
+	{
+		float delay_ms = 0, jitter_ms = 0, loss_pct = 0, mbps = 0, burst_every_s = 0, burst_ms = 0;
+	} net;
 };
 
 struct FakeHeadsetResult
@@ -98,6 +108,9 @@ struct FakeHeadsetResult
 		float frequency, amplitude;
 	};
 	std::vector<Haptic> haptics;
+	std::vector<std::string> app_ids;      // last application_list received
+	std::vector<float> refresh_changes;    // refresh_rate_change requests received (answered with refresh_rate_changed)
+	int net_dropped = 0;                   // shards the network shaping dropped
 };
 
 FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions &);

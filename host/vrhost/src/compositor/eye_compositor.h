@@ -21,11 +21,29 @@ struct EyeSource
 	bool flip_y;
 };
 
+// Machine-side image options (Settings > VR "Quality"): the game may render below the headset's size (render scale,
+// WivrnConfig) and is upscaled here to `upscale_w x upscale_h` before foveation; sharpening in the foveation pass.
+struct CompositorOptions
+{
+	enum class Upscaler
+	{
+		metalfx,  // MetalFX spatial scaler (MTLFXSpatialScaler)
+		bilinear, // MPSImageBilinearScale
+	} upscaler = Upscaler::metalfx;
+	uint32_t upscale_w = 0, upscale_h = 0; // 0 = never upscale (eyes larger than this are not touched)
+	float sharpness = 0;                   // 0..1, unsharp mask strength in the foveation pass
+	// Decode every 8-bit RGBA/BGRA eye image as sRGB, also when the game's format did not say so (DXGI *_TYPELESS
+	// swapchains that hold sRGB data): fixes a washed-out picture; wrong for a game that really submits linear data.
+	bool force_srgb = false;
+};
+
 class EyeCompositor
 {
 public:
 	// out_w/out_h: encoded eye size (the encoder's configured size)
-	EyeCompositor(uint32_t out_w, uint32_t out_h);
+	EyeCompositor(uint32_t out_w, uint32_t out_h, CompositorOptions = {});
+	// The upscaler of the last compose(): "metalfx", "bilinear" or "" (none)
+	const char * last_upscaler() const;
 	~EyeCompositor();
 	EyeCompositor(const EyeCompositor &) = delete;
 	EyeCompositor & operator=(const EyeCompositor &) = delete;

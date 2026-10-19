@@ -86,6 +86,23 @@ struct Options {
     var vrBitrateMbps = LauncherSettings.vrDefaultBitrateMbps
     /// Settings > VR "Resolution per eye" / --vr-size WxH: "" = the headset's own stream size.
     var vrEyeSize = ""
+    /// Settings > VR "Codec" / --vr-codec auto|hevc|h264.
+    var vrCodec = LauncherSettings.VRCodec.automatic
+    /// Settings > VR "Let new headsets ask to pair" / --vr-pair-on-request, --no-vr-pair-on-request.
+    var vrPairOnRequest = true
+    /// Settings > VR "Game audio in the headset" / --no-vr-audio.
+    var vrHeadsetAudio = true
+    /// Settings > VR "Game": Steam app id offered in the headset's app list (0 = none).
+    var vrGameAppID = LauncherSettings.vrDefaultGameAppID
+    /// Settings > VR quality / codec / stream options (machine-side; see LauncherSettings).
+    var vrRenderScale = 1.0
+    var vrUpscaler = LauncherSettings.VRUpscaler.metalfx
+    var vrSharpness = 0.0
+    var vrForceSRGB = false
+    var vrKeyframeInterval = 0.0
+    var vrTCPOnly = false
+    /// Its name as the guest agent reported it (`game <appid> <name>`), if seen before.
+    var vrGameName: String?
     var selftestVR = false
     var shmMiB = 8192
     var gpuFlags: UInt32? = nil
@@ -129,6 +146,7 @@ struct Options {
     var selftestProvision = false
     var selftestMetalCache = false
     var selftestGameLayers = false
+    var selftestL10n = false
     var referenceDisk: String?
     /// --ssh-password DISK: print the disk's generated guest password (GuestPassword) and exit.
     var showSSHPassword: String?
@@ -151,6 +169,7 @@ struct Options {
                       [--vulkan-driver moltenvk|kosmickrisp] [--graphics-path dxmt|vulkan]
                       [--frame-latency | --no-frame-latency] [--lan-remote-play | --no-lan-remote-play]
                       [--vr | --no-vr] [--vr-bitrate MBIT] [--vr-size WxH]
+                      [--vr-codec auto|hevc|h264] [--no-vr-pair-on-request] [--no-vr-audio]
            steamac-vm --selftest-display [--headless] [--selftest-out DIR] [--display WxH]
            steamac-vm --selftest-overlay [--selftest-out DIR] [--display WxH]
            steamac-vm --selftest-stall [--selftest-out DIR] [--display WxH]
@@ -160,6 +179,7 @@ struct Options {
            steamac-vm --selftest-remote-play
            steamac-vm --selftest-metal-cache
            steamac-vm --selftest-game-layers
+           steamac-vm --selftest-l10n
            steamac-vm --selftest-graphics-path [--graphics-path dxmt|vulkan]
            steamac-vm --create-disk PATH [--branch stable|rc] [--home-gib N]
                       [--password PW] [--keep-cache] [--accept-eula]
@@ -255,6 +275,9 @@ struct Options {
                            ~/Library/Logs/es.fxgam.steamac/steamac-vrhost.log
       --vr-bitrate MBIT    total VR stream bitrate, 5-200 Mbit/s (default: Settings > VR, 50)
       --vr-size WxH        encoded size per eye (default: Settings > VR; the headset's own size)
+      --vr-codec C         auto (HEVC when the headset has it), hevc or h264 (default: Settings > VR)
+      --no-vr-pair-on-request  an unpaired headset is refused instead of opening pairing with a new PIN
+      --no-vr-audio        keep the guest's audio on the Mac while a headset is connected
       --selftest-vr        spawn/teardown self-test of steamac-vrhost (no VM, no headset)
 
     Creating a SteamOS disk (no Docker; the same code as Settings > Advanced "Create New Disk…"):
@@ -309,6 +332,8 @@ struct Options {
                            (default work/out/steamos.img, opened read-only), squashfs + CMS verification of
                            the cached bundle, cpio payload, SHA-512 crypt, desync progress parsing
       --selftest-metal-cache reproduce an inaccessible Metal module cache and verify startup recovery
+      --selftest-l10n      the bundle's ru and zh-Hans tables: present, the same keys, the same format
+                           arguments, the launcher's settings strings translated
       --resize-selftest S  S seconds after Steam is ready, resize the window 1600x1000 -> fullscreen ->
                            windowed -> 1280x800, wait for the guest's new scanout each time and dump
                            frames to <--frame-dump>-resize-N-*.png
@@ -416,6 +441,13 @@ struct Options {
                 let s = try value(a)
                 guard LauncherSettings.vrEyeSizeValid(s) else { throw OptionError("--vr-size: WxH, even sides, 256-4096") }
                 o.vrEyeSize = s
+            case "--vr-codec":
+                let s = try value(a)
+                guard let c = LauncherSettings.VRCodec(rawValue: s) else { throw OptionError("--vr-codec: auto, hevc or h264") }
+                o.vrCodec = c
+            case "--vr-pair-on-request": o.vrPairOnRequest = true
+            case "--no-vr-pair-on-request": o.vrPairOnRequest = false
+            case "--no-vr-audio": o.vrHeadsetAudio = false
             case "--selftest-vr": o.selftestVR = true
             case "--vulkan-driver":
                 let v = try value(a)
@@ -467,6 +499,7 @@ struct Options {
             case "--selftest-provision": o.selftestProvision = true
             case "--selftest-metal-cache": o.selftestMetalCache = true
             case "--selftest-game-layers": o.selftestGameLayers = true
+            case "--selftest-l10n": o.selftestL10n = true
             case "--reference-disk": o.referenceDisk = try value(a)
             case "--create-disk": o.createDisk = try value(a)
             case "--grow-disk": o.growDisk = try value(a)
@@ -524,7 +557,7 @@ struct Options {
 
     var isSelftest: Bool {
         selftestDisplay || selftestOverlay || selftestStall || selftestPill || selftestSettings || selftestProvision || selftestRemotePlay
-            || selftestMetalCache || selftestGameLayers || selftestVR || createDisk != nil || growDisk != nil
+            || selftestMetalCache || selftestGameLayers || selftestVR || selftestL10n || createDisk != nil || growDisk != nil
             || showSSHPassword != nil
     }
 
@@ -624,6 +657,15 @@ struct Options {
         if given("--vr") || given("--no-vr") { ov[.vrEnabled] = vr ? "--vr" : "--no-vr" } else { vr = s.vrEnabled }
         if given("--vr-bitrate") { ov[.vrBitrateMbps] = "--vr-bitrate \(vrBitrateMbps)" } else { vrBitrateMbps = s.vrBitrateMbps }
         if given("--vr-size") { ov[.vrEyeSize] = "--vr-size \(vrEyeSize)" } else { vrEyeSize = s.vrEyeSize }
+        if given("--vr-codec") { ov[.vrCodec] = "--vr-codec \(vrCodec.rawValue)" } else { vrCodec = s.vrCodec }
+        if given("--vr-pair-on-request") || given("--no-vr-pair-on-request") {
+            ov[.vrPairOnRequest] = vrPairOnRequest ? "--vr-pair-on-request" : "--no-vr-pair-on-request"
+        } else { vrPairOnRequest = s.vrPairOnRequest }
+        if given("--no-vr-audio") { ov[.vrHeadsetAudio] = "--no-vr-audio" } else { vrHeadsetAudio = s.vrHeadsetAudio }
+        vrGameAppID = s.vrGameAppID
+        vrGameName = s.gameName(vrGameAppID)
+        vrRenderScale = s.vrRenderScale; vrUpscaler = s.vrUpscaler; vrSharpness = s.vrSharpness; vrForceSRGB = s.vrForceSRGB
+        vrKeyframeInterval = s.vrKeyframeInterval; vrTCPOnly = s.vrTCPOnly
         if given("--no-sound") { ov[.soundEnabled] = "--no-sound" } else { sound = s.soundEnabled }
         if given("--no-gamepad") { ov[.virtualPad] = "--no-gamepad" }
         if let padType { ov[.padType] = "--pad \(padType.rawValue)" }

@@ -3,6 +3,8 @@
 #include "eye_compositor.h"
 
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #include <cstring>
 #include <stdexcept>
 
@@ -29,6 +31,7 @@ kernel void foveate(texture2d<float, access::read> source [[texture(0)]],
                     texture2d<float, access::write> chroma [[texture(2)]],
                     device const uint *bx [[buffer(0)]],
                     device const uint *by [[buffer(1)]],
+                    constant float &sharpness [[buffer(2)]],
                     uint2 gid [[thread_position_in_grid]],
                     uint2 lid [[thread_position_in_threadgroup]])
 {
@@ -51,6 +54,16 @@ kernel void foveate(texture2d<float, access::read> source [[texture(0)]],
 				++count;
 			}
 		colour /= max(count, 1u);
+		if (sharpness > 0) {
+			// unsharp mask against the neighbouring source pixels just outside this output pixel's band
+			int2 lim = int2(source.get_width() - 1, source.get_height() - 1);
+			int xm = int(xmin + xmax) / 2, ym = int(ymin + ymax) / 2;
+			float4 n = source.read(uint2(clamp(int2(int(xmin) - 1, ym), int2(0), lim)))
+			         + source.read(uint2(clamp(int2(int(xmax), ym), int2(0), lim)))
+			         + source.read(uint2(clamp(int2(xm, int(ymin) - 1), int2(0), lim)))
+			         + source.read(uint2(clamp(int2(xm, int(ymax)), int2(0), lim)));
+			colour = clamp(colour + sharpness * (colour - n / 4), 0.0, 1.0);
+		}
 		float3 rgb = float3(to_srgb(colour.r), to_srgb(colour.g), to_srgb(colour.b));
 		ycc = color_space * rgb + float3(0, 0.5, 0.5);
 		luma.write(float4(ycc.x), uint2(ix, iy));
@@ -98,10 +111,68 @@ struct EyeCompositor::impl
 	bool key_valid[2]{};
 	FoveationParams params[2];
 	int64_t gpu_ns = 0;
+	CompositorOptions opt;
+	// upscaling (render scale < 1): eye rect copied to crop[e], scaled into up[e]
+	id<MTLTexture> crop[2], up[2];
+	id<MTLFXSpatialScaler> fx;
+	MPSImageBilinearScale * bilinear = nil;
+	MTLPixelFormat crop_fmt = MTLPixelFormatInvalid;
+	uint32_t crop_w = 0, crop_h = 0;
+	const char * used = "";
+
+	bool prepare_upscale(MTLPixelFormat fmt, uint32_t w, uint32_t h);
 };
 
-EyeCompositor::EyeCompositor(uint32_t out_w, uint32_t out_h) : p(std::make_unique<impl>())
+bool EyeCompositor::impl::prepare_upscale(MTLPixelFormat fmt, uint32_t w, uint32_t h)
 {
+	if (crop[0] && crop_fmt == fmt && crop_w == w && crop_h == h)
+		return true;
+	fx = nil;
+	MTLTextureDescriptor * d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt width:w height:h mipmapped:NO];
+	d.usage = MTLTextureUsageShaderRead;
+	d.storageMode = MTLStorageModePrivate;
+	MTLPixelFormat up_fmt = MTLPixelFormatRGBA16Float; // linear, read by the foveation pass
+	MTLTextureUsage up_usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
+	if (opt.upscaler == CompositorOptions::Upscaler::metalfx)
+	{
+		MTLFXSpatialScalerDescriptor * sd = [MTLFXSpatialScalerDescriptor new];
+		sd.inputWidth = w;
+		sd.inputHeight = h;
+		sd.outputWidth = opt.upscale_w;
+		sd.outputHeight = opt.upscale_h;
+		sd.colorTextureFormat = fmt;
+		sd.outputTextureFormat = up_fmt;
+		sd.colorProcessingMode = MTLFXSpatialScalerColorProcessingModeLinear; // sRGB data is read through the sRGB view
+		if ([MTLFXSpatialScalerDescriptor supportsDevice:dev])
+			fx = [sd newSpatialScalerWithDevice:dev];
+		if (fx)
+		{
+			d.usage |= fx.colorTextureUsage;
+			up_usage |= fx.outputTextureUsage;
+		}
+	}
+	if (!fx && !bilinear)
+		bilinear = [[MPSImageBilinearScale alloc] initWithDevice:dev];
+	MTLTextureDescriptor * u = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:up_fmt width:opt.upscale_w
+	                                                                             height:opt.upscale_h mipmapped:NO];
+	u.usage = up_usage;
+	u.storageMode = MTLStorageModePrivate;
+	for (int e = 0; e < 2; e++)
+	{
+		crop[e] = [dev newTextureWithDescriptor:d];
+		up[e] = [dev newTextureWithDescriptor:u];
+		if (!crop[e] || !up[e])
+			return false;
+	}
+	crop_fmt = fmt;
+	crop_w = w;
+	crop_h = h;
+	return true;
+}
+
+EyeCompositor::EyeCompositor(uint32_t out_w, uint32_t out_h, CompositorOptions opt) : p(std::make_unique<impl>())
+{
+	p->opt = opt;
 	p->out_w = out_w;
 	p->out_h = out_h;
 	p->dev = MTLCreateSystemDefaultDevice();
@@ -135,16 +206,66 @@ int64_t EyeCompositor::last_gpu_ns() const
 	return p->gpu_ns;
 }
 
-bool EyeCompositor::compose(const EyeSource src[2], const EyeFov fov[2], const float eye_x[2], CVPixelBufferRef out[2],
+const char * EyeCompositor::last_upscaler() const
+{
+	return p->used;
+}
+
+bool EyeCompositor::compose(const EyeSource src_in[2], const EyeFov fov[2], const float eye_x[2], CVPixelBufferRef out[2],
                             FoveationParams params[2])
 {
 	@autoreleasepool
 	{
 		id<MTLCommandBuffer> cb = [p->queue commandBuffer];
+		CVMetalTextureRef planes[2][2] = {};
+		id<MTLTexture> in[2];
+		EyeSource src[2] = {src_in[0], src_in[1]};
+		bool ok = true;
+		p->used = "";
+		for (int e = 0; e < 2 && ok; e++)
+		{
+			MTLPixelFormat fmt = src[e].srgb || p->opt.force_srgb ? srgb_view((MTLPixelFormat)src[e].pixel_format) : (MTLPixelFormat)src[e].pixel_format;
+			MTLTextureDescriptor * d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+			                                                                              width:IOSurfaceGetWidth(src[e].surface)
+			                                                                             height:IOSurfaceGetHeight(src[e].surface)
+			                                                                          mipmapped:NO];
+			d.usage = MTLTextureUsageShaderRead;
+			in[e] = [p->dev newTextureWithDescriptor:d iosurface:src[e].surface plane:0];
+			ok = in[e] != nil;
+			// render scale below the headset's size: crop the eye rect, upscale it, foveate the upscaled image
+			if (ok && p->opt.upscale_w > src[e].w && p->opt.upscale_h > src[e].h)
+			{
+				ok = p->prepare_upscale(fmt, src[e].w, src[e].h);
+				if (!ok)
+					break;
+				id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+				[be copyFromTexture:in[e] sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(src[e].x, src[e].y, 0)
+				         sourceSize:MTLSizeMake(src[e].w, src[e].h, 1) toTexture:p->crop[e] destinationSlice:0
+				   destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+				[be endEncoding];
+				if (p->fx)
+				{
+					p->fx.colorTexture = p->crop[e];
+					p->fx.outputTexture = p->up[e];
+					p->fx.inputContentWidth = src[e].w;
+					p->fx.inputContentHeight = src[e].h;
+					[p->fx encodeToCommandBuffer:cb];
+					p->used = "metalfx";
+				}
+				else
+				{
+					[p->bilinear encodeToCommandBuffer:cb sourceTexture:p->crop[e] destinationTexture:p->up[e]];
+					p->used = "bilinear";
+				}
+				in[e] = p->up[e];
+				src[e].x = src[e].y = 0;
+				src[e].w = p->opt.upscale_w;
+				src[e].h = p->opt.upscale_h;
+			}
+		}
 		id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
 		[ce setComputePipelineState:p->pso];
-		CVMetalTextureRef planes[2][2] = {};
-		bool ok = true;
+		float sharp = p->opt.sharpness;
 		for (int e = 0; e < 2 && ok; e++)
 		{
 			impl::Key k{fov[e], eye_x[e], src[e].x, src[e].y, src[e].w, src[e].h, src[e].flip_y};
@@ -159,15 +280,6 @@ bool EyeCompositor::compose(const EyeSource src[2], const EyeFov fov[2], const f
 				p->key_valid[e] = true;
 			}
 			params[e] = p->params[e];
-
-			MTLPixelFormat fmt = src[e].srgb ? srgb_view((MTLPixelFormat)src[e].pixel_format) : (MTLPixelFormat)src[e].pixel_format;
-			MTLTextureDescriptor * d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
-			                                                                              width:IOSurfaceGetWidth(src[e].surface)
-			                                                                             height:IOSurfaceGetHeight(src[e].surface)
-			                                                                          mipmapped:NO];
-			d.usage = MTLTextureUsageShaderRead;
-			id<MTLTexture> in = [p->dev newTextureWithDescriptor:d iosurface:src[e].surface plane:0];
-			ok = in != nil;
 			for (int pl = 0; pl < 2 && ok; pl++)
 				ok = CVMetalTextureCacheCreateTextureFromImage(nullptr, p->cache, out[e], nullptr,
 				                                               pl ? MTLPixelFormatRG8Unorm : MTLPixelFormatR8Unorm,
@@ -176,11 +288,12 @@ bool EyeCompositor::compose(const EyeSource src[2], const EyeFov fov[2], const f
 				                                               &planes[e][pl]) == kCVReturnSuccess;
 			if (!ok)
 				break;
-			[ce setTexture:in atIndex:0];
+			[ce setTexture:in[e] atIndex:0];
 			[ce setTexture:CVMetalTextureGetTexture(planes[e][0]) atIndex:1];
 			[ce setTexture:CVMetalTextureGetTexture(planes[e][1]) atIndex:2];
 			[ce setBuffer:p->bounds[e][0] offset:0 atIndex:0];
 			[ce setBuffer:p->bounds[e][1] offset:0 atIndex:1];
+			[ce setBytes:&sharp length:sizeof sharp atIndex:2];
 			[ce dispatchThreadgroups:MTLSizeMake((p->out_w + 7) / 8, (p->out_h + 7) / 8, 1)
 			   threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
 		}

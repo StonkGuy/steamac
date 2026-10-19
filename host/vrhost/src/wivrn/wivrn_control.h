@@ -21,6 +21,17 @@ public:
 	int unpair(const std::string & name) override;
 	uint32_t bitrate_bps() const override { return s.bitrate_bps(); }
 	Counters counters() const override;
+	bool set_bitrate(uint32_t bps) override
+	{
+		s.set_bitrate(bps);
+		return true;
+	}
+	bool request_refresh_rate(float hz) override { return s.request_refresh_rate(hz); }
+	float refresh_rate() const override { return s.refresh_rate(); }
+	std::string codec_name() const override { return s.codec_name(); }
+	std::optional<Battery> battery() const override;
+	std::optional<PairingRequest> pairing_request() const override;
+	AppRequest app_request() const override;
 
 private:
 	WivrnSession & s;

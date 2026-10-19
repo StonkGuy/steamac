@@ -18,6 +18,7 @@
 #include <future>
 #include <sys/mman.h>
 #include <filesystem>
+#include <cmath>
 #include <cstdio>
 #include <thread>
 #include <unistd.h>
@@ -202,6 +203,17 @@ int main()
 {
 	signal(SIGPIPE, SIG_IGN);
 	{
+		// Wi-Fi-like link (fake_headset Network): 8 ms + up to 10 ms jitter, 1 % loss, 100 Mbit/s, a 50 ms loss burst
+		// every second: every loss is answered with an IDR and decoding carries on.
+		Server srv({.encryption = WivrnConfig::Encryption::disabled});
+		auto r = run_fake_headset({.port = srv.session.port(), .frames = 150,
+		                           .net = {.delay_ms = 8, .jitter_ms = 10, .loss_pct = 1, .mbps = 100, .burst_every_s = 1, .burst_ms = 50}});
+		print("wifi-like", r);
+		CHECK(r.error.empty() and r.decoded[0] >= 150 and r.decoded[1] >= 150);
+		CHECK(r.net_dropped > 0 and r.idr[0] > 1); // losses happened and were recovered by IDRs
+		srv.wait_disconnect();
+	}
+	{
 		// 1. encryption disabled, a lost frame on stream 0
 		Server srv({.encryption = WivrnConfig::Encryption::disabled});
 		int port = srv.session.port();
@@ -305,6 +317,17 @@ int main()
 		CHECK(wrong.decoded[0] == 0);
 		CHECK(srv.session.stats().paired == 1);
 		srv.wait_disconnect();
+
+		// 5b. PIN guessing is throttled: after a second wrong PIN the next attempt is refused for a while, even with
+		// the right PIN (WiVRn itself has no limit; 6 digits fall to an online search without one)
+		auto wrong2 = run_fake_headset({.port = port, .frames = 5, .timeout_ms = 5000, .pin = "222222"});
+		CHECK(wrong2.error == "Incorrect PIN");
+		srv.wait_disconnect();
+		auto throttled = run_fake_headset({.port = port, .frames = 5, .timeout_ms = 5000, .pin = "481516"});
+		print("throttled", throttled);
+		CHECK(not throttled.error.empty() and throttled.decoded[0] == 0);
+		CHECK(srv.session.stats().paired == 1);
+		srv.wait_disconnect();
 	}
 	{
 		// 6. encryption on, pairing off: the paired headset connects, an unknown one gets pairing_disabled
@@ -374,5 +397,20 @@ int main()
 	}
 	std::filesystem::remove_all(dir_template);
 	test_audio();
+	{
+		// 9. headset_info from the network is checked: a 0x0 stream is refused (the session keeps serving), a NaN
+		// refresh rate falls back to an offered one instead of reaching the pacer (1e9 / NaN -> integer: undefined)
+		Server srv({.encryption = WivrnConfig::Encryption::disabled});
+		auto zero = run_fake_headset({.port = srv.session.port(), .frames = 5, .eye_width = 0, .eye_height = 0, .timeout_ms = 3000});
+		CHECK(not zero.error.empty() and not zero.got_stream_description);
+		auto nan = run_fake_headset({.port = srv.session.port(), .frames = 10, .refresh_hz = std::nanf("")});
+		print("nan refresh", nan);
+		CHECK(nan.error.empty() and nan.decoded[0] >= 10);
+		CHECK(srv.session.refresh_rate() == 0 or std::isfinite(srv.session.refresh_rate()));
+		srv.wait_disconnect();
+		// an audio format the bridge cannot serve (50 Hz: 0-frame packets) is not taken: no audio stream at all
+		auto slow = run_fake_headset({.port = srv.session.port(), .frames = 5, .speaker_channels = 2, .speaker_rate = 50});
+		CHECK(slow.error.empty() and not slow.got_audio_description);
+	}
 	return test_result("loopback");
 }

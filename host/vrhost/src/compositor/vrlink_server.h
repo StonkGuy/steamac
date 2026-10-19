@@ -65,7 +65,8 @@ public:
 class CompositorBridge
 {
 public:
-	CompositorBridge(uint32_t out_w, uint32_t out_h, EyeEncoderSink & encoder);
+	CompositorBridge(uint32_t out_w, uint32_t out_h, EyeEncoderSink & encoder, CompositorOptions = {});
+	const char * last_upscaler() const { return compositor.last_upscaler(); }
 	void operator()(const LinkFrame & frame);
 	// timings of the last frame (host ns)
 	struct Timing

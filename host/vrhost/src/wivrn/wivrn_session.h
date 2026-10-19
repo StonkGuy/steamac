@@ -13,8 +13,11 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace vrhost
 {
@@ -36,6 +39,27 @@ struct WivrnConfig
 	uint32_t bitrate_bps = 50'000'000;
 	// 0 = use the headset's stream_eye_width/height
 	uint32_t width = 0, height = 0;
+	// An unpaired headset that connects while pairing is off opens pairing with a fresh PIN (on_pin) and is asked for
+	// it, instead of being refused (WiVRn refuses; its dashboard then offers "enable pairing"). The PIN is still
+	// checked by WiVRn's SMP exchange, so nothing pairs without it.
+	bool pair_on_request = false;
+	// Render scale (Settings > VR "Render resolution"): the game is asked for the headset's render size times this;
+	// below 1 the compositor upscales (CompositorOptions), above 1 is supersampling. 1 = the headset's size.
+	float render_scale = 1;
+	// Encoder options (Settings > VR "Video codec"): see EncoderConfig.
+	float keyframe_interval_s = 0; // > 0: an IDR at least this often (else only when the headset reports a loss)
+	bool prioritize_speed = false;
+	// Video codec: automatic = HEVC when the headset lists it, else H.264 (WiVRn's default choice for these clients).
+	enum class Codec
+	{
+		automatic,
+		hevc,
+		h264,
+	} codec = Codec::automatic;
+	// The headset's app launcher (WiVRn application_list / start_app): id + name. Start requests are only counted
+	// (WivrnSession::app_request) for whoever can start the app (the launcher, through the control socket).
+	std::vector<std::pair<std::string, std::string>> applications;
+	std::function<void(const std::string & pin)> on_pin = nullptr; // pairing PIN changed ("" = pairing off)
 	std::function<void(const std::string &)> log = nullptr;
 };
 
@@ -75,6 +99,32 @@ public:
 	std::string advertised_name() const; // Bonjour service name ("" when not advertised)
 	uint32_t bitrate_bps() const;        // configured total bitrate
 	std::string known_keys_file() const; // paired-headset store this session uses
+	// Total bitrate at run time (control socket "bitrate"): the running encoders and the next connections.
+	void set_bitrate(uint32_t bps);
+	// Asks the connected headset to switch its display refresh rate (WiVRn refresh_rate_change); false when no
+	// headset is connected or it does not offer that rate.
+	bool request_refresh_rate(float hz);
+	float refresh_rate() const;      // current headset refresh rate (0 = not connected)
+	std::string codec_name() const;  // "hevc" | "h264" while connected, else ""
+	struct Battery
+	{
+		float charge; // 0..1
+		bool charging;
+	};
+	std::optional<Battery> battery() const; // last battery packet of the connected headset
+	struct PairingRequest
+	{
+		std::string name;
+		int64_t at = 0;       // unix seconds
+		bool refused = false; // pairing was off and pair_on_request too
+	};
+	std::optional<PairingRequest> pairing_request() const; // last unpaired headset that connected
+	struct AppRequest
+	{
+		std::string id;
+		uint64_t seq = 0; // counts start_app requests; 0 = none yet
+	};
+	AppRequest app_request() const;
 	const WivrnStats & stats() const;
 	static uint64_t protocol_version();
 

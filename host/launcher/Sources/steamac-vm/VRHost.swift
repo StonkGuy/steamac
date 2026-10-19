@@ -67,11 +67,41 @@ enum VRHost {
     }
 
     /// What Settings > VR passes to the host of this boot: the control socket the panel reads
-    /// (VRControl), the total bitrate and, unless the headset's own size is used, the size per eye.
+    /// (VRControl), the total bitrate and, unless the headset's own size is used, the size per eye; the codec
+    /// unless automatic; pairing on request; the game for the headset's app list (WiVRn's "Start app").
     static func hostArgs(_ o: Options, controlSocket: String = VRControl.socketPath) -> [String] {
         var a = ["--control-socket", controlSocket, "--bitrate", String(o.vrBitrateMbps * 1_000_000)]
         if !o.vrEyeSize.isEmpty { a += ["--size", o.vrEyeSize] }
+        if o.vrCodec != .automatic { a += ["--codec", o.vrCodec.rawValue] }
+        if o.vrPairOnRequest { a.append("--pair-on-request") }
+        if o.vrRenderScale != 1 {
+            a += ["--render-scale", String(format: "%.2f", o.vrRenderScale)]
+            if o.vrUpscaler != .metalfx { a += ["--upscaler", o.vrUpscaler.rawValue] }
+        }
+        if o.vrSharpness > 0 { a += ["--sharpness", String(format: "%.2f", o.vrSharpness)] }
+        if o.vrForceSRGB { a.append("--force-srgb") }
+        if o.vrKeyframeInterval > 0 { a += ["--keyframe-interval", String(format: "%g", o.vrKeyframeInterval)] }
+        if o.vrTCPOnly { a.append("--tcp-only") }
+        if o.vrGameAppID > 0 { a += ["--app", "\(o.vrGameAppID)=\(gameName(o.vrGameAppID, known: o.vrGameName))"] }
         return a
+    }
+
+    /// The name the headset's app list shows (English: the headset has no access to the launcher's language).
+    static func gameName(_ appID: Int, known: String?) -> String {
+        if let n = known, !n.isEmpty { return n }
+        return appID == LauncherSettings.vrDefaultGameAppID ? "VRChat" : "Steam app \(appID)"
+    }
+
+    /// Host -> guest request line (fx.progress), set by main.swift for a VR boot; nil = no running guest agent.
+    nonisolated(unsafe) static var guestSend: ((String) -> Bool)?
+
+    /// Starts a Steam game in its VR launch mode in the guest (fx-progress-agent `launch-vr`, which runs
+    /// `steam -ifrunning steam://launch/<id>/vr`). False when the VM is not running with VR.
+    @discardableResult
+    static func launchInVR(_ appID: Int) -> Bool {
+        guard appID > 0, let send = guestSend else { return false }
+        log("vr: start app \(appID) in VR")
+        return send("launch-vr \(appID)")
     }
 
     /// A new VR audio region attached to libkrun (local output silenced while a headset plays), or -1 with
@@ -223,12 +253,48 @@ enum VRSelfTest {
         check(Options.vrArg(true)?.key == "steamac.vr" && Options.vrArg(true)?.value == "1", "VR on must map to steamac.vr=1")
         check(Options.vrArg(false) == nil, "VR off must add no kernel key")
         var enc = Options()
-        check(VRHost.hostArgs(enc, controlSocket: "/s") == ["--control-socket", "/s", "--bitrate", "50000000"],
+        check(VRHost.hostArgs(enc, controlSocket: "/s") == ["--control-socket", "/s", "--bitrate", "50000000",
+                                                            "--pair-on-request", "--app", "438100=VRChat"],
               "default host arguments: \(VRHost.hostArgs(enc, controlSocket: "/s"))")
         enc.vrBitrateMbps = 80
         enc.vrEyeSize = "1440x1584"
-        check(VRHost.hostArgs(enc, controlSocket: "/s").suffix(4) == ["--bitrate", "80000000", "--size", "1440x1584"],
-              "host arguments with bitrate and size: \(VRHost.hostArgs(enc, controlSocket: "/s"))")
+        enc.vrCodec = .h264
+        enc.vrPairOnRequest = false
+        enc.vrGameAppID = 620
+        enc.vrGameName = "Portal 2"
+        check(VRHost.hostArgs(enc, controlSocket: "/s").suffix(8) == ["--bitrate", "80000000", "--size", "1440x1584",
+                                                                      "--codec", "h264", "--app", "620=Portal 2"],
+              "host arguments with bitrate, size, codec, game: \(VRHost.hostArgs(enc, controlSocket: "/s"))")
+        enc.vrRenderScale = 0.6
+        enc.vrUpscaler = .bilinear
+        enc.vrSharpness = 0.25
+        enc.vrForceSRGB = true
+        enc.vrKeyframeInterval = 2
+        enc.vrTCPOnly = true
+        let q = Array(VRHost.hostArgs(enc, controlSocket: "/s").drop { $0 != "--render-scale" })
+        check(q == ["--render-scale", "0.60", "--upscaler", "bilinear", "--sharpness", "0.25", "--force-srgb",
+                    "--keyframe-interval", "2", "--tcp-only", "--app", "620=Portal 2"],
+              "quality/codec/stream arguments: \(q)")
+        let presets = LauncherSettings.VRPreset.allCases
+        check(presets.allSatisfy { $0.renderScale == 1 } && presets.map(\.bitrateMbps) == [30, 40, 50, 80] && LauncherSettings.VRPreset.high.bitrateMbps == LauncherSettings.vrDefaultBitrateMbps
+              && presets.allSatisfy { LauncherSettings.vrRenderScaleRange.contains($0.renderScale)
+                                      && LauncherSettings.vrBitrateRange.contains($0.bitrateMbps) }, "VR presets")
+        enc.vrGameAppID = 0
+        check(!VRHost.hostArgs(enc).contains("--app") && VRHost.gameName(7, known: nil) == "Steam app 7", "no game / unnamed game")
+        check(VRHost.launchInVR(438100) == false, "launch in VR without a guest must be refused")
+        var sent: [String] = []
+        VRHost.guestSend = { sent.append($0); return true }
+        check(VRHost.launchInVR(438100) && !VRHost.launchInVR(0) && sent == ["launch-vr 438100"], "launch-vr request: \(sent)")
+        VRHost.guestSend = nil
+        // the relay: first reply = baseline, a newer start request starts the game, the PIN only while pairing
+        func reply(_ enc: String, _ pin: String, _ seq: UInt64?) -> VRRelay.Reply {
+            VRRelay.Reply(encryption: enc, pin: pin, app_request: seq.map { .init(id: "438100", seq: $0) })
+        }
+        let r0 = VRRelay.actions(reply("enabled", "", 3), lastSeq: nil)
+        let r1 = VRRelay.actions(reply("pairing", "123456", 4), lastSeq: 3)
+        let r2 = VRRelay.actions(nil, lastSeq: 4)
+        check(r0.start == nil && r0.seq == 3 && r0.pin == nil && r1.start == 438100 && r1.seq == 4 && r1.pin == "123456"
+              && r2.start == nil && r2.seq == 4 && r2.pin == nil, "relay actions: \(r0) \(r1) \(r2)")
         check(LauncherSettings.vrEyeSizes.allSatisfy(LauncherSettings.vrEyeSizeValid)
               && !["", "1440", "1441x1584", "8x8", "axb"].contains(where: LauncherSettings.vrEyeSizeValid), "eye size validation")
         failures += VRPanelSelfTest.text()
@@ -276,5 +342,66 @@ enum VRSelfTest {
         try? FileManager.default.removeItem(atPath: scratch)
         log(failures == 0 ? "selftest-vr: PASS" : "selftest-vr: \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
+    }
+}
+
+/// A VR boot's link between the host's control socket and the rest of the launcher, without Settings open:
+/// every 2 s (VR boots only; nothing runs otherwise) it reads the host's status and
+/// * starts the game the headset picked in its WiVRn app list (`app_request` seq moved on) in the guest;
+/// * reports the pairing PIN while pairing is open (window subtitle), so a headset that asks for a PIN finds
+///   it on the VM window and not only in Settings > VR.
+@MainActor
+final class VRRelay {
+    struct Reply: Decodable {
+        struct AppRequest: Decodable { var id: String; var seq: UInt64 }
+        var encryption: String
+        var pin: String
+        var app_request: AppRequest?
+    }
+
+    /// What one status reply asks for: the app to start (a new request since `lastSeq`) and the PIN to show.
+    nonisolated static func actions(_ r: Reply?, lastSeq: UInt64?) -> (start: Int?, seq: UInt64?, pin: String?) {
+        guard let r else { return (nil, lastSeq, nil) }
+        let pin = r.encryption == "pairing" && !r.pin.isEmpty ? r.pin : nil
+        guard let a = r.app_request else { return (nil, lastSeq, pin) }
+        // the first reply only sets the baseline: a request from before this launcher run is not repeated
+        let start = lastSeq != nil && a.seq > lastSeq! ? Int(a.id) : nil
+        return (start, a.seq, pin)
+    }
+
+    private var timer: Timer?
+    private var lastSeq: UInt64?
+    private var shownPIN: String?
+    private var busy = false
+    private let socketPath: String
+    private let onPIN: (String?) -> Void
+
+    init(socketPath: String = VRControl.socketPath, onPIN: @escaping (String?) -> Void) {
+        self.socketPath = socketPath
+        self.onPIN = onPIN
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+    }
+
+    deinit { timer?.invalidate() }
+
+    private func tick() {
+        guard VRHost.running != nil, !busy else { return }
+        busy = true
+        let path = socketPath
+        Task.detached {
+            let reply = VRControl.request("status", path: path).flatMap { try? JSONDecoder().decode(Reply.self, from: $0) }
+            await MainActor.run {
+                self.busy = false
+                let a = Self.actions(reply, lastSeq: self.lastSeq)
+                self.lastSeq = a.seq
+                if let id = a.start { VRHost.launchInVR(id) }
+                if a.pin != self.shownPIN {
+                    self.shownPIN = a.pin
+                    self.onPIN(a.pin)
+                }
+            }
+        }
     }
 }

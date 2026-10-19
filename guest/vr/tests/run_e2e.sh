@@ -50,4 +50,13 @@ for profile in ${2:-touch index}; do
   fi
 done
 done
+# the headset leaves mid-game and comes back: the HMD stays (standby), the game keeps its frames
+sock=$tmp/vr-standby.sock log=$tmp/host-standby.log
+"$out/vr-fakehost" --socket "$sock" --script "$here/data/script-standby.txt" --log "$log" --once &
+fh=$!
+i=0
+while [ ! -S "$sock" ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+STEAMAC_VR_SOCKET=$sock "$out/vr-testapp" "$out/runtime" "$here/data" --standby 2>"$tmp/app-standby.err" || {
+  cat "$tmp/app-standby.err"; echo "FAIL e2e (standby)"; exit 1; }
+wait $fh
 echo "PASS e2e"

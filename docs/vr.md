@@ -1,27 +1,102 @@
 # VR (experimental)
 
-**Status: experimental, M0–M3 implemented and M4 integration in progress.** The host, guest OpenVR runtime, input/pose
-path and Proton DXMT texture submit have offline fake-host coverage. No headset-backed VRChat session has been run;
-M4 guest/FEX and host-launcher integration remain open.
+Play a game in VR on a standalone headset streamed from the Mac. The Mac runs `steamac-vrhost`, a WiVRn-compatible
+server; the headset runs the stock **WiVRn v26.9** client. Inside SteamOS, the game talks to this fork's OpenVR runtime
+through a patched Proton `vrclient_x64`, and its eye images go over the DXMT path to the Mac, where they are encoded
+with VideoToolbox and streamed.
 
-## Using the launcher
+**Status:** experimental, off by default, on this branch only. Verified on one Mac (M2 MacBook Air, 16 GB, macOS 27)
+with a Meta Quest 3 over Wi-Fi: VRChat passes EAC (`301`), enters a world in VR, head tracking is world-locked, the
+controllers and hand menu work, game audio plays in the headset (2026-10-17). The reconnect behaviour below was
+verified with a synthetic Quest 3 client in the VM, not yet with the headset.
 
-1. Install the WiVRn v26.9 client for the headset as described below, and put the Mac and headset on the same LAN.
-2. In Launcher Settings → VR, enable **VR (experimental)**. This setting is off by default and is available only with
-   the DXMT graphics path. Start the VM; the launcher starts the separate `steamac-vrhost` process with it.
-3. Use the panel's status and pairing controls. When pairing is open, enter the displayed six-digit PIN in WiVRn on the
-   headset. Paired headsets reconnect with encryption enabled; use the panel to unpair a headset or open pairing for
-   another one. Resolution and bitrate changes are used the next time the host starts with the VM.
-4. The panel reports headset connection and host encoder/stream statistics. If the host is not running, it can still
-   show and remove the saved paired-headset list; pairing and live status require the host.
+## What it takes
 
-**Limitations:** VR is experimental and off by default. The guest OpenVR runtime and the Proton `vrclient_x64` path are
-not included in the end-user launcher, so a game cannot currently submit eye frames through this UI. The headset server
-and encoder can be tested independently with `--testpattern`; the integrated host frame path is for development and is
-not yet an end-user in-game VR feature. Use a WiVRn v26.9 client only; newer protocol versions are incompatible. The
-encoder must meet the headset's refresh-rate budget; reduce per-eye resolution or refresh rate if frames cannot keep up.
+| you need | notes |
+|---|---|
+| the DXMT graphics path | VR is available only with Settings > Advanced > Graphics path *DXMT* |
+| the patched FEX and VRChat's launch options | as for flat play: see `fex-eac/README.md` |
+| a headset with the **WiVRn v26.9** client | Meta Quest 3 verified. Quest 2/3S/Pro and Pico use the same client but are untested. Other WiVRn versions cannot connect |
+| Mac and headset on the same network | allow `steamac-vrhost` in System Settings > Privacy & Security > Local Network when macOS asks |
+| little else running on the Mac | VRChat in VR peaked at about 18 GiB of VM footprint on a 16 GB Mac (8 GiB guest) |
 
-## What works (M0)
+## Setup
+
+1. Install WiVRn on the headset: `WiVRn-release.apk` from the [v26.9 release](https://github.com/WiVRn/WiVRn/releases/tag/v26.9)
+   with `adb install` (developer mode). If the Store version is also installed, turn off its automatic updates: a newer
+   client will not connect.
+2. In the launcher, Settings > VR: turn on **VR (experimental)**, then start (or restart) the VM. The launcher starts
+   `steamac-vrhost` with it.
+3. Start WiVRn on the headset. The Mac appears in its server list (or add it by IP address, port 9757).
+
+### Pairing
+
+The first connection of a headset asks for a six-digit PIN. With **Let new headsets ask to pair** (default on), a new
+headset opens pairing by itself; the PIN is shown in Settings > VR and in the VM window's title. Type it into WiVRn on
+the headset. The PIN never crosses the network (WiVRn's SMP check), and the link is encrypted (AES-128). Paired
+headsets reconnect without a PIN. With the option off, new headsets are refused and the panel offers **Pair this
+headset**. **Unpair** removes a headset (entries of the same name are grouped).
+
+### Starting a game
+
+**Start in VR** (Settings > VR > Game) starts the game's VR mode in the guest (`steam://launch/<id>/vr`); the preset
+Steam app ID is VRChat's (438100). The same game is listed in WiVRn's app list on the headset, and picking it there
+starts it the same way. Starting it again while it runs does nothing.
+
+## VR panel options
+
+Settings > VR. Options apply at the next VM start unless noted. Refresh rate, resolution scale and microphone are set
+on the headset in the WiVRn app, as in WiVRn; the panel shows them read-only.
+
+| option | what it does | default |
+|---|---|---|
+| Preset | Low / Medium / High / Ultra set bitrate (30 / 40 / 50 / 80 Mbit/s) and sharpening; editing either makes it Custom | High |
+| Render resolution | 50-150 % of the headset's render size; below 100 % the Mac upscales before encoding (Upscaler: MetalFX spatial or bilinear) | 100 % |
+| Sharpening | sharpening applied before encoding | off (Low and Medium add some) |
+| Treat game images as sRGB | for games whose 8-bit images hold sRGB data without the sRGB format (colours look washed out) | off |
+| Codec | Automatic (HEVC when the headset supports it), HEVC or H.264; hardware encoder | Automatic |
+| Bitrate | total stream bitrate; applies at once to a running host (the headset can still lower it) | 50 Mbit/s |
+| Keyframe interval | periodic key frames; by default a key frame is sent only when the headset reports a loss | when needed |
+| Resolution per eye | stream size per eye | the headset's request |
+| TCP only | stream over TCP instead of UDP | off |
+| Steam app ID | the game for Start in VR and the headset's app list | 438100 |
+| Game audio in the headset | the guest's sound plays in the headset and the headset microphone goes to the guest | on |
+| Show live statistics | game fps, copy / compose / encode / decode times, bitrate, lost frames | off |
+
+The panel also shows headset connection, battery, codec and encryption. Without a running host it can still list and
+remove paired headsets.
+
+## Headset connect, disconnect and reconnect
+
+- The game can start before the headset connects: it sees a present headset in standby with a Quest 3 view, and
+  frames start when the headset connects.
+- When the headset disconnects (taken off and asleep, out of range, WiVRn closed), the game keeps running.
+- When it reconnects, frames resume within a few seconds. A reconnect with a different stream size or refresh rate is
+  accepted; the game keeps its render size until it restarts.
+
+## Performance and limits
+
+Measured on the M2 MacBook Air (fanless), VRChat, synthetic Quest 3 client and live headset sessions. Scope: VRChat
+only.
+
+| measurement | result |
+|---|---|
+| frame rate, cool start | about 20 fps, game-submit to sent about 111 ms (p50) |
+| frame rate after 2-3 minutes | 14-16 fps, about 130-140 ms, then steady (thermal throttling, see below) |
+| encode, both eyes, 1440x1584 at 72 Hz | 12.1 ms p50 (fits the 13.9 ms frame budget) |
+| exporter copy and send per frame | about 1.3 ms |
+
+- **Thermal throttling on fanless Macs.** In VR the GPU runs at 99-100 % from about minute 3 (flat play of the same
+  world stays at 64-83 %). A fanless Mac reaches macOS's "fair" thermal state after about 2 minutes and frame rate drops
+  from about 20 to 14-16 fps. Cooling the Mac (a stand, a fan) keeps the higher rate longer. Macs with fans are untested.
+- The game, not the link, sets the frame rate: the stream path's own cost stays about 1 ms per frame.
+- Quest 3's default stream size at 90 Hz does not fit the hardware encoder (about 20 ms per eye pair against an 11.1 ms
+  budget); 72 Hz at about 1440x1584 per eye does. Set the refresh rate on the headset.
+- WiVRn v26.9 clients only.
+- Controller render models are not provided (VRChat draws its own hands; only SteamVR-style overlays would show them).
+- One game verified (VRChat). Other OpenVR games are untested.
+
+## How the host works
 
 * `steamac-vrhost` speaks the **WiVRn v26.9** protocol (hash `fc26e619b7ab80f8`), using WiVRn's own protocol,
   serialization and socket code, vendored unmodified (`host/vrhost/third_party/wivrn/UPSTREAM.md`).
@@ -47,11 +122,6 @@ encoder must meet the headset's refresh-rate budget; reduce per-eye resolution o
 * Test pattern: a sky sphere with a 15° grid, coloured 45° sectors, a yellow horizon and a red marker straight ahead,
   rendered by a Metal compute kernel for the pose the frame is sent with, so it stays **world-locked** while the head
   turns (rotation; the sphere is at infinity, so walking does not move it). The frame number is encoded in the top-left
-  corner (16 blocks) for automated checks.
-
-Implemented since M0: PIN pairing/encryption, WiVRn's pacer, compositor foveation, audio transport, DXMT game-frame
-path (M1), guest OpenVR runtime/input (M2/M3), and Proton's DXMT texture-export patch (M4). The Proton bootstrap
-`IVRCompositor_028` adapter and M4 guest/FEX end-to-end run remain pending.
 
 ## Licence
 
@@ -104,10 +174,6 @@ The two VideoToolbox sessions share one media engine (about 350 Mpixel/s of HEVC
 parallel saves little. Quest 3's default stream size at 90 Hz does not fit; 72 Hz at about 1440×1584 per eye does. The
 stream size is the headset's request; `--size WxH` overrides it.
 
-## Real Linux client test
-
-The reproducible Fedora/x86 real-client procedure and current blockers are tracked in [`vr-testing.md`](vr-testing.md).
-It is not yet verified end-to-end; the fake-headset loopback results above are not a substitute.
 
 ## Testing with a headset
 
@@ -135,26 +201,3 @@ accepts new headsets when one is already paired).
 What to check: the pattern appears; the red marker stays at the same place in the room while you turn your head; the
 `steamac-vrhost` log prints frames, feedback and tracking counts every 5 s, the last encode time and the headset's
 decode time.
-
-## M4: headset-less VRChat path checklist
-
-Complete in order; the VM step is gated by the coordinator's memory guard and must not be attempted until cleared.
-
-* **Encode budget sweep** (pending, needs an idle Mac): the knob matrix above × resolution/refresh, H.264 vs HEVC,
-  foveated stream sizes from M1.
-
-- [x] Extract candidate OpenVR interface versions from installed VRChat binaries and Unity/IL2CPP metadata, without
-  launching the game. Inventory and caveat: `docs/vr-interfaces.md` and local provenance
-  `/Volumes/LEANWORK/vr-vrchat-interfaces.txt`.
-- [x] Implement DXMT D3D11 texture export in the pinned Proton `vrclient_x64` path and add a COM fake-texture test,
-  including array texture slices and a stock-Proton negative control.
-- [ ] Integrate M6 version adapters, especially `IVRCompositor_028`, and run the real Proton registry bootstrap path
-  (no manual registry-state bypass); verify `HmdSystemFactory` and `VRClientCoreFactory` resolve.
-- [ ] Run the Proton test and `guest/vr` fakehost/testapp under FEX in the VM; no VRChat launch is needed for this gate.
-- [ ] Verify the installer/launcher sets `PROTON_VR_RUNTIME`, installs the rebuilt PE DLL and Unix library, and restores
-  stock Proton files when VR is disabled.
-- [ ] Connect the host pipeline and fake headset, then confirm frame arrival, input/pose, haptics and clean shutdown.
-- [ ] Only after those pass, request explicit coordination for a VRChat live run. Before starting, confirm Steam does not
-  say the account is playing elsewhere; launch in the background without focus stealing. No debugger/ptrace/perf tools.
-
-Interfaces between components: `docs/vr-interfaces.md`. Guest build/test details: `docs/vr-guest.md`.

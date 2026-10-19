@@ -7,6 +7,7 @@
 #include "session/vr_session.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -35,7 +36,7 @@ public:
 	};
 	struct Counters
 	{
-		uint64_t frames_sent = 0, idr_sent = 0, bytes_sent = 0;
+		uint64_t frames_sent = 0, idr_sent = 0, idr_requests = 0, bytes_sent = 0;
 		int64_t last_encode_ns = 0, last_decode_ns = 0; // decode: headset-reported, 0 = unknown
 	};
 
@@ -52,5 +53,30 @@ public:
 	virtual int unpair(const std::string & name) = 0; // "" = all; returns how many were removed
 	virtual uint32_t bitrate_bps() const = 0;          // configured total bitrate
 	virtual Counters counters() const = 0;
+	// Optional run-time controls and live status (control socket "bitrate", "refresh", status fields); the defaults
+	// mean "not supported by this adapter".
+	virtual bool set_bitrate(uint32_t bps) { return false; }
+	virtual bool request_refresh_rate(float hz) { return false; } // false: no headset, rate not offered, unsupported
+	virtual float refresh_rate() const { return 0; }               // current headset refresh rate (0 = unknown)
+	virtual std::string codec_name() const { return ""; }
+	struct Battery
+	{
+		float charge; // 0..1
+		bool charging;
+	};
+	virtual std::optional<Battery> battery() const { return std::nullopt; }
+	struct PairingRequest
+	{
+		std::string name;
+		int64_t at = 0;       // unix seconds
+		bool refused = false;
+	};
+	virtual std::optional<PairingRequest> pairing_request() const { return std::nullopt; }
+	struct AppRequest
+	{
+		std::string id;
+		uint64_t seq = 0; // 0 = none yet
+	};
+	virtual AppRequest app_request() const { return {}; }
 };
 } // namespace vrhost

@@ -62,6 +62,7 @@ struct wmtr_vr {
   _Atomic int quit;
   struct vrl_state state;
   struct vrl_timing timing;
+  struct wmtr_vr_cadence cadence; /* SVR_FRAME ids/times (wmtr_vr_frame_cadence), under `lock` */
   struct vrl_poses poses;
   struct vrl_input input;
   _Atomic uint64_t queries, haptics;
@@ -234,6 +235,31 @@ reader_main(void *arg) {
   return NULL;
 }
 
+void
+wmtr_vr_frame_cadence(struct wmtr_vr_cadence *c, uint64_t host_id, int64_t host_wake, int64_t host_display,
+                      uint64_t guest_last, int64_t now, int64_t period, uint64_t *id, int64_t *wake, int64_t *display) {
+  int fresh = host_id && host_id != c->host_last && host_wake > now - 4 * period; /* a new, current pacer frame */
+  if (fresh) {
+    if (host_id < c->host_last || (int64_t)host_id + c->offset <= (int64_t)guest_last)
+      c->offset = (int64_t)guest_last + 1 - (int64_t)host_id; /* host restarted: continue after the guest's id */
+    c->host_last = host_id;
+    *id = (uint64_t)((int64_t)host_id + c->offset);
+    *wake = host_wake, *display = host_display;
+  } else {
+    /* no new host frame: the next local one, a period after the last, never in the past by more than a frame */
+    *id = guest_last + 1;
+    int64_t w = c->last_wake ? c->last_wake + period : now;
+    if (w < now - period) w = now;
+    *wake = w, *display = w + 2 * period;
+  }
+  if (*id <= guest_last) *id = guest_last + 1;
+  if (*wake > now + 2 * period) { /* never sleep on a timing far ahead */
+    *display -= *wake - now;
+    *wake = now;
+  }
+  c->last_wake = *wake;
+}
+
 static void
 fill_view(const struct vrl_state *st, float fov[2][4], float *ipd) {
   memcpy(fov, st->fov, sizeof st->fov);
@@ -272,14 +298,12 @@ query_locked(struct wmtr_vr *vr, void *buf, uint32_t size) {
     int64_t now = now_ns();
     float hz = vr && vr->timing.refresh_hz > 0 ? vr->timing.refresh_hz : st && st->refresh_hz > 0 ? st->refresh_hz : 90.0f;
     int64_t period = (int64_t)(1e9f / hz);
-    /* the pacer's next frame; if the guest already has it (or no timing arrived yet), continue its cadence
-     * locally so WaitGetPoses keeps pacing even with no headset */
-    uint64_t f = vr && vr->timing.frame_id ? vr->timing.frame_id : 0;
-    int64_t wake = f ? vr->timing.wake_up : now, disp = f ? vr->timing.predicted_display : now + 2 * period;
-    if (f <= last) {
-      uint64_t ahead = last + 1 - f;
-      f += ahead, wake += (int64_t)ahead * period, disp += (int64_t)ahead * period;
-    }
+    /* the pacer's next frame, or the local cadence with no headset (WaitGetPoses keeps pacing either way) */
+    uint64_t f;
+    int64_t wake, disp;
+    struct wmtr_vr_cadence none = {0};
+    wmtr_vr_frame_cadence(vr ? &vr->cadence : &none, vr ? vr->timing.frame_id : 0, vr ? vr->timing.wake_up : 0,
+                          vr ? vr->timing.predicted_display : 0, last, now, period, &f, &wake, &disp);
     r.frame_id = f, r.host_now = now, r.wake_up = wake, r.predicted_display = disp;
     r.refresh_hz = hz;
     r.connected = connected;
@@ -395,7 +419,7 @@ wmtr_vr_submit(struct wmtr_vr *vr, const struct WMTVRSubmitInfo *info) {
     rx[e] = in->x; ry[e] = in->y;
     rw[e] = in->w ? in->w : (uint32_t)src[e].width;
     rh[e] = in->w ? in->h : (uint32_t)src[e].height;
-    if (!rw[e] || !rh[e] || rx[e] + rw[e] > src[e].width || ry[e] + rh[e] > src[e].height) {
+    if (!rw[e] || !rh[e] || (uint64_t)rx[e] + rw[e] > src[e].width || (uint64_t)ry[e] + rh[e] > src[e].height) {
       atomic_fetch_add(&vr->errors, 1); vr_log(vr, "eye rect out of bounds"); return STATUS_INVALID_PARAMETER;
     }
     if (!vr->device) { vr->device = [src[e].device retain]; vr->queue = [vr->device newCommandQueue]; }
@@ -422,7 +446,12 @@ wmtr_vr_submit(struct wmtr_vr *vr, const struct WMTVRSubmitInfo *info) {
   struct vrl_submit p;
   memset(&p, 0, sizeof p);
   p.h.type = VRL_SUBMIT; p.h.size = sizeof p;
-  p.frame_id = info->frame_id;
+  /* back to the host's pacer id (wmtr_vr_frame_cadence offset); a locally paced frame maps to an id the pacer
+   * does not know, which it ignores */
+  pthread_mutex_lock(&vr->lock);
+  int64_t host_id = (int64_t)info->frame_id - vr->cadence.offset;
+  pthread_mutex_unlock(&vr->lock);
+  p.frame_id = host_id > 0 ? (uint64_t)host_id : info->frame_id;
   p.display_time = (int64_t)info->display_time;
   p.app_submit_time = t_submit;
   memcpy(p.pose, info->pose, sizeof p.pose);
@@ -451,7 +480,17 @@ wmtr_vr_submit(struct wmtr_vr *vr, const struct WMTVRSubmitInfo *info) {
     }
     q.ready_time = now_ns();
     stage_account(vr, q.app_submit_time, wait_event && wait_value ? signal_time(vr, wait_event, wait_value) : 0, done, q.ready_time);
-    if (send_packet(vr, &q, sizeof q)) atomic_fetch_add(&vr->sent, 1);
+    /* Never block Metal's completion thread on the link (a stalled host would stall every completion handler of
+     * the process, the game's too): when the host's buffer is full the frame is dropped and its images freed. */
+    ssize_t r;
+    do r = send(vr->fd, &q, sizeof q, MSG_DONTWAIT); while (r < 0 && errno == EINTR);
+    if (r == (ssize_t)sizeof q) atomic_fetch_add(&vr->sent, 1);
+    else {
+      if (r < 0 && (errno == EAGAIN || errno == ENOBUFS)) atomic_fetch_add(&vr->dropped, 1);
+      else atomic_fetch_add(&vr->errors, 1);
+      for (int e = 0; e < 2; e++)
+        if (vr->sc[e].id == q.eye[e].swapchain) atomic_store(&vr->sc[e].busy[q.eye[e].image], 0);
+    }
     atomic_fetch_sub(&vr->inflight, 1);
   }];
   [cb commit];

@@ -51,6 +51,20 @@ struct wmtr_vr_stats {
   uint64_t stage_ns[WMTR_VR_STAGES]; /* cumulative, see WMTR_VR_STAGE_* */
 };
 void wmtr_vr_get_stats(struct wmtr_vr *vr, struct wmtr_vr_stats *out);
+
+/* The frame the guest's WaitGetPoses gets (SVR_FRAME), from the host's newest pacer timing. The guest's frame ids
+ * must only grow, but the host's restart at every headset (re)connect (pacer reset) and stop while none is
+ * connected; ids are mapped (host id + offset) and, without a fresh timing, the cadence continues locally from
+ * `now`. The wake-up time is never more than two frames ahead: a guest must not sleep on a stale or remapped
+ * timing (2026-10-17: a reconnect mid-game put it ~9000 frames ahead, VRChat froze). Pure, for tests. */
+struct wmtr_vr_cadence {
+  uint64_t host_last;  /* host frame id of the last fresh timing used */
+  int64_t offset;      /* guest id = host id + offset */
+  int64_t last_wake;   /* wake-up of the last frame handed out */
+};
+void wmtr_vr_frame_cadence(struct wmtr_vr_cadence *c, uint64_t host_id, int64_t host_wake, int64_t host_display,
+                           uint64_t guest_last, int64_t now, int64_t period, uint64_t *id, int64_t *wake,
+                           int64_t *display);
 /* the executor encoded a signal of shared event `event` (host object) to `value` for the guest: the time is kept
  * for the stage split of the frames that wait for it. vr == NULL is ignored. */
 void wmtr_vr_note_signal(struct wmtr_vr *vr, uint64_t event, uint64_t value);

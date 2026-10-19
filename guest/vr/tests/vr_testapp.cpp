@@ -209,11 +209,12 @@ int main(int argc, char **argv) {
   }
   std::string runtime = argv[1], data = argv[2];
   int frames = 150;
-  bool index = false, title = false;
+  bool index = false, title = false, standby = false;
   for (int i = 3; i < argc; i++) {
     if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--profile") && i + 1 < argc) index = !strcmp(argv[++i], "index");
     else if (!strcmp(argv[i], "--title")) title = true;
+    else if (!strcmp(argv[i], "--standby")) standby = true;
   }
 
   std::string so = runtime + "/bin/linux64/vrclient.so";
@@ -250,6 +251,38 @@ int main(int argc, char **argv) {
             core->GetGenericInterface(vr::IVRRenderModels_Version, &err),
         "VRChat's auxiliary interfaces missing");
   if (!sys || !comp || !input) return 1;
+
+  if (standby) {
+    // --standby (fake host script-standby.txt: the headset leaves at frame 40, returns at 80). As SteamVR: the HMD
+    // stays connected (standby) with an invalid pose, WaitGetPoses keeps pacing, the projection stays, the
+    // controllers deactivate and come back; the game never stalls.
+    int invalid = 0, deact = 0, act = 0, waits_ok = 0;
+    bool hmd_always = true, proj_always = true;
+    for (int i = 0; i < 130; i++) {
+      vr::TrackedDevicePose_t render[vr::k_unMaxTrackedDeviceCount];
+      if (comp->WaitGetPoses(render, vr::k_unMaxTrackedDeviceCount, nullptr, 0) == vr::VRCompositorError_None) waits_ok++;
+      if (!render[0].bPoseIsValid) invalid++;
+      hmd_always &= sys->IsTrackedDeviceConnected(0) && render[0].bDeviceIsConnected;
+      float l, r, t, b;
+      sys->GetProjectionRaw(vr::Eye_Left, &l, &r, &t, &b);
+      proj_always &= r - l > 1;
+      vr::VREvent_t ev;
+      while (sys->PollNextEvent(&ev, sizeof(ev))) {
+        if (ev.eventType == vr::VREvent_TrackedDeviceDeactivated) {
+          CHECK(ev.trackedDeviceIndex != 0, "HMD deactivated");
+          deact++;
+        }
+        if (ev.eventType == vr::VREvent_TrackedDeviceActivated && ev.trackedDeviceIndex != 0) act++;
+      }
+    }
+    printf("standby: waits %d, invalid head poses %d, controller deactivations %d / activations %d\n", waits_ok, invalid,
+           deact, act);
+    CHECK(waits_ok == 130 && hmd_always && proj_always, "standby: waits %d hmd %d projection %d", waits_ok, hmd_always,
+          proj_always);
+    CHECK(invalid >= 30 && invalid <= 45 && deact == 2 && act >= 4, "standby: invalid %d deact %d act %d", invalid, deact, act);
+    core->Cleanup();
+    return failures ? 1 : 0;
+  }
 
   // --- headset geometry ---
   uint32_t w = 0, h = 0;

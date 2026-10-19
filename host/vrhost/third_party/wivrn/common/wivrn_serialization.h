@@ -22,6 +22,7 @@
 #include "boost/pfr/core.hpp"
 #include "boost/pfr/tuple_size.hpp"
 #include "smp.h"
+#include <algorithm> // steamac: std::min (vector reserve cap)
 #include <array>
 #include <boost/pfr.hpp>
 #include <chrono>
@@ -265,6 +266,11 @@ public:
 	bool empty() const
 	{
 		return buffer.empty();
+	}
+
+	size_t remaining_size() const // steamac
+	{
+		return buffer.size_bytes();
 	}
 
 	void check_remaining_size(size_t min_size) const
@@ -684,7 +690,9 @@ struct serialization_traits<std::vector<T>>
 		}
 		else
 		{
-			value.reserve(size);
+			// steamac: every element takes at least one byte, so a count from the network larger than the bytes left
+			// is malformed; reserve no more than that (WiVRn reserves the raw count: up to ~2^31 elements)
+			value.reserve(std::min(size, packet.remaining_size()));
 			for (size_t i = 0; i < size; i++)
 			{
 				value.emplace_back(packet.deserialize<T>());

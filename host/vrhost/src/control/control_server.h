@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Status/pairing control socket of steamac-vrhost (`--control-socket PATH`), for the launcher's VR panel.
 // Contract: docs/vr-interfaces.md section 5. AF_UNIX SOCK_STREAM, one request line per connection, one JSON
-// object line back, then close. Requests: "status", "headsets", "pair on", "pair off", "unpair NAME", "unpair-all".
+// object line back, then close. Requests: "status", "headsets", "pair on", "pair off", "unpair NAME", "unpair-all",
+// "bitrate MBPS", "refresh HZ" (the last two error out on adapters that cannot change them).
 // Adapter-neutral: it talks to the session through SessionControl (WiVRn, Virtual Desktop, ...).
 #pragma once
 
@@ -22,6 +23,8 @@ public:
 	{
 		std::function<double()> pipeline_latency_ms;      // game frame submit → sent, p50 (0 = unknown)
 		std::function<void(const std::string &)> pin_changed; // new PIN ("" = pairing off), e.g. for --show-pin
+		// extra members of the status "stream" object (",\"key\":value..."), e.g. the game pipeline's counters
+		std::function<std::string()> stream_json;
 	};
 	ControlServer(std::string path, SessionControl &, Hooks = {});
 	~ControlServer();

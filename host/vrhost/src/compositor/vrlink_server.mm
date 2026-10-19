@@ -2,6 +2,7 @@
 #include <cmath>
 #include "vrlink_server.h"
 #include "vrlink.h"
+#include "vrlink_validate.h"
 
 #include <IOSurface/IOSurface.h>
 #include <cerrno>
@@ -70,8 +71,17 @@ struct VrLinkServer::impl
 				mach_port_t sp = m.msg.ports[i].name;
 				if (sp == MACH_PORT_NULL)
 					continue;
-				if (match && i < m.msg.image_count)
-					sc.surface[i] = IOSurfaceLookupFromMachPort(sp);
+				if (match && i < m.msg.image_count && i < sc.desc.image_count)
+				{
+					IOSurfaceRef s = IOSurfaceLookupFromMachPort(sp);
+					if (s && !vrl_surface_ok(sc.desc, IOSurfaceGetWidth(s), IOSurfaceGetHeight(s), IOSurfaceGetBytesPerElement(s)))
+					{
+						fprintf(stderr, "vrhost: swapchain %u image %u does not match its description\n", id, i);
+						CFRelease(s);
+						s = nullptr;
+					}
+					sc.surface[i] = s;
+				}
 				mach_port_deallocate(mach_task_self(), sp);
 			}
 			if (match)
@@ -132,9 +142,14 @@ struct VrLinkServer::impl
 						other(&u, size_t(n));
 					break;
 				case VRL_SWAPCHAIN: {
+					if (n != sizeof u.sc || !vrl_swapchain_ok(u.sc))
+					{
+						fprintf(stderr, "vrhost: invalid swapchain description dropped\n");
+						break;
+					}
 					auto sc = std::make_unique<Swapchain>();
 					sc->desc = u.sc;
-					if (u.sc.image_count > VRL_MAX_IMAGES || !receive_ports(u.sc.id, *sc))
+					if (!receive_ports(u.sc.id, *sc))
 					{
 						fprintf(stderr, "vrhost: swapchain %u: no ports\n", u.sc.id);
 						break;
@@ -143,6 +158,8 @@ struct VrLinkServer::impl
 					break;
 				}
 				case VRL_SUBMIT: {
+					if (n != sizeof u.sub)
+						break;
 					LinkFrame f{};
 					f.frame_id = u.sub.frame_id;
 					f.display_time = u.sub.display_time;
@@ -150,12 +167,14 @@ struct VrLinkServer::impl
 					f.ready_time = u.sub.ready_time;
 					f.received_time = now_ns();
 					memcpy(f.pose, u.sub.pose, sizeof f.pose);
-					bool ok = true;
+					bool ok = vrl_poses_ok(u.sub);
+					bool fov_ok = vrl_fov_ok(u.sub.fov[0]) && vrl_fov_ok(u.sub.fov[1]);
 					for (int e = 0; e < 2; e++)
 					{
 						const vrl_eye & ve = u.sub.eye[e];
 						auto it = chains.find(ve.swapchain);
-						if (it == chains.end() || ve.image >= it->second->desc.image_count || !it->second->surface[ve.image])
+						if (it == chains.end() || ve.image >= it->second->desc.image_count || !it->second->surface[ve.image] ||
+						    !vrl_eye_rect_ok(ve, it->second->desc))
 						{
 							ok = false;
 							continue;
@@ -163,7 +182,7 @@ struct VrLinkServer::impl
 						const auto & d = it->second->desc;
 						f.eye[e] = EyeSource{it->second->surface[ve.image], d.pixel_format, (d.flags & VRL_SWAPCHAIN_SRGB) != 0,
 						                     ve.x, ve.y, ve.w, ve.h, (ve.flags & VRL_EYE_FLIP_Y) != 0};
-						f.fov[e] = EyeFov{u.sub.fov[e][0], u.sub.fov[e][1], u.sub.fov[e][2], u.sub.fov[e][3]};
+						f.fov[e] = fov_ok ? EyeFov{u.sub.fov[e][0], u.sub.fov[e][1], u.sub.fov[e][2], u.sub.fov[e][3]} : EyeFov{};
 					}
 					if (ok)
 					{
@@ -306,8 +325,8 @@ int VrLinkServer::accept_one(const std::string & path, int timeout_ms)
 	return sv[0];
 }
 
-CompositorBridge::CompositorBridge(uint32_t out_w, uint32_t out_h, EyeEncoderSink & encoder) :
-        compositor(out_w, out_h), encoder(encoder)
+CompositorBridge::CompositorBridge(uint32_t out_w, uint32_t out_h, EyeEncoderSink & encoder, CompositorOptions opt) :
+        compositor(out_w, out_h, opt), encoder(encoder)
 {
 }
 

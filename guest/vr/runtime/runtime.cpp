@@ -51,9 +51,17 @@ vr::EVRInitError Runtime::init(vr::EVRApplicationType type) {
     return vr::VRInitError_Init_HmdNotFound;
   }
   hello_ = rep;
-  hello_view_ = rep.connected && rep.eye_width;
+  // hosts since vr-polish send a view also without a headset (the last one's, or a Quest 3's): use it at once
+  hello_view_ = rep.eye_width && rep.fov[0][1] - rep.fov[0][0] > 0;
   SVR_INFO("init app type %d over %s: %s %ux%u per eye %.0f Hz connected=%u", (int)type, transport_->name(),
            rep.name, rep.eye_width, rep.eye_height, rep.refresh_hz, rep.connected);
+  if (!connected_[0]) {  // the HMD is present from VR_Init on (standby while no headset is connected)
+    connected_[0] = true;
+    vr::VREvent_t ev{};
+    ev.eventType = vr::VREvent_TrackedDeviceActivated;
+    ev.trackedDeviceIndex = 0;
+    events_.push_back(ev);
+  }
   return vr::VRInitError_None;
 }
 
@@ -113,8 +121,9 @@ bool Runtime::fetch(svr_frame_rep *out) {
   clock_offset_ = now - rep.host_now;
   latest_ = rep;
   hello_.connected = rep.connected;
-  // device connection changes become OpenVR events
-  bool conn[kDeviceCount] = {rep.connected != 0,
+  // device connection changes become OpenVR events. The HMD stays connected while the runtime is up, as SteamVR
+  // keeps it in standby when the headset leaves: its pose turns invalid, the game keeps running and rendering.
+  bool conn[kDeviceCount] = {true,
                              rep.connected && (rep.pose[SVR_DEV_LEFT_GRIP].flags & SVR_POSE_VALID),
                              rep.connected && (rep.pose[SVR_DEV_RIGHT_GRIP].flags & SVR_POSE_VALID)};
   for (uint32_t i = 0; i < kDeviceCount; i++) {

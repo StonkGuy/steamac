@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // vrhost-test-headset: the loopback test headset (fake_headset.cpp, WiVRn v26.9 client sequence + VideoToolbox decode)
 // as a tool, for checking a running steamac-vrhost on this Mac without a real headset (docs/vr.md):
-//   vrhost-test-headset [--host ADDR] [--port N] [--pin NNNNNN] [--pin-delay MS] [--frames N] [--size WxH]
+//   vrhost-test-headset [--host ADDR] [--port N] [--pin NNNNNN] [--pin-delay MS] [--frames N] [--size WxH] [--start-app ID] [--net-delay MS] [--net-jitter MS] [--net-loss PCT] [--net-mbps M] [--net-burst S:MS]
 // Reports decoded frames per eye, frame numbers read from the image (d3d11bench --vr / test pattern blocks; readable
 // when the stream size equals the eye size, i.e. no foveation), the eyes' colour difference (d3d11bench --vr: left
 // red, right green), the foveation parameters received, and frame arrival intervals. Exit 0 when frames decoded,
@@ -321,6 +321,19 @@ int main(int argc, char ** argv)
 			o.pin = v;
 		else if (a == "--frames")
 			o.frames = std::stoi(v);
+		else if (a == "--start-app") // the WiVRn app list's "start": the launcher starts that game in the guest
+			o.start_app = v;
+		// Wi-Fi-like shaping of the video stream (fake_headset.h Network)
+		else if (a == "--net-delay")
+			o.net.delay_ms = std::stof(v);
+		else if (a == "--net-jitter")
+			o.net.jitter_ms = std::stof(v);
+		else if (a == "--net-loss")
+			o.net.loss_pct = std::stof(v);
+		else if (a == "--net-mbps")
+			o.net.mbps = std::stof(v);
+		else if (a == "--net-burst") // EVERY_S:MS
+			sscanf(v.c_str(), "%f:%f", &o.net.burst_every_s, &o.net.burst_ms);
 		else if (a == "--size")
 		{
 			parse_wh(v, o.eye_width, o.eye_height);
@@ -387,10 +400,10 @@ int main(int argc, char ** argv)
 	}
 	double cr0 = n[0] ? cr[0] / n[0] : 0, cr1 = n[1] ? cr[1] / n[1] : 0;
 	printf("handshake %s, encrypted %d, decoded %d/%d, IDR %d/%d, frame numbers ok %d wrong %d unreadable %d, "
-	       "mean Cr left %.1f right %.1f, foveation x %zu y %zu entries, frame interval ms p50 %.2f p99 %.2f, error '%s'\n",
+	       "mean Cr left %.1f right %.1f, foveation x %zu y %zu entries, frame interval ms p50 %.2f p99 %.2f, net dropped %d, error '%s'\n",
 	       r.handshake_state.c_str(), r.encrypted, r.decoded[0], r.decoded[1], r.idr[0], r.idr[1], read_ok, read_wrong,
 	       unreadable, cr0, cr1, r.foveation_x[0].size(), r.foveation_y[0].size(), pct(interval_ms, .5), pct(interval_ms, .99),
-	       r.error.c_str());
+	       r.net_dropped, r.error.c_str());
 	bool ok = r.error.empty() and r.decoded[0] >= o.frames and r.decoded[1] >= o.frames and
 	          (scene ? motion_ok : read_wrong == 0 and cr0 > cr1 + 10);
 	printf(ok ? "vrhost-test-headset: PASS\n" : "vrhost-test-headset: FAIL\n");
