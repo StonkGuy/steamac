@@ -1,0 +1,33 @@
+#!/bin/bash
+# steamac: ExecStartPre of steam.service. Renders the Steam client UI (steamwebhelper, CEF) in software
+# unless steamac.steam_ui_gpu=1 is on the kernel command line.
+#
+# With CEF's GPU process on, the Steam UI is a GL client over Venus: about 0.6 GiB of Metal memory on
+# the Mac (IOAccelerator, including KosmicKrisp's per-device poly heaps) for the whole session, also
+# while a game runs and the UI is hidden. Steam's stock -cef-disable-gpu argument drops it; the UI
+# still runs at the display rate (CPU raster in the native arm64 steamwebhelper).
+#
+# The argument reaches RUNSTEAM.sh through its stock STEAM_EXTRA_ARGS. systemd reads the unit's
+# EnvironmentFile (%t/steamac/steam-extra-args.env) when it starts each command, so the file written
+# here applies to ExecStart. Arguments from the user's own extra_args.conf drop-in are kept.
+# Test overrides: STEAMAC_CMDLINE, STEAMAC_STEAM_ENV.
+set -euo pipefail
+
+cmdline=${STEAMAC_CMDLINE:-/proc/cmdline}
+env=${STEAMAC_STEAM_ENV:-${XDG_RUNTIME_DIR:?}/steamac/steam-extra-args.env}
+
+gpu=0
+for w in $(cat "$cmdline" 2>/dev/null); do
+    case $w in steamac.steam_ui_gpu=1) gpu=1 ;; steamac.steam_ui_gpu=*) gpu=0 ;; esac
+done
+
+rm -f "$env"
+if [[ $gpu == 1 ]]; then
+    echo "steam-ui-gpu: Steam UI on the GPU (steamac.steam_ui_gpu=1)"
+    exit 0
+fi
+args=${STEAM_EXTRA_ARGS:-}
+case " $args " in *" -cef-disable-gpu "*) ;; *) args="${args:+$args }-cef-disable-gpu" ;; esac
+mkdir -p "$(dirname "$env")"
+printf 'STEAM_EXTRA_ARGS=%s\n' "$args" > "$env"
+echo "steam-ui-gpu: Steam UI in software (STEAM_EXTRA_ARGS=$args); steamac.steam_ui_gpu=1 restores the GPU"

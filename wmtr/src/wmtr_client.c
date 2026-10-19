@@ -27,6 +27,9 @@ typedef int32_t NTSTATUS;
 #define INLINE_OUT_MAX (48u << 10) /* reply-slot budget for outputs */
 
 static int wmtr_log_level = 1;
+/* WMTR_CLIENT_HANDLES=0 turns off client-assigned handles (wmtr_proto.h): pool and encoder creations wait for
+ * the host's result again */
+static int client_handles = 1;
 
 /* small decimal parser: libc's atoi binds to a glibc 2.38 symbol in new headers (see wmtr_glibc_compat.h) */
 static int
@@ -93,6 +96,8 @@ static void
 wmtr_init(void) {
   const char *l = getenv("WMTR_LOG");
   if (l) wmtr_log_level = env_int(l);
+  const char *ch = getenv("WMTR_CLIENT_HANDLES");
+  if (ch && *ch) client_handles = env_int(ch) != 0;
   const char *tp = getenv("WMTR_TRACE");
   if (tp && *tp) {
     char path[512];
@@ -708,8 +713,35 @@ texture_format(obj_handle_t tex) {
   return (uint32_t)p.ret;
 }
 
+/* NSAutoreleasePool_alloc_init and the command encoder creations: the client assigns the handle and does not
+ * wait (WMTR_F_CLIENT_HANDLE). DXMT only passes these results back to later calls, which the ring orders after
+ * the creation; a failed creation is reported by the host and the calls using its handle fail there. */
+static _Atomic uint64_t next_handle;
+static __thread uint32_t next_pool;
+
+static NTSTATUS
+send_client_handle(uint16_t call, void *params, uint32_t size) {
+  uint64_t handle;
+  uint32_t ret_off;
+  b_begin(params, size);
+  if (call == 10) {
+    handle = WMTR_HANDLE_TAG | WMTR_HANDLE_POOL | (uint64_t)my_slot() << 32 | ++next_pool;
+    ret_off = OFF(struct unixcall_generic_obj_ret, ret);
+  } else {
+    handle = WMTR_HANDLE_TAG | ((atomic_fetch_add_explicit(&next_handle, 1, memory_order_relaxed) + 1) & (WMTR_HANDLE_POOL - 1));
+    ret_off = call == 30 ? OFF(struct unixcall_generic_obj_obj_ret, ret) : OFF(struct unixcall_generic_obj_uint64_obj_ret, ret);
+    if (call == 32)
+      b_in(OFF(struct unixcall_generic_obj_uint64_obj_ret, arg),
+           (const void *)(uintptr_t)((struct unixcall_generic_obj_uint64_obj_ret *)params)->arg, sizeof(struct WMTRenderPassInfo));
+  }
+  memcpy(B.buf + ret_off, &handle, 8);
+  memcpy((uint8_t *)params + ret_off, &handle, 8);
+  return send_built_flags(call, WMTR_F_CLIENT_HANDLE, params, size); /* sync only if the request needs a reply */
+}
+
 static NTSTATUS
 dispatch(uint16_t call, void *params, uint32_t size, int sync) {
+  if (client_handles && (call == 10 || (call >= 30 && call <= 32))) return send_client_handle(call, params, size);
   switch (call) {
   case 8: { /* NSString_getCString */
     struct unixcall_nsstring_getcstring *p = params;

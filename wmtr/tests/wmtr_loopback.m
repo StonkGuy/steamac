@@ -11,11 +11,12 @@
 #include <sched.h>
 #include <libproc.h>
 #include <sys/mman.h>
+#include <time.h>
 
 #define WINEMETAL_API
 #include "winemetal_thunks.h"
 #include "airconv_thunks.h"
-#include "wmtr_proto.h"
+#include "wmtr_wire.h"
 #include "wmtr_transport.h"
 #include "wmtr_host.h"
 
@@ -110,13 +111,31 @@ static NTSTATUS f_newfunction(void *a) {
   p->ret = strlen((const char *)(uintptr_t)p->arg) * 1000 + p->handle;
   return 0;
 }
-const void *wmtr_impl_funcs[146] = {[1] = f_release, [25] = f_newlibrary, [76] = f_sm50compile, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
+/* encoders: autoreleased objects; the log records (call, receiver or result) in execution order */
+static uint64_t enc_log[64][2]; static int n_enc_log;
+static void enc_note(uint64_t call, uint64_t v) { if (n_enc_log < 64) { enc_log[n_enc_log][0] = call; enc_log[n_enc_log][1] = v; } n_enc_log++; }
+static NTSTATUS f_new_encoder(uint64_t *ret, uint64_t call, int fail) {
+  *ret = fail ? 0 : (obj_handle_t)[[[NSObject alloc] init] autorelease];
+  enc_note(call, *ret);
+  return 0;
+}
+static NTSTATUS f_blit_enc(void *a) { return f_new_encoder(&((struct unixcall_generic_obj_obj_ret *)a)->ret, 30, 0); }
+static NTSTATUS f_compute_enc(void *a) { struct unixcall_generic_obj_uint64_obj_ret *p = a; return f_new_encoder(&p->ret, 31, p->arg == 99); }
+static NTSTATUS f_render_enc(void *a) {
+  struct unixcall_generic_obj_uint64_obj_ret *p = a;
+  const struct WMTRenderPassInfo *i = (const void *)(uintptr_t)p->arg;
+  return f_new_encoder(&p->ret, 32, !i || i->render_target_width != 640);
+}
+static NTSTATUS f_end_encoding(void *a) { enc_note(33, ((struct unixcall_generic_obj_noret *)a)->handle); return 0; }
+static NTSTATUS f_compute_encode(void *a) { enc_note(37, ((struct unixcall_generic_obj_cmd_noret *)a)->encoder); return 0; }
+const void *wmtr_impl_funcs[146] = {[1] = f_release, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
+                                    [33] = f_end_encoding, [37] = f_compute_encode, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
                                     [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes};
 
 /* ---------------- loopback transport ---------------- */
 static struct wmtr_host *H;
 static void *blob_base[WMTR_MAX_BLOBS]; static uint64_t blob_size[WMTR_MAX_BLOBS];
-static void *t_blob_ptr(void *c, uint32_t b, uint64_t *s) { *s = blob_size[b]; return blob_base[b]; }
+static void *t_blob_ptr(void *c, uint32_t b, uint64_t *s) { if (b >= WMTR_MAX_BLOBS) return NULL; *s = blob_size[b]; return blob_base[b]; }
 static void t_wake(void *c, uint32_t s) {}
 static uint64_t next_view = 0x1000, released[8]; static int n_released;
 static uint64_t t_create_view(void *c, uint64_t hwnd, void *dev, uint64_t *layer) { *layer = 0x77; return next_view++; }
@@ -154,6 +173,104 @@ static NTSTATUS remote(int call, void *p) { return ((fn_t)__wine_unix_call_funcs
 static NTSTATUS native(int call, void *p) { return ((fn_t)wmtr_impl_funcs[call])(p); }
 
 static char frames_path[64];
+/* ---------------- hostile requests (a guest that writes the ring itself) ---------------- */
+/* One raw record built here, not by the client: header fields, relocs, outs and payload exactly as given. Sent
+ * on reply slot 60 (no client thread uses it); returns the reply status, *out_size the reply's size. */
+#define RAW_SLOT 60
+static uint32_t
+raw_request(uint16_t call, uint32_t params_size, uint32_t payload_size, const uint32_t *relocs, uint16_t n_reloc,
+            const struct wmtr_out *outs, uint16_t n_out, const void *payload, uint32_t payload_bytes, uint32_t *out_size) {
+  struct wmtr_ring *R = blob_base[0];
+  uint8_t *data = (uint8_t *)R + WMTR_RING_DATA_OFFSET;
+  struct wmtr_slot *slot = (struct wmtr_slot *)((uint8_t *)R + WMTR_SLOTS_OFFSET) + RAW_SLOT;
+  struct wmtr_req_ext hdr = {0};
+  hdr.h.call = call; hdr.h.flags = WMTR_F_SYNC; hdr.h.slot = RAW_SLOT; hdr.h.params_size = params_size;
+  hdr.h.seq = slot->done_seq + 1;
+  hdr.n_reloc = n_reloc; hdr.n_out = n_out; hdr.payload_size = payload_size;
+  uint32_t poff = wmtr_req_payload_offset(&hdr);
+  uint32_t total = WMTR_ALIGN8(poff + payload_bytes);
+  hdr.h.size = total;
+  while (R->tail != R->head) sched_yield(); /* the client's own requests are consumed */
+  uint64_t head = R->head;
+  uint32_t pos = (uint32_t)(head % WMTR_RING_BYTES), to_end = WMTR_RING_BYTES - pos;
+  if (to_end < total) {
+    struct wmtr_req w = {0}; w.size = to_end; w.flags = WMTR_F_WRAP;
+    if (to_end >= sizeof w) memcpy(data + pos, &w, sizeof w);
+    head += to_end; pos = 0;
+  }
+  uint8_t *dst = data + pos;
+  memset(dst, 0, total);
+  memcpy(dst, &hdr, sizeof hdr);
+  memcpy(dst + sizeof hdr, relocs, 4u * n_reloc);
+  memcpy(dst + sizeof hdr + 4u * n_reloc, outs, sizeof *outs * n_out);
+  memcpy(dst + poff, payload, payload_bytes);
+  __atomic_store_n(&R->head, head + total, __ATOMIC_RELEASE);
+  wmtr_host_kick(H);
+  while (__atomic_load_n(&slot->done_seq, __ATOMIC_ACQUIRE) < hdr.h.seq) sched_yield();
+  if (out_size) *out_size = slot->out_size;
+  return slot->status;
+}
+
+/* Every size, offset and reference in a request is the guest's. Before the checks each of these wrote or read
+ * host memory outside the request (32-bit wrap-around, or sizes larger than the reply slot / the arena blob). */
+static void
+test_hostile_requests(id<MTLDevice> dev) {
+  { /* a ring blob smaller than the ring layout: the executor would read and write past it */
+    uint64_t sz = WMTR_RING_BLOB_BYTES;
+    void *small = pages(sz);
+    ((struct wmtr_ring *)small)->magic = WMTR_RING_MAGIC; ((struct wmtr_ring *)small)->version = WMTR_VERSION;
+    void *save_b = blob_base[0]; uint64_t save_s = blob_size[0];
+    blob_base[0] = small; blob_size[0] = WMTR_PAGE;
+    struct wmtr_host *hs = wmtr_host_create(small, &host_ops, NULL);
+    CHECK(hs == NULL, "executor started on a %u-byte ring blob", WMTR_PAGE);
+    if (hs) wmtr_host_destroy(hs);
+    blob_base[0] = save_b; blob_size[0] = save_s;
+    free(small);
+  }
+  const uint32_t inval = 0xC000000D;
+  struct wmtr_slot *slots = (struct wmtr_slot *)((uint8_t *)blob_base[0] + WMTR_SLOTS_OFFSET);
+  uint64_t payload[64] = {0};
+  uint32_t out = 0;
+  /* reloc offset near 4 GiB: offset + 8 wrapped below payload_size, the host rewrote 8 bytes 4 GiB away */
+  uint32_t far = 0xfffffffcu;
+  CHECK(raw_request(39, 16, 64, &far, 1, NULL, 0, payload, 64, NULL) == inval, "reloc offset wrap accepted");
+  /* payload_size near 4 GiB: poff + payload_size wrapped below the record size */
+  uint32_t r0 = 0;
+  CHECK(raw_request(39, 16, 0xfffffff8u, &r0, 1, NULL, 0, payload, 64, NULL) == inval, "payload size wrap accepted");
+  /* output range near 4 GiB: off + size wrapped, the reply copied from 4 GiB past the payload */
+  struct wmtr_out wrap = {0xffffff00u, 0x200};
+  uint32_t st = raw_request(39, 16, 64, NULL, 0, &wrap, 1, payload, 64, &out);
+  CHECK(out <= 16, "wrapped output range copied (%u bytes, status %x)", out, st);
+  /* params larger than a reply slot: the reply overwrote the next slot (and past the ring blob for the last) */
+  static uint8_t big[WMTR_SLOT_BYTES + 4096];
+  memset(slots[RAW_SLOT + 1].data, 0x5a, 64);
+  st = raw_request(39, sizeof big, sizeof big, NULL, 0, NULL, 0, big, sizeof big, &out);
+  CHECK(st == inval && out == 0, "params past the reply slot: status %x, %u bytes", st, out);
+  CHECK(slots[RAW_SLOT + 1].data[0] == 0x5a && slots[RAW_SLOT + 1].data[63] == 0x5a, "next reply slot overwritten");
+  /* params shorter than the call's struct: the implementation read and wrote past the request */
+  CHECK(raw_request(8, 0, 0, NULL, 0, NULL, 0, NULL, 0, NULL) == inval, "short params accepted");
+  /* newBuffer over arena memory longer than the blob: the NoCopy MTLBuffer reached host memory past it */
+  uint32_t blob = 0;
+  for (uint32_t b = 1; b < WMTR_MAX_BLOBS && !blob; b++) if (blob_base[b]) blob = b;
+  CHECK(blob != 0, "no arena blob to test with");
+  if (blob) {
+    struct { struct unixcall_mtldevice_newbuffer p; struct WMTBufferInfo info; } nb;
+    memset(&nb, 0, sizeof nb);
+    nb.p.device = (obj_handle_t)dev;
+    nb.p.info.ptr = (void *)(uintptr_t)(WMTR_REF_EXTRA | sizeof nb.p);
+    nb.info.length = blob_size[blob] + WMTR_PAGE;
+    nb.info.options = WMTResourceStorageModeShared;
+    nb.info.memory.ptr = (void *)(uintptr_t)(WMTR_REF_ARENA | (uint64_t)blob << 32);
+    uint32_t rel[2] = {offsetof(struct unixcall_mtldevice_newbuffer, info), sizeof nb.p + offsetof(struct WMTBufferInfo, memory)};
+    st = raw_request(18, sizeof nb.p, sizeof nb, rel, 2, NULL, 0, &nb, sizeof nb, NULL);
+    CHECK(st == inval, "newBuffer past its arena blob: status %x", st);
+    nb.info.length = WMTR_PAGE; /* the same request inside the blob still works */
+    st = raw_request(18, sizeof nb.p, sizeof nb, rel, 2, NULL, 0, &nb, sizeof nb, &out);
+    CHECK(st == 0, "newBuffer inside its arena blob: status %x", st);
+    /* kept alive: its deallocator would hand the client a free range the client never allocated */
+  }
+}
+
 int main(void) {
   @autoreleasepool {
     snprintf(frames_path, sizeof frames_path, "/tmp/wmtr_frames_%d.csv", (int)getpid());
@@ -312,6 +429,52 @@ int main(void) {
       CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
       if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
     }
+    /* 8. client-assigned handles: a frame's pool + encoder creations do not wait for the host (one sync call
+          apart from the calls that return values); each use reaches the host after its creation and gets the object;
+          a failed creation makes the calls using its handle no-ops. WMTR_CLIENT_HANDLES=0: every creation waits. */
+    {
+      int on = !getenv("WMTR_CLIENT_HANDLES") || atoi(getenv("WMTR_CLIENT_HANDLES"));
+      struct wmtr_host_stats s0, s1;
+      wmtr_host_get_stats(H, &s0);
+      n_enc_log = 0;
+      struct unixcall_generic_obj_ret pool = {0};
+      remote(10, &pool);
+      struct unixcall_generic_obj_ret ar = {0};
+      remote(53, &ar); /* autoreleased into the pool */
+      struct WMTRenderPassInfo rpi; memset(&rpi, 0, sizeof rpi); rpi.render_target_width = 640;
+      struct unixcall_generic_obj_uint64_obj_ret re = {0x77, (uint64_t)(uintptr_t)&rpi, 0}, ce = {0x77, 1, 0}, bad = {0x77, 99, 0};
+      struct unixcall_generic_obj_obj_ret be = {0x77, 0};
+      remote(32, &re);
+      struct unixcall_generic_obj_noret end = {re.ret}; remote(33, &end);
+      remote(31, &ce);
+      struct unixcall_generic_obj_cmd_noret enc = {ce.ret, {NULL}}; remote(37, &enc);
+      end.handle = ce.ret; remote(33, &end);
+      remote(30, &be);
+      end.handle = be.ret; remote(33, &end);
+      remote(31, &bad); /* fails on the host */
+      enc.encoder = bad.ret; remote(37, &enc);
+      end.handle = bad.ret; remote(33, &end);
+      obj_handle_t ph = pool.ret;
+      int alive_in_pool = 0;
+      struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); /* sync: all of the above has executed */
+      alive_in_pool = probe_alive;
+      remote(1, &ph);
+      remote(39, &q);
+      wmtr_host_get_stats(H, &s1);
+      uint64_t waits = s1.sync_requests - s0.sync_requests;
+      CHECK(waits == (on ? 3u : 8u), "pool+encoders: %llu sync requests (want %d)", waits, on ? 3 : 8); /* 53 and 39 twice */
+      CHECK(pool.ret && re.ret && ce.ret && be.ret && (on ? bad.ret != 0 : bad.ret == 0), "handles %llx %llx %llx %llx %llx",
+            pool.ret, re.ret, ce.ret, be.ret, bad.ret);
+      CHECK(alive_in_pool && !probe_alive, "pool handle: object alive in pool %d, after release %d", alive_in_pool, probe_alive);
+      /* host order: 32 r, 33 r, 31 c, 37 c, 33 c, 30 b, 33 b, 31 0 (failed; its uses are skipped) */
+      static const uint64_t want[8] = {32, 33, 31, 37, 33, 30, 33, 31};
+      int ok = n_enc_log == (on ? 8 : 10);
+      for (int i = 0; ok && i < 8; i++) ok = enc_log[i][0] == want[i];
+      ok = ok && enc_log[0][1] && enc_log[1][1] == enc_log[0][1] && enc_log[3][1] == enc_log[2][1] &&
+           enc_log[4][1] == enc_log[2][1] && enc_log[6][1] == enc_log[5][1] && enc_log[7][1] == 0;
+      CHECK(ok, "encoder order/objects: %d log entries", n_enc_log);
+      CHECK(end.handle == bad.ret, "the caller's receiver handle was changed to %llx", end.handle);
+    }
     struct wmtr_host_stats st; wmtr_host_get_stats(H, &st);
     printf("requests=%llu sync=%llu bytes=%llu\n", st.requests, st.sync_requests, st.bytes);
     { /* an autoreleased result outside any client pool must outlive the request (DXMT reads it next) */
@@ -365,6 +528,7 @@ int main(void) {
       remote(73, &r1); /* a second release of the same view is ignored */
       struct unixcall_generic_obj_uint64_ret pf = {0}; remote(39, &pf); /* sync call: the releases above are done */
       CHECK(n_released == 1 && released[0] == v1.ret_view, "ReleaseMetalView: %d releases", n_released);
+      test_hostile_requests(dev);
       /* a call that faults (bad handle) fails, the process lives, and the client is refused from then on */
       struct unixcall_generic_obj_uint64_ret fz = {0};
       NTSTATUS fs = remote(5, &fz);
@@ -380,10 +544,20 @@ int main(void) {
         wmtr_host_set_spin(H, 20000000);
         { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); }
         wmtr_host_get_stats(H, &st1);
-        for (int i = 0; i < 20; i++) { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); usleep(300); }
+        /* a gap that really lasted longer than the budget (this thread descheduled on a loaded or
+           virtualized machine, e.g. a CI runner) is allowed to end in a sleep */
+        unsigned long long long_gaps = 0;
+        for (int i = 0; i < 20; i++) {
+          struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q);
+          uint64_t g0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+          usleep(300);
+          if (clock_gettime_nsec_np(CLOCK_MONOTONIC) - g0 >= 20000000) long_gaps++;
+        }
         wmtr_host_get_stats(H, &st2);
         CHECK(st1.idle_sleeps - st0.idle_sleeps >= 15, "no spin: %llu sleeps in 20 gaps", st1.idle_sleeps - st0.idle_sleeps);
-        CHECK(st2.idle_sleeps - st1.idle_sleeps <= 1, "20 ms spin: %llu sleeps in 20 gaps of 0.3 ms", st2.idle_sleeps - st1.idle_sleeps);
+        CHECK(long_gaps <= 5 && st2.idle_sleeps - st1.idle_sleeps <= 1 + long_gaps,
+              "20 ms spin: %llu sleeps in 20 gaps of 0.3 ms (%llu gaps lasted >= 20 ms)",
+              st2.idle_sleeps - st1.idle_sleeps, long_gaps);
         wmtr_host_set_spin(H, WMTR_HOST_SPIN_US_DEFAULT * 1000);
       }
       wmtr_host_destroy(H);

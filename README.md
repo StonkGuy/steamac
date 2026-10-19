@@ -38,8 +38,9 @@ DXMT (single runs, see [docs/eac-performance.md](docs/eac-performance.md)).
 
 1. Build the app from this fork's `main` branch or a [release](https://github.com/StonkGuy/steamac/releases) tag:
    `./build.sh` ([requirements and building](docs/upstream/requirements-and-building.md); the DXMT path also needs
-   `make dxmt-payload` in `wmtr/` before the layer step). This fork does not publish a prebuilt DMG yet. Copy
-   **FX Steam Launcher.app** from `work/out/` to Applications and open it (see *First open* below).
+   `make dxmt-payload` in `wmtr/` before the layer step). Or download the DMG
+   attached to a [release](https://github.com/StonkGuy/steamac/releases) (from v1.9-eac.1, built by GitHub Actions, ad-hoc signed). Copy
+   **FX Steam Launcher.app** from `work/out/` (or the DMG) to Applications and open it (see *First open* below).
 2. On first start, choose **Create New Disk…**. The app downloads Valve's SteamOS image, verifies it and sets it up.
    This takes a while, once.
 3. Sign in to Steam in the window. Keep a **16:10** window size (Settings > Display > Default window
@@ -67,6 +68,11 @@ example after switching between two builds of the app on one disk), the files st
 repair Proton in Steam: the Proton tool > Properties > Installed Files > **Verify integrity of tool files**. DXMT
 covers Direct3D 11 (and 10); play Direct3D 12 games on *Vulkan* (DXMT's Direct3D 12 is limited). EAC on DXMT is
 verified with VRChat; if EAC fails in another game, switch to *Vulkan*.
+
+| use | when |
+|---|---|
+| **DXMT** | Direct3D 11/10 games that render correctly on it. Measured faster on every title we could compare (see [docs/eac-performance.md](docs/eac-performance.md)) |
+| **Vulkan** | Direct3D 12 games; games that use D3D11 stream output (geometry-shader or vertex-shader stream output with rasterization, for example Unigine Superposition, which shows black shadow areas on DXMT); any game that fails or looks wrong on DXMT |
 
 The **Metal Performance HUD** shows the frame rate on either path: Settings > Display, the View menu, or Ctrl+Cmd+P. It can
 be turned on and off while a game runs.
@@ -104,15 +110,33 @@ manual steps are required for VRChat; both are planned to become automatic:
 
 More: [docs/eac-troubleshooting.md](docs/eac-troubleshooting.md).
 
+## Memory
+
+The VM's memory is set in Settings > Advanced > **Memory** (automatic: half of the Mac's RAM, 4-16 GB). The Mac's GPU
+memory comes from the same RAM, so a larger VM leaves less for macOS and the game's graphics. Memory the guest no longer
+uses goes back to the Mac:
+
+| mechanism | what it does | default | measured (M2, 16 GB, 8 GiB VM) |
+|---|---|---|---|
+| free page reporting (libkrun patch 0026) | pages the guest frees leave the VM's memory footprint on the Mac at once (stock libkrun keeps them charged on macOS) | on | idle after boot 0.7-0.8 GiB lower |
+| boot page-cache trim (`steamac-mem-trim`) | 150 s after boot the guest drops its clean page cache once, so it is reported free too; runs once per boot, nothing during play | on; `steamac.mem_trim=0` on the kernel command line turns it off | idle VM footprint 8.92 -> 7.39 GiB |
+| DXMT arena trim (`wmtr/`, libkrun patch 0028) | DXMT path: shared buffers idle for 1 s beyond a 128 MiB reserve go back to the Mac after a loading peak | on; `WMTR_ARENA_KEEP_MB`, `WMTR_ARENA_TRIM_MS`, `-1` keeps all | offline test: 504 -> 203 MiB after a peak; live check pending |
+
+Scope: general (any game on this stack). These lower the idle and after-load footprint; they do not make a game fit
+whose peak needs more than the VM and the Mac have (see *Limits*).
+
 ## Limits
 
 - One machine verified (M2, 16 GB, macOS 27.0). VRChat is verified in game on both paths; Mini Royale's EAC launcher
   reaches `301` (not played further). Other titles are untested and results differ game by game.
 - 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
   memory on both paths with an 8 GiB VM.
-- VR is not part of this release (experimental, on the `vr-live` branch).
+- VR (Meta Quest 3 over WiVRn) is not on this branch yet. It is experimental, on the
+  [`vr-polish`](https://github.com/StonkGuy/steamac/tree/vr-polish) branch, with its guide in `docs/vr.md` there.
 - DXMT: Direct3D 11/10. Its Direct3D 12 is limited (feature level 11_1, DXBC only, no DXIL, no ray tracing;
   ExecuteIndirect stalls the GPU); use *Vulkan* for Direct3D 12 games.
+- DXMT: Direct3D 11 stream output with rasterization or from a geometry shader is not implemented upstream; such games
+  render wrong on DXMT (Unigine Superposition: black shadow areas). Use *Vulkan* for them.
 - D3DMetal is not included.
 - The DXMT setting applies to every game; on it the game's Metal layer covers the whole VM view (a windowed game or alt-tab
   shows the game layer).

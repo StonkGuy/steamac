@@ -41,6 +41,15 @@ static const uint8_t call_class[146] = {
 #include "wmtr_calls.inc"
 #undef X
 };
+/* the params struct each call's implementation reads and writes (the client sends exactly this) */
+static const uint32_t call_params_size[146] = {
+#define X(i, n, t, c) [i] = sizeof(t),
+#include "wmtr_calls.inc"
+#undef X
+};
+/* zeroed bytes after every request copy: a WMTR_REF_EXTRA pointer is only checked to start inside the payload,
+ * the struct the implementation reads there may run past its end */
+#define WMTR_COPY_SLACK 4096u
 
 struct wmtr_host {
   struct wmtr_ring *ring;
@@ -64,6 +73,8 @@ struct wmtr_host {
   uint64_t *views;
   uint32_t n_views, cap_views;
   _Atomic uint64_t n_req, n_sync, n_bytes, n_worker, n_sleep;
+  /* client-assigned encoder handles (WMTR_F_CLIENT_HANDLE): entry (handle % WMTR_HANDLE_SLOTS) */
+  struct wmtr_handle { _Atomic uint64_t id; _Atomic uint64_t obj; } *handles;
   /* how long the executor polls an empty ring before it sleeps, in mach ticks (WMTR_HOST_SPIN_US) */
   _Atomic uint64_t spin_ticks;
 };
@@ -332,22 +343,25 @@ resolve(struct wmtr_host *h, uint64_t v, uint8_t *payload, uint32_t payload_size
   return NULL;
 }
 
+/* payload = NULL: the request's sizes could not be trusted (malformed request): status only */
 static void
-reply(struct wmtr_host *h, const struct wmtr_req_ext *r, const struct wmtr_out *outs, uint8_t *payload,
+reply(struct wmtr_host *h, const struct wmtr_req_ext *r, const struct wmtr_out *outs, uint32_t n_out, uint8_t *payload,
       NTSTATUS st) {
   if (!(r->h.flags & WMTR_F_SYNC) || r->h.slot >= WMTR_SLOTS) return;
   struct wmtr_slot *s = &h->slots[r->h.slot];
-  uint32_t o = r->h.params_size;
-  memcpy(s->data, payload, o);
+  /* every size here is the client's: 64-bit sums, bounded by the slot and by the payload */
+  uint64_t o = r->h.params_size;
+  if (!payload || o > WMTR_SLOT_BYTES || o > r->payload_size) { o = 0; n_out = 0; if (payload) st = STATUS_INVALID_PARAMETER; }
+  if (o) memcpy(s->data, payload, o);
   o = WMTR_ALIGN8(o);
-  for (int i = 0; i < r->n_out; i++) {
+  for (uint32_t i = 0; i < n_out; i++) {
     if (!outs[i].size) continue; /* arena output: already in shared memory */
-    if (o + outs[i].size > WMTR_SLOT_BYTES || outs[i].off + outs[i].size > r->payload_size) break;
+    if (o + outs[i].size > WMTR_SLOT_BYTES || (uint64_t)outs[i].off + outs[i].size > r->payload_size) break;
     memcpy(s->data + o, payload + outs[i].off, outs[i].size);
-    o += WMTR_ALIGN8(outs[i].size);
+    o += WMTR_ALIGN8((uint64_t)outs[i].size);
   }
   s->status = (uint32_t)st;
-  s->out_size = o;
+  s->out_size = (uint32_t)o;
   __atomic_store_n(&s->done_seq, r->h.seq, __ATOMIC_RELEASE);
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
   if (__atomic_load_n(&s->waiting, __ATOMIC_SEQ_CST)) h->ops->wake(h->ctx, r->h.slot);
@@ -361,6 +375,7 @@ reply(struct wmtr_host *h, const struct wmtr_req_ext *r, const struct wmtr_out *
  * are retained into the slot's current virtual pool and released when DXMT releases that pool. */
 struct vpool {
   struct vpool *parent;
+  uint64_t cid; /* the client's handle for it (WMTR_HANDLE_POOL), 0 if the host's address is the handle */
   uint32_t slot, used;
   id *objs;
   uint32_t n, cap;
@@ -380,12 +395,12 @@ is_vpool(uint64_t h) {
 }
 
 static uint64_t
-vpool_push(uint32_t slot) {
+vpool_push(uint32_t slot, uint64_t cid) {
   pthread_mutex_lock(&vpool_lock);
   struct vpool *p = NULL;
   for (int i = 0; i < VPOOLS; i++) if (!vpools[i].used) { p = &vpools[i]; break; }
   if (p) {
-    p->used = 1; p->slot = slot; p->n = 0;
+    p->used = 1; p->slot = slot; p->n = 0; p->cid = cid;
     p->parent = slot < WMTR_SLOTS ? vpool_top[slot] : NULL;
     if (slot < WMTR_SLOTS) vpool_top[slot] = p;
   }
@@ -408,6 +423,19 @@ vpool_pop(struct vpool *target) {
   }
   if (slot < WMTR_SLOTS) vpool_top[slot] = p;
   pthread_mutex_unlock(&vpool_lock);
+}
+
+/* the open pool of the client handle `cid`, 0 if there is none */
+static uint64_t
+vpool_find(uint64_t cid) {
+  uint32_t slot = (uint32_t)(cid >> 32) & 0x7fff;
+  uint64_t r = 0;
+  if (slot >= WMTR_SLOTS) return 0;
+  pthread_mutex_lock(&vpool_lock);
+  for (struct vpool *p = vpool_top[slot]; p; p = p->parent)
+    if (p->cid == cid) { r = (uint64_t)(uintptr_t)p; break; }
+  pthread_mutex_unlock(&vpool_lock);
+  return r;
 }
 
 static void
@@ -477,9 +505,19 @@ host_new_buffer(struct wmtr_host *h, struct unixcall_mtldevice_newbuffer *p, uin
   id<MTLDevice> device = (id<MTLDevice>)p->device;
   struct WMTBufferInfo *info = p->info.ptr;
   id<MTLBuffer> buffer;
+  if (!info) return STATUS_INVALID_PARAMETER;
   if (info->memory.ptr) {
+    /* client memory: the buffer must lie inside the arena blob the reference names (page-aligned, whole pages),
+     * or the GPU and the NoCopy buffer would reach host memory past it */
     uint32_t blob = (uint32_t)((arena_ref >> 32) & 0xffff), off = (uint32_t)arena_ref;
+    uint64_t blob_size = 0;
+    uint8_t *base = arena_ref ? h->ops->blob_ptr(h->ctx, blob, &blob_size) : NULL;
+    if (info->length > blob_size) return STATUS_INVALID_PARAMETER;
     uint64_t len = (info->length + WMTR_PAGE - 1) & ~(uint64_t)(WMTR_PAGE - 1);
+    if (!base || info->memory.ptr != base + off || (off & (WMTR_PAGE - 1)) || !len || len > blob_size - off) {
+      LOG(0, "newBuffer: memory outside its arena blob (blob %u off %u len %llu)\n", blob, off, (unsigned long long)len);
+      return STATUS_INVALID_PARAMETER;
+    }
     buffer = [device newBufferWithBytesNoCopy:info->memory.ptr
                                        length:len
                                       options:(MTLResourceOptions)info->options
@@ -521,7 +559,8 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     if (is_vpool(*(uint64_t *)params)) { vpool_pop((struct vpool *)(uintptr_t)*(uint64_t *)params); return STATUS_SUCCESS; }
     break;
   case 10: /* NSAutoreleasePool_alloc_init */
-    ((struct unixcall_generic_obj_ret *)params)->ret = vpool_push(r->h.slot);
+    ((struct unixcall_generic_obj_ret *)params)->ret =
+        vpool_push(r->h.slot, r->h.flags & WMTR_F_CLIENT_HANDLE ? ((struct unixcall_generic_obj_ret *)params)->ret : 0);
     return ((struct unixcall_generic_obj_ret *)params)->ret ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
   case 18: { /* newBuffer: memory field relocation carries the arena reference */
     uint64_t arena_ref = 0;
@@ -601,6 +640,72 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
   return st;
 }
 
+/* ------------------------------------------------------------------------------------------- *
+ * client-assigned handles (WMTR_F_CLIENT_HANDLE, wmtr_proto.h). Cost for other calls: one compare of the
+ * first params word. */
+#ifndef STATUS_INVALID_HANDLE
+#define STATUS_INVALID_HANDLE ((NTSTATUS)0xC0000008)
+#endif
+
+/* offset of `ret` in the params of a call that may carry a client handle */
+static int
+handle_ret_off(uint16_t call) {
+  switch (call) {
+  case 10: return offsetof(struct unixcall_generic_obj_ret, ret);
+  case 30: return offsetof(struct unixcall_generic_obj_obj_ret, ret);
+  case 31: case 32: return offsetof(struct unixcall_generic_obj_uint64_obj_ret, ret);
+  default: return -1;
+  }
+}
+
+/* before the call: note the handle a creation carries (*cid), and give a call whose receiver is a client
+ * handle the object (*w0 keeps the handle for the reply). 0: the handle names no object (logged); fail it. */
+static int
+handles_in(struct wmtr_host *h, const struct wmtr_req_ext *r, uint8_t *payload, uint64_t *w0, uint64_t *cid) {
+  if (r->h.flags & WMTR_F_CLIENT_HANDLE) {
+    int o = handle_ret_off(r->h.call);
+    if (o >= 0 && o + 8 <= (int)r->h.params_size) memcpy(cid, payload + o, 8);
+    if ((*cid & WMTR_REF_MASK) != WMTR_HANDLE_TAG) {
+      LOG(0, "call %u: bad client handle %llx\n", r->h.call, (unsigned long long)*cid);
+      *cid = 0;
+      return 0;
+    }
+    if (o == 0) return 1; /* NSAutoreleasePool_alloc_init: the first word is the new handle */
+  }
+  if (r->h.params_size < 8) return 1;
+  uint64_t v;
+  memcpy(&v, payload, 8);
+  if ((v & WMTR_REF_MASK) != WMTR_HANDLE_TAG) return 1;
+  uint64_t obj = 0;
+  if (v & WMTR_HANDLE_POOL) obj = vpool_find(v);
+  else {
+    struct wmtr_handle *e = &h->handles[v % WMTR_HANDLE_SLOTS];
+    if (atomic_load_explicit(&e->id, memory_order_acquire) == v) obj = atomic_load_explicit(&e->obj, memory_order_relaxed);
+  }
+  if (!obj) {
+    LOG(1, "call %u: client handle %llx names no object (its creation failed); call skipped\n", r->h.call,
+        (unsigned long long)v);
+    return 0;
+  }
+  *w0 = v;
+  memcpy(payload, &obj, 8);
+  return 1;
+}
+
+/* after a creation that carried client handle `cid` */
+static void
+handle_created(struct wmtr_host *h, const struct wmtr_req_ext *r, uint8_t *payload, uint64_t cid) {
+  uint64_t obj;
+  memcpy(&obj, payload + handle_ret_off(r->h.call), 8);
+  if (!(cid & WMTR_HANDLE_POOL)) {
+    struct wmtr_handle *e = &h->handles[cid % WMTR_HANDLE_SLOTS];
+    atomic_store_explicit(&e->obj, obj, memory_order_relaxed);
+    atomic_store_explicit(&e->id, cid, memory_order_release);
+  }
+  if (!obj) LOG(0, "call %s: creation of client handle %llx failed; the calls using it fail\n", call_name[r->h.call],
+                (unsigned long long)cid);
+}
+
 /* ------------------------------------------------------------------------------------------- */
 struct job { struct wmtr_host *h; uint8_t *copy; uint32_t len; };
 
@@ -611,17 +716,19 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
   const struct wmtr_out *outs = (const void *)(rec + sizeof *r + 4u * r->n_reloc);
   uint32_t poff = wmtr_req_payload_offset(r);
   uint8_t *payload = rec + poff;
-  if (poff + r->payload_size > len || r->h.params_size > r->payload_size) {
+  /* poff <= 16 + 4 * 65535 + 8 * 65535: no 32-bit overflow; the payload size is checked by subtraction */
+  if (poff > len || r->payload_size > len - poff || r->h.params_size > r->payload_size) {
     LOG(0, "malformed request call=%u\n", r->h.call);
-    reply(h, r, outs, payload, STATUS_INVALID_PARAMETER);
+    reply(h, r, outs, 0, NULL, STATUS_INVALID_PARAMETER);
     return;
   }
   uint64_t orig_small[512];
   uint64_t *orig = r->n_reloc <= 512 ? orig_small : malloc(8u * r->n_reloc);
   int nr = r->n_reloc;
   NTSTATUS st = STATUS_SUCCESS;
+  uint64_t w0 = 0, cid = 0;
   for (int i = 0; i < nr; i++) {
-    if (relocs[i] + 8 > r->payload_size) { st = STATUS_INVALID_PARAMETER; break; }
+    if (r->payload_size < 8 || relocs[i] > r->payload_size - 8) { st = STATUS_INVALID_PARAMETER; break; }
     uint64_t v;
     memcpy(&v, payload + relocs[i], 8);
     orig[i] = v;
@@ -633,8 +740,13 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
     if (r->h.flags & WMTR_F_CONTROL) {
       st = STATUS_SUCCESS; /* PING and HELLO need no work */
     } else if (r->h.call < 146) {
-      if (__atomic_load_n(&h->faulted, __ATOMIC_ACQUIRE)) {
+      if (r->h.params_size < call_params_size[r->h.call]) {
+        st = STATUS_INVALID_PARAMETER; /* the implementation would read and write past the params */
+        LOG(0, "call %u: params %u bytes, expected %u\n", r->h.call, r->h.params_size, call_params_size[r->h.call]);
+      } else if (__atomic_load_n(&h->faulted, __ATOMIC_ACQUIRE)) {
         st = STATUS_ACCESS_VIOLATION; /* this client already faulted the executor: refuse further work */
+      } else if (!handles_in(h, r, payload, &w0, &cid)) {
+        st = STATUS_INVALID_HANDLE; /* a client handle whose creation failed (logged) */
       } else {
         sigjmp_buf jb;
         if (sigsetjmp(jb, 1) == 0) {
@@ -646,6 +758,7 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
           }
           if (cs) callstats_add(r->h.call, r->h.flags & WMTR_F_SYNC, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
           fault_jmp = NULL;
+          if (cid) handle_created(h, r, payload, cid);
           uint32_t ti = atomic_fetch_add(&h->trace_n, 1) % 128;
           h->trace[ti].call = r->h.call; h->trace[ti].slot = r->h.slot; h->trace[ti].st = (uint32_t)st;
           for (int k = 0; k < 4; k++) h->trace[ti].q[k] = r->h.params_size >= 8u * (k + 1) ? ((const uint64_t *)payload)[k] : 0;
@@ -675,7 +788,8 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
       }
     } else st = STATUS_INVALID_PARAMETER;
   }
-  reply(h, r, outs, payload, st);
+  if (w0) memcpy(payload, &w0, 8); /* the caller gets its own handle back */
+  reply(h, r, outs, r->n_out, payload, st);
   if (orig != orig_small) free(orig);
 }
 
@@ -691,8 +805,8 @@ static void *
 executor(void *arg) {
   struct wmtr_host *h = arg;
   struct wmtr_ring *R = h->ring;
-  uint8_t *scratch = malloc(1 << 20);
   uint32_t scratch_cap = 1 << 20;
+  uint8_t *scratch = calloc(1, scratch_cap + WMTR_COPY_SLACK);
   pthread_setname_np("wmtr-executor");
   for (;;) {
     uint64_t tail = R->tail;
@@ -732,8 +846,9 @@ executor(void *arg) {
       LOG(0, "ring corrupt at %llu (size %u); stopping\n", (unsigned long long)tail, hdr.size);
       break;
     }
-    if (hdr.size > scratch_cap) { scratch_cap = hdr.size; scratch = realloc(scratch, scratch_cap); }
+    if (hdr.size > scratch_cap) { scratch_cap = hdr.size; scratch = realloc(scratch, scratch_cap + WMTR_COPY_SLACK); }
     memcpy(scratch, h->data + pos, hdr.size);
+    memset(scratch + hdr.size, 0, WMTR_COPY_SLACK);
     __atomic_store_n(&R->tail, tail + hdr.size, __ATOMIC_RELEASE);
     atomic_fetch_add(&h->n_req, 1);
     atomic_fetch_add(&h->n_bytes, hdr.size);
@@ -741,7 +856,7 @@ executor(void *arg) {
     uint8_t cls = hdr.call < 146 && !(hdr.flags & WMTR_F_CONTROL) ? call_class[hdr.call] : WMTR_CLASS_S;
     if (cls == WMTR_CLASS_B || cls == WMTR_CLASS_C) {
       struct job *j = malloc(sizeof *j);
-      j->h = h; j->len = hdr.size; j->copy = malloc(hdr.size);
+      j->h = h; j->len = hdr.size; j->copy = calloc(1, hdr.size + WMTR_COPY_SLACK);
       memcpy(j->copy, scratch, hdr.size);
       atomic_fetch_add(&h->n_worker, 1);
       dispatch_async_f(cls == WMTR_CLASS_B ? h->block_q : h->compile_q, j, job_run);
@@ -758,6 +873,13 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   const char *l = getenv("WMTR_LOG");
   if (l) log_level = atoi(l);
   struct wmtr_ring *R = ring;
+  /* the guest sizes blob 0: the executor reads the ring header, the request ring and the reply slots, and writes
+   * the slots, all at fixed offsets up to WMTR_RING_BLOB_BYTES */
+  uint64_t ring_size = 0;
+  if (!ops->blob_ptr || ops->blob_ptr(ctx, 0, &ring_size) != ring || ring_size < WMTR_RING_BLOB_BYTES) {
+    LOG(0, "ring blob of %llu bytes, need %llu\n", (unsigned long long)ring_size, (unsigned long long)WMTR_RING_BLOB_BYTES);
+    return NULL;
+  }
   if (R->magic != WMTR_RING_MAGIC || R->version != WMTR_VERSION) {
     LOG(0, "ring magic/version mismatch (%x/%u)\n", R->magic, R->version);
     return NULL;
@@ -769,6 +891,7 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   h->data = (uint8_t *)ring + WMTR_RING_DATA_OFFSET;
   h->slots = (struct wmtr_slot *)((uint8_t *)ring + WMTR_SLOTS_OFFSET);
   h->ops = ops; h->ctx = ctx;
+  h->handles = calloc(WMTR_HANDLE_SLOTS, sizeof *h->handles);
   pthread_mutex_init(&h->lock, NULL); pthread_cond_init(&h->cond, NULL);
   const char *sp = getenv("WMTR_HOST_SPIN_US");
   wmtr_host_set_spin(h, (uint64_t)(sp && *sp ? atoll(sp) : WMTR_HOST_SPIN_US_DEFAULT) * 1000);

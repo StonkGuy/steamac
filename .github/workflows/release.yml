@@ -1,0 +1,380 @@
+# Release DMG: builds the sources of a tag with the repository's own scripts and attaches
+#   FX-Steam-Launcher-<label>-adhoc.dmg (+ .sha256) and FX-Steam-Launcher-<label>-gpl-sources.tar
+# to the GitHub release. The app is signed ad hoc (host/launcher/dist.sh, DIST_SIGN=adhoc): no
+# Apple Developer account and no secret is involved; see docs/release-build.md.
+#
+# Jobs (GitHub's arm64 macOS runners have no nested virtualization, so no Linux containers there):
+#   dxmt   macOS      host/dxmt/build.sh fetch llvm native host pe      (DXMT host library, PE dlls)
+#   guest  Linux arm  guest/kernel, guest/mesa, scripts/build-image.sh initramfs (parallel to dxmt)
+#   layer  Linux arm  DXMT client + payload, scripts/build-image.sh layer
+#   app    macOS      ./build.sh host (bundle.sh checks the guest receipts), dist.sh, dist-verify.sh
+#   release           uploads the three files (the only job with contents: write)
+# The guest receipts (scripts/guest-artifacts.py) bind source bytes to output bytes and name no
+# machine or path, so the images built by `guest` are checked again by `app` on its own checkout.
+#
+# Runs for pushed tags and by hand (Actions > Release DMG > Run workflow). There is no
+# pull_request trigger: code from a fork's pull request never runs here.
+name: Release DMG
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag, branch or commit whose sources are built
+        required: true
+        default: main
+      release_tag:
+        description: Existing release to attach the files to (empty = keep them as a workflow artifact only)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dmg-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_REF: ${{ inputs.ref || github.ref }}
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+  # Pinned toolchain: the macos-26 image's Xcode 26.6 (actool for the Icon Composer icon, Metal toolchain).
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
+  # Scripts and tests a tag older than this workflow lacks (or has in an older form) are taken from
+  # the workflow's commit (each one is announced in the log). None of them is an input of a guest
+  # receipt or compiled into the app; the GPL source archive carries the files as built.
+  PACKAGING: >-
+    host/launcher/dist.sh host/launcher/licenses.sh host/dxmt/build.sh
+    scripts/guest-toolchain.sh scripts/test/dist-verify.sh wmtr/tests/wmtr_loopback.m
+    host/moltenvk/build.sh
+
+jobs:
+  dxmt:
+    name: DXMT host library and PE dlls
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - &packaging
+        name: Packaging scripts from the workflow's commit
+        run: |
+          git fetch -q --depth 1 origin "$GITHUB_SHA"
+          for f in $PACKAGING; do
+            if [ "$(git rev-parse -q --verify "HEAD:$f" || true)" != "$(git rev-parse "FETCH_HEAD:$f")" ]; then
+              mkdir -p "$(dirname "$f")"
+              git show "FETCH_HEAD:$f" > "$f"
+              chmod +x "$f"
+              echo "::notice::$f is taken from the workflow's commit ${GITHUB_SHA:0:10}"
+            fi
+          done
+          echo "sources: $(git rev-parse HEAD) ($SOURCE_REF), workflow: $GITHUB_SHA"
+      - &xcode
+        name: Xcode, Metal toolchain, Rosetta
+        run: |
+          echo "runner image: $ImageOS $ImageVersion"
+          sw_vers
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun -sdk macosx -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+          xcrun -sdk macosx -f metal
+          arch -x86_64 /usr/bin/true 2>/dev/null || softwareupdate --install-rosetta --agree-to-license
+          echo "kern.hv_support: $(sysctl -n kern.hv_support 2>/dev/null || echo n/a)"
+      # Each cache is saved as soon as its step succeeds, so a later failure does not lose it.
+      - name: LLVM 15 cache
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: llvm15-${{ runner.os }}-${{ runner.arch }}-xcode26.6-${{ hashFiles('host/dxmt/build.sh', 'host/dxmt/pin.env') }}
+      - name: DXMT source, LLVM 15
+        run: host/dxmt/build.sh fetch llvm
+      - if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+      - name: DXMT (native, host, pe)
+        run: host/dxmt/build.sh native host pe
+      - name: Pack
+        run: tar -cf dxmt-host.tar work/out/host/lib/libwmtr_host.dylib work/out/dxmt-pe
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dxmt-host
+          path: dxmt-host.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  guest:
+    name: Guest kernel, Mesa, initramfs
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - *packaging
+      - name: Runner, disk, amd64 emulation for the x86_64 + i386 Mesa and DXMT client containers
+        run: |
+          echo "runner image: $ImageOS $ImageVersion, $(nproc) cpus"
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          # QEMU 10.2 user emulation (the Ubuntu package, 8.2, crashes on the x86 fault reporter's own SIGSEGV
+          # test in guest/mesa verify); the same installer docker/setup-qemu-action uses, pinned
+          docker run --rm --privileged docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install amd64,386
+          # probe only (not a build input); a separate image: an index digest pulled for amd64 cannot be pulled again for arm64
+          test "$(docker run --rm --platform linux/amd64 docker.io/library/busybox:1.37 uname -m)" = x86_64
+          df -h / "$PWD"
+      - name: Kernel cache
+        id: kernel
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            work/out/Image
+            work/out/Image.inputs.json
+            work/out/kernel.config
+            work/out/kernel-check-config.log
+            work/cache/kernel
+          key: kernel-${{ hashFiles('guest/kernel/**') }}
+      - name: Mesa cache
+        id: mesa
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            work/out/mesa-venus
+            work/out/mesa-venus.inputs.json
+            work/out/mesa-aarch64.inputs.json
+            work/out/mesa-x86.inputs.json
+            work/build/mesa-venus/bin
+            work/build/mesa-venus/packages-*.txt
+            work/build/mesa-venus/toolchain-*.txt
+          key: mesa-v2-${{ hashFiles('guest/mesa/**', 'scripts/config.env', 'scripts/steps/10-rootfs.sh', 'scripts/builder/Dockerfile', 'scripts/keys/**') }}
+      # A cached output counts only when its receipt still matches these sources and its bytes.
+      - name: Kernel
+        run: |
+          if python3 scripts/guest-artifacts.py check kernel; then
+            echo "kernel: receipt valid, build skipped"
+          else
+            JOBS=$(nproc) guest/kernel/build.sh
+          fi
+      - if: steps.kernel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            work/out/Image
+            work/out/Image.inputs.json
+            work/out/kernel.config
+            work/out/kernel-check-config.log
+            work/cache/kernel
+          key: ${{ steps.kernel.outputs.cache-primary-key }}
+      - name: Builder image
+        run: scripts/build-image.sh builder
+      # Both architectures first, cached as soon as they are built (with the probe programs and the
+      # package/toolchain lists the verification and MANIFEST.txt use); then the verification against
+      # Valve's rootfs (a restored build whose per-architecture receipts match is only verified).
+      - name: Mesa (aarch64, x86_64 + i386)
+        run: |
+          if python3 scripts/guest-artifacts.py check mesa; then
+            echo "mesa: receipt valid, build skipped"
+          elif python3 scripts/guest-artifacts.py check mesa-aarch64 && python3 scripts/guest-artifacts.py check mesa-x86; then
+            echo "mesa: per-architecture receipts valid, only verify runs"
+          else
+            guest/mesa/build.sh fetch aarch64 x86
+          fi
+          sudo chown -R "$(id -u):$(id -g)" work
+      - if: steps.mesa.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            work/out/mesa-venus
+            work/out/mesa-venus.inputs.json
+            work/out/mesa-aarch64.inputs.json
+            work/out/mesa-x86.inputs.json
+            work/build/mesa-venus/bin
+            work/build/mesa-venus/packages-*.txt
+            work/build/mesa-venus/toolchain-*.txt
+          key: ${{ steps.mesa.outputs.cache-primary-key }}
+      - name: Mesa verify (against the verified SteamOS rootfs)
+        run: |
+          if ! python3 scripts/guest-artifacts.py check mesa; then
+            scripts/build-image.sh rootfs
+            sudo chown -R "$(id -u):$(id -g)" work
+            guest/mesa/build.sh verify
+            sudo rm -rf work/cache/rootfs
+          fi
+          sudo chown -R "$(id -u):$(id -g)" work
+          python3 scripts/guest-artifacts.py check mesa
+          df -h "$PWD"
+      - name: Initramfs
+        run: scripts/build-image.sh initramfs
+      - name: Pack
+        run: |
+          python3 scripts/guest-artifacts.py check kernel
+          python3 scripts/guest-artifacts.py check initramfs
+          python3 scripts/guest-artifacts.py check mesa
+          tar -cf guest-base.tar \
+            work/out/Image work/out/Image.inputs.json work/out/kernel.config \
+            work/out/initramfs.cpio.gz work/out/initramfs.cpio.gz.inputs.json \
+            work/out/mesa-venus work/out/mesa-venus.inputs.json work/out/mesa-aarch64.inputs.json work/out/mesa-x86.inputs.json \
+            work/cache/kernel/*.tar.xz work/cache/dosfstools/*/*.tar.gz work/cache/e2fsprogs/*/*.tar.xz work/cache/btrfs-progs/*/*.tar.xz
+          ls -l guest-base.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: guest-base
+          path: guest-base.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  layer:
+    name: DXMT guest payload and layer
+    needs: [dxmt, guest]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - *packaging
+      - name: amd64 emulation for the DXMT client container
+        run: docker run --rm --privileged docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install amd64,386
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: guest-base
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dxmt-host
+      - name: Unpack (receipts checked against this checkout)
+        run: |
+          tar -xf guest-base.tar
+          tar -xf dxmt-host.tar work/out/dxmt-pe
+          rm guest-base.tar dxmt-host.tar
+          python3 scripts/guest-artifacts.py check mesa
+      - name: DXMT guest payload (client, payload)
+        run: host/dxmt/build.sh fetch client payload
+      - name: Layer
+        run: |
+          scripts/build-image.sh builder layer
+          sudo chown -R "$(id -u):$(id -g)" work
+      - name: Receipts and container facts
+        run: |
+          python3 scripts/guest-artifacts.py check-release
+          scripts/guest-toolchain.sh
+          git status --short
+      - name: Pack
+        run: |
+          tar -cf guest.tar \
+            work/out/Image work/out/Image.inputs.json work/out/kernel.config \
+            work/out/initramfs.cpio.gz work/out/initramfs.cpio.gz.inputs.json \
+            work/out/steamac-layer.img work/out/steamac-layer.img.inputs.json \
+            work/out/mesa-venus work/out/mesa-venus.inputs.json work/out/mesa-aarch64.inputs.json work/out/mesa-x86.inputs.json \
+            work/out/dxmt work/out/guest-toolchain.json \
+            work/cache/licenses work/cache/cargo-home/registry \
+            work/cache/kernel/*.tar.xz work/cache/dosfstools/*/*.tar.gz work/cache/e2fsprogs/*/*.tar.xz work/cache/btrfs-progs/*/*.tar.xz
+          ls -l guest.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: guest
+          path: guest.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  app:
+    name: Host stack, app, DMG
+    needs: [dxmt, layer]
+    runs-on: macos-26
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - *packaging
+      - *xcode
+      - name: Homebrew packages
+        run: brew install meson ninja pkgconf dtc xz lld go cmake
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dxmt-host
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: guest
+      - name: Guest images and DXMT host library into work/
+        run: |
+          tar -xf guest.tar
+          tar -xf dxmt-host.tar work/out/host/lib/libwmtr_host.dylib
+          rm guest.tar dxmt-host.tar
+          python3 scripts/guest-artifacts.py check-release
+      # GitHub-hosted macOS runners are virtual machines: their GPU is a paravirtual Metal device without
+      # the features of Apple silicon (mesh shaders, Metal 4). The MoltenVK repros and KosmicKrisp's
+      # probe/repros run on a Mac against the built dylibs instead (docs/release-build.md); every other
+      # build test runs here. A self-hosted Mac runner runs them all.
+      - name: Host stack and app (./build.sh host)
+        run: |
+          system_profiler SPDisplaysDataType || true
+          if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+            export MVK_SKIP_REPRO=1 KK_SKIP_HOST_TESTS=1
+            echo "::notice::GitHub-hosted runner (paravirtual GPU): MoltenVK repros and KosmicKrisp host tests skipped"
+          fi
+          ./build.sh host
+      - name: Launcher self-tests (no VM)
+        run: |
+          app="work/out/FX Steam Launcher.app/Contents/MacOS/steamac-vm"
+          for t in graphics-path metal-cache game-layers remote-play; do
+            echo "=== --selftest-$t"
+            "$app" "--selftest-$t"
+          done
+      - name: DMG (ad hoc signature)
+        env:
+          DIST_SIGN: adhoc
+        run: host/launcher/dist.sh
+      - name: Verify, name, checksum
+        run: |
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' host/launcher/Info.plist)
+          if [ -n "$RELEASE_TAG" ]; then label=${RELEASE_TAG#v}; else label=$version-$(git rev-parse --short=10 HEAD); fi
+          mkdir upload
+          mv "work/out/dist/FX-Steam-Launcher-$version.dmg" "upload/FX-Steam-Launcher-$label-adhoc.dmg"
+          mv "work/out/dist/FX-Steam-Launcher-$version-gpl-sources.tar" "upload/FX-Steam-Launcher-$label-gpl-sources.tar"
+          scripts/test/dist-verify.sh --receipts "upload/FX-Steam-Launcher-$label-adhoc.dmg" adhoc
+          (cd upload && shasum -a 256 "FX-Steam-Launcher-$label-adhoc.dmg" > "FX-Steam-Launcher-$label-adhoc.dmg.sha256" && cat ./*.sha256)
+          {
+            echo "sources: $(git rev-parse HEAD) ($SOURCE_REF)"
+            echo "workflow: $GITHUB_SHA, run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "runner: $ImageOS $ImageVersion, $(xcodebuild -version | tr '\n' ' ')"
+            cat upload/*.sha256
+          } | tee upload/BUILD.txt >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: upload/
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    name: Attach to the release
+    needs: app
+    if: github.event_name == 'push' || inputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: upload
+      - name: Upload
+        run: |
+          (cd upload && sha256sum -c ./*.sha256)
+          # A pushed tag without a release gets a draft to review; an existing release keeps its notes.
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --notes "Built by the Release DMG workflow."
+          gh release upload "$RELEASE_TAG" upload/*.dmg upload/*.sha256 upload/*-gpl-sources.tar

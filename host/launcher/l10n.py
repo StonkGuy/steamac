@@ -5,11 +5,13 @@
                           `swiftc -emit-localized-strings`, one per source file) into
                           Localizable.xcstrings: new keys are added, keys no longer in the
                           code are marked stale (xcstringstool sync, as Xcode does on build)
-  l10n.py check [--strict]
+  l10n.py check [--strict] [--stringsdata DIR]
                           every current key translated into every language, the same format
                           arguments (type per position) as the English key, no stale keys;
-                          prints problems, exits 1 with --strict
+                          with DIR also every key the compiler extracted is in the catalog
+                          (catches code synced without Xcode); prints problems, exits 1 with --strict
   l10n.py compile DIR     DIR/<lang>.lproj/{Localizable,InfoPlist}.strings(dict) for the app
+                          (xcstringstool; without Xcode the same tables are written here)
   l10n.py export LANG FILE
                           the keys LANG lacks (missing or not "translated") with their comments
                           as JSON [{key, comment}] for a translator
@@ -23,6 +25,7 @@ letters (numbers, "%lld", "") need no translation. After import, build.sh's sync
 catalog in xcstringstool's own formatting.
 """
 import json
+import plistlib
 import re
 import shutil
 import subprocess
@@ -83,8 +86,24 @@ def sync(directory):
         print(f"l10n: removed {len(stale)} key(s) no longer in the code: {stale}")
 
 
-def check(strict):
+def extracted(directory):
+    """{key: source file} of the compiler's .stringsdata for the launcher's sources."""
+    keys = {}
+    for p in sorted(Path(directory).glob("*.stringsdata")):
+        if not (SOURCES / (p.stem + ".swift")).exists():
+            continue
+        for table, items in json.loads(p.read_text()).get("tables", {}).items():
+            for item in items if table == "Localizable" else []:
+                keys.setdefault(item["key"], p.stem + ".swift")
+    return keys
+
+
+def check(strict, stringsdata=None):
     problems = []
+    if stringsdata:
+        strings = json.loads(CATALOGS[0].read_text())["strings"]
+        problems += [f"{CATALOGS[0].name}: not in the catalog (from {where}; run sync with Xcode): {key!r}"
+                     for key, where in extracted(stringsdata).items() if key not in strings]
     for catalog in CATALOGS:
         strings = json.loads(catalog.read_text())["strings"]
         for key, entry in strings.items():
@@ -118,12 +137,53 @@ def check(strict):
         print(f"l10n: {', '.join(LANGUAGES)} complete")
 
 
+def strings_literal(text):
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+
+
+def compile_plain(catalog, out):
+    """xcstringstool compile without Xcode: <lang>.lproj/<table>.strings for plain strings and
+    <table>.stringsdict for plural variations, translated units only (others fall back to English)."""
+    table = catalog.stem
+    per_lang = {}
+    for key, entry in json.loads(catalog.read_text())["strings"].items():
+        for lang, loc in entry.get("localizations", {}).items():
+            if lang not in LANGUAGES:
+                continue
+            strings, plurals = per_lang.setdefault(lang, ({}, {}))
+            if loc.get("stringUnit", {}).get("state") == "translated":
+                strings[key] = loc["stringUnit"]["value"]
+            plural = loc.get("variations", {}).get("plural")
+            if plural and all(c.get("stringUnit", {}).get("state") == "translated" for c in plural.values()):
+                rule = {"NSStringFormatSpecTypeKey": "NSStringPluralRuleType"}
+                for case, c in plural.items():
+                    value = c["stringUnit"]["value"]
+                    rule[case] = value
+                    spec = SPEC.search(value)
+                    if spec and spec[3] != "%":
+                        rule["NSStringFormatValueTypeKey"] = (spec[2] or "") + spec[3]
+                plurals[key] = {"NSStringLocalizedFormatKey": "%#@arg@", "arg": rule}
+    for lang, (strings, plurals) in per_lang.items():
+        lproj = out / f"{lang}.lproj"
+        lproj.mkdir(exist_ok=True)
+        if strings:
+            (lproj / f"{table}.strings").write_text(
+                "".join(f"{strings_literal(k)} = {strings_literal(v)};\n" for k, v in strings.items()))
+        if plurals:
+            (lproj / f"{table}.stringsdict").write_bytes(plistlib.dumps(plurals))
+
+
 def compile_(directory):
     out = Path(directory)
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
+    xcode = shutil.which("xcrun") and subprocess.run(["xcrun", "--find", "xcstringstool"],
+                                                     capture_output=True).returncode == 0
     for catalog in CATALOGS:
-        subprocess.run(["xcrun", "xcstringstool", "compile", str(catalog), "--output-directory", str(out)], check=True)
+        if xcode:
+            subprocess.run(["xcrun", "xcstringstool", "compile", str(catalog), "--output-directory", str(out)], check=True)
+        else:
+            compile_plain(catalog, out)
     # Base language too, so English is an explicit localization of the bundle.
     (out / "en.lproj").mkdir(exist_ok=True)
 
@@ -163,7 +223,8 @@ def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "sync":
         sync(sys.argv[2])
     elif len(sys.argv) >= 2 and sys.argv[1] == "check":
-        check("--strict" in sys.argv[2:])
+        rest = sys.argv[2:]
+        check("--strict" in rest, rest[rest.index("--stringsdata") + 1] if "--stringsdata" in rest[:-1] else None)
     elif len(sys.argv) >= 3 and sys.argv[1] == "compile":
         compile_(sys.argv[2])
     elif len(sys.argv) >= 4 and sys.argv[1] == "export":

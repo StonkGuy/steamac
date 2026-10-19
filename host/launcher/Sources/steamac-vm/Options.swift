@@ -121,6 +121,7 @@ struct Options {
     var selftestProvision = false
     var selftestMetalCache = false
     var selftestGameLayers = false
+    var selftestL10n = false
     var referenceDisk: String?
     /// --ssh-password DISK: print the disk's generated guest password (GuestPassword) and exit.
     var showSSHPassword: String?
@@ -151,6 +152,7 @@ struct Options {
            steamac-vm --selftest-remote-play
            steamac-vm --selftest-metal-cache
            steamac-vm --selftest-game-layers
+           steamac-vm --selftest-l10n
            steamac-vm --selftest-graphics-path [--graphics-path dxmt|vulkan]
            steamac-vm --create-disk PATH [--branch stable|rc] [--home-gib N]
                       [--password PW] [--keep-cache] [--accept-eula]
@@ -290,6 +292,8 @@ struct Options {
                            (default work/out/steamos.img, opened read-only), squashfs + CMS verification of
                            the cached bundle, cpio payload, SHA-512 crypt, desync progress parsing
       --selftest-metal-cache reproduce an inaccessible Metal module cache and verify startup recovery
+      --selftest-l10n      the bundle's ru and zh-Hans tables: present, the same keys, the same format
+                           arguments, the launcher's settings strings translated
       --resize-selftest S  S seconds after Steam is ready, resize the window 1600x1000 -> fullscreen ->
                            windowed -> 1280x800, wait for the guest's new scanout each time and dump
                            frames to <--frame-dump>-resize-N-*.png
@@ -437,6 +441,7 @@ struct Options {
             case "--selftest-provision": o.selftestProvision = true
             case "--selftest-metal-cache": o.selftestMetalCache = true
             case "--selftest-game-layers": o.selftestGameLayers = true
+            case "--selftest-l10n": o.selftestL10n = true
             case "--reference-disk": o.referenceDisk = try value(a)
             case "--create-disk": o.createDisk = try value(a)
             case "--grow-disk": o.growDisk = try value(a)
@@ -488,7 +493,7 @@ struct Options {
 
     var isSelftest: Bool {
         selftestDisplay || selftestOverlay || selftestStall || selftestPill || selftestSettings || selftestProvision || selftestRemotePlay
-            || selftestMetalCache || selftestGameLayers || createDisk != nil || growDisk != nil
+            || selftestMetalCache || selftestGameLayers || selftestL10n || createDisk != nil || growDisk != nil
             || showSSHPassword != nil
     }
 

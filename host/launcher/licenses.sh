@@ -228,8 +228,20 @@ host_rust = re.search(r'^RUST_TOOLCHAIN=\$\{RUST_TOOLCHAIN:-([0-9.]+)\}',
                       (root / 'host/libkrun/build.sh').read_text(), re.M)
 if not host_rust:
     raise RuntimeError('missing pinned host libkrun Rust toolchain')
-guest_rust = run('docker', 'run', '--rm', '--platform', 'linux/arm64',
-                 config['RUST_IMAGE'], 'rustc', '--version').split()[1]
+# The guest Rust version and the builder's busybox-static come from the build containers. Without
+# Docker (the app assembled on another machine than the one that built the guest images) they are
+# read from the record scripts/guest-toolchain.sh wrote there; it must name the same pinned images.
+if shutil.which('docker'):
+    guest = None
+    guest_rust = run('docker', 'run', '--rm', '--platform', 'linux/arm64',
+                     config['RUST_IMAGE'], 'rustc', '--version').split()[1]
+else:
+    guest = json.loads(require(root / 'work/out/guest-toolchain.json').read_text())
+    if (guest.get('version') != 1 or guest.get('rust_image') != config['RUST_IMAGE']
+            or guest.get('builder_image') != config['BUILDER_IMAGE']):
+        raise RuntimeError('work/out/guest-toolchain.json does not describe the images pinned in '
+                           'scripts/config.env: rerun scripts/guest-toolchain.sh where the guest was built')
+    guest_rust = guest['rust_version']
 for kind, version, location in (
     ('host', host_rust.group(1), host + '/libkrun.1.dylib'),
     ('guest', guest_rust, res + '/steamac-layer.img:/usr/bin/fx-progress-agent')):
@@ -248,11 +260,14 @@ archive('linux-kernel', kernel_version, 'GPL-2.0-only WITH Linux-syscall-note', 
 # busybox is the Debian snapshot's busybox-static; retrieve the matching installed
 # package copyright instead of pretending a GPL text from another release is sufficient.
 builder = config['BUILDER_IMAGE']
-builder_hash = run('docker', 'image', 'inspect', '-f', '{{.Id}}', builder).split(':')[-1][:16]
-busybox_version = run('docker', 'run', '--rm', '--platform', 'linux/arm64', builder,
-                      'dpkg-query', '-W', '-f=${Version}', 'busybox-static')
+if guest:
+    builder_hash, busybox_version = guest['builder_id'], guest['busybox_version']
+else:
+    builder_hash = run('docker', 'image', 'inspect', '-f', '{{.Id}}', builder).split(':')[-1][:16]
+    busybox_version = run('docker', 'run', '--rm', '--platform', 'linux/arm64', builder,
+                          'dpkg-query', '-W', '-f=${Version}', 'busybox-static')
 busybox_copyright = root / 'work/cache/licenses' / ('busybox-' + builder_hash + '-copyright')
-if not busybox_copyright.is_file():
+if not guest and not busybox_copyright.is_file():
     data = subprocess.check_output(['docker', 'run', '--rm', '--platform', 'linux/arm64',
                                     builder, 'cat', '/usr/share/doc/busybox-static/copyright'])
     busybox_copyright.parent.mkdir(parents=True, exist_ok=True)
