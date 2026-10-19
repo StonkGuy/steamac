@@ -12,6 +12,7 @@
 #include <sched.h>
 #include <libproc.h>
 #include <sys/mman.h>
+#include <time.h>
 
 #define WINEMETAL_API
 #include "winemetal_thunks.h"
@@ -124,9 +125,26 @@ static NTSTATUS f_signal(void *p) { /* encodeSignalEvent, as DXMT's unix side */
   [(id<MTLCommandBuffer>)a->handle encodeSignalEvent:(id<MTLSharedEvent>)a->arg0 value:a->arg1];
   return 0;
 }
-static NTSTATUS f_rce(void *a) { ((struct unixcall_generic_obj_uint64_obj_ret *)a)->ret = 0; return 0; } /* pass profile only */
 static NTSTATUS f_commit(void *a) { [(id<MTLCommandBuffer>)((struct unixcall_generic_obj_noret *)a)->handle commit]; return 0; }
-const void *wmtr_impl_funcs[WMTR_NCALLS] = {[32] = f_rce, [12] = f_commit, [1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
+/* encoders: autoreleased objects; the log records (call, receiver or result) in execution order */
+static uint64_t enc_log[64][2]; static int n_enc_log;
+static void enc_note(uint64_t call, uint64_t v) { if (n_enc_log < 64) { enc_log[n_enc_log][0] = call; enc_log[n_enc_log][1] = v; } n_enc_log++; }
+static NTSTATUS f_new_encoder(uint64_t *ret, uint64_t call, int fail) {
+  *ret = fail ? 0 : (obj_handle_t)[[[NSObject alloc] init] autorelease];
+  enc_note(call, *ret);
+  return 0;
+}
+static NTSTATUS f_blit_enc(void *a) { return f_new_encoder(&((struct unixcall_generic_obj_obj_ret *)a)->ret, 30, 0); }
+static NTSTATUS f_compute_enc(void *a) { struct unixcall_generic_obj_uint64_obj_ret *p = a; return f_new_encoder(&p->ret, 31, p->arg == 99); }
+static NTSTATUS f_render_enc(void *a) {
+  struct unixcall_generic_obj_uint64_obj_ret *p = a;
+  const struct WMTRenderPassInfo *i = (const void *)(uintptr_t)p->arg;
+  return f_new_encoder(&p->ret, 32, !i || i->render_target_width != 640);
+}
+static NTSTATUS f_end_encoding(void *a) { enc_note(33, ((struct unixcall_generic_obj_noret *)a)->handle); return 0; }
+static NTSTATUS f_compute_encode(void *a) { enc_note(37, ((struct unixcall_generic_obj_cmd_noret *)a)->encoder); return 0; }
+const void *wmtr_impl_funcs[WMTR_NCALLS] = {[12] = f_commit, [1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
+                                    [33] = f_end_encoding, [37] = f_compute_encode, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
                                     [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes};
 
 /* ---------------- loopback transport ---------------- */
@@ -781,6 +799,52 @@ int main(void) {
     }
     test_vr(dev);
     test_vr_fd();
+    /* 8. client-assigned handles: a frame's pool + encoder creations do not wait for the host (one sync call
+          apart from the calls that return values); each use reaches the host after its creation and gets the object;
+          a failed creation makes the calls using its handle no-ops. WMTR_CLIENT_HANDLES=0: every creation waits. */
+    {
+      int on = !getenv("WMTR_CLIENT_HANDLES") || atoi(getenv("WMTR_CLIENT_HANDLES"));
+      struct wmtr_host_stats s0, s1;
+      wmtr_host_get_stats(H, &s0);
+      n_enc_log = 0;
+      struct unixcall_generic_obj_ret pool = {0};
+      remote(10, &pool);
+      struct unixcall_generic_obj_ret ar = {0};
+      remote(53, &ar); /* autoreleased into the pool */
+      struct WMTRenderPassInfo rpi; memset(&rpi, 0, sizeof rpi); rpi.render_target_width = 640;
+      struct unixcall_generic_obj_uint64_obj_ret re = {0x77, (uint64_t)(uintptr_t)&rpi, 0}, ce = {0x77, 1, 0}, bad = {0x77, 99, 0};
+      struct unixcall_generic_obj_obj_ret be = {0x77, 0};
+      remote(32, &re);
+      struct unixcall_generic_obj_noret end = {re.ret}; remote(33, &end);
+      remote(31, &ce);
+      struct unixcall_generic_obj_cmd_noret enc = {ce.ret, {NULL}}; remote(37, &enc);
+      end.handle = ce.ret; remote(33, &end);
+      remote(30, &be);
+      end.handle = be.ret; remote(33, &end);
+      remote(31, &bad); /* fails on the host */
+      enc.encoder = bad.ret; remote(37, &enc);
+      end.handle = bad.ret; remote(33, &end);
+      obj_handle_t ph = pool.ret;
+      int alive_in_pool = 0;
+      struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); /* sync: all of the above has executed */
+      alive_in_pool = probe_alive;
+      remote(1, &ph);
+      remote(39, &q);
+      wmtr_host_get_stats(H, &s1);
+      uint64_t waits = s1.sync_requests - s0.sync_requests;
+      CHECK(waits == (on ? 3u : 8u), "pool+encoders: %llu sync requests (want %d)", waits, on ? 3 : 8); /* 53 and 39 twice */
+      CHECK(pool.ret && re.ret && ce.ret && be.ret && (on ? bad.ret != 0 : bad.ret == 0), "handles %llx %llx %llx %llx %llx",
+            pool.ret, re.ret, ce.ret, be.ret, bad.ret);
+      CHECK(alive_in_pool && !probe_alive, "pool handle: object alive in pool %d, after release %d", alive_in_pool, probe_alive);
+      /* host order: 32 r, 33 r, 31 c, 37 c, 33 c, 30 b, 33 b, 31 0 (failed; its uses are skipped) */
+      static const uint64_t want[8] = {32, 33, 31, 37, 33, 30, 33, 31};
+      int ok = n_enc_log == (on ? 8 : 10);
+      for (int i = 0; ok && i < 8; i++) ok = enc_log[i][0] == want[i];
+      ok = ok && enc_log[0][1] && enc_log[1][1] == enc_log[0][1] && enc_log[3][1] == enc_log[2][1] &&
+           enc_log[4][1] == enc_log[2][1] && enc_log[6][1] == enc_log[5][1] && enc_log[7][1] == 0;
+      CHECK(ok, "encoder order/objects: %d log entries", n_enc_log);
+      CHECK(end.handle == bad.ret, "the caller's receiver handle was changed to %llx", end.handle);
+    }
     struct wmtr_host_stats st; wmtr_host_get_stats(H, &st);
     printf("requests=%llu sync=%llu bytes=%llu\n", st.requests, st.sync_requests, st.bytes);
     { /* an autoreleased result outside any client pool must outlive the request (DXMT reads it next) */
@@ -871,10 +935,20 @@ int main(void) {
         wmtr_host_set_spin(H, 20000000);
         { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); }
         wmtr_host_get_stats(H, &st1);
-        for (int i = 0; i < 20; i++) { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); usleep(300); }
+        /* a gap that really lasted longer than the budget (this thread descheduled on a loaded or
+           virtualized machine, e.g. a CI runner) is allowed to end in a sleep */
+        unsigned long long long_gaps = 0;
+        for (int i = 0; i < 20; i++) {
+          struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q);
+          uint64_t g0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+          usleep(300);
+          if (clock_gettime_nsec_np(CLOCK_MONOTONIC) - g0 >= 20000000) long_gaps++;
+        }
         wmtr_host_get_stats(H, &st2);
         CHECK(st1.idle_sleeps - st0.idle_sleeps >= 15, "no spin: %llu sleeps in 20 gaps", st1.idle_sleeps - st0.idle_sleeps);
-        CHECK(st2.idle_sleeps - st1.idle_sleeps <= 1, "20 ms spin: %llu sleeps in 20 gaps of 0.3 ms", st2.idle_sleeps - st1.idle_sleeps);
+        CHECK(long_gaps <= 5 && st2.idle_sleeps - st1.idle_sleeps <= 1 + long_gaps,
+              "20 ms spin: %llu sleeps in 20 gaps of 0.3 ms (%llu gaps lasted >= 20 ms)",
+              st2.idle_sleeps - st1.idle_sleeps, long_gaps);
         wmtr_host_set_spin(H, WMTR_HOST_SPIN_US_DEFAULT * 1000);
       }
       wmtr_host_destroy(H);

@@ -120,7 +120,13 @@ done
 	bin=$(cargo test -q -p krun-hvf --lib --no-run --message-format=json |
 		sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -1)
 	codesign --force -s - --entitlements "$here/test/hypervisor.entitlements" "$bin"
-	"$bin" -q
+	# A Mac without Hypervisor.framework support (GitHub's macOS runners are VMs without nested
+	# virtualization) cannot run it; there it is built and signed only.
+	if [ "$(sysctl -n kern.hv_support 2>/dev/null)" = 1 ]; then
+		"$bin" -q
+	else
+		echo "libkrun: kern.hv_support is not 1, krun-hvf tests (patch 0026) built but not run" >&2
+	fi
 )
 
 # --- install (temp file + rename for every output)

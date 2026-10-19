@@ -10,6 +10,7 @@
 #   ./build.sh vrhost     the experimental VR host (docs/vr.md; needs cmake + ninja), then
 #                         re-run host/launcher/build.sh to bundle it. Not part of `all`: an app
 #                         built without it has no VR host and is otherwise unchanged.
+#   ./build.sh dxmt       the DXMT graphics path (host/dxmt/build.sh: host library + guest payload)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -39,5 +40,6 @@ case ${1:-all} in
     guest) guest ;;
     vrhost) host/vrhost/build.sh ;;
     all) host; guest ;;
-    *) echo "usage: $0 [all|host|guest|vrhost]" >&2; exit 64 ;;
+    dxmt) host/dxmt/build.sh ;;
+    *) echo "usage: $0 [all|host|guest|vrhost|dxmt]" >&2; exit 64 ;;
 esac

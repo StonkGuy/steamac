@@ -1,6 +1,6 @@
 // d3d11bench: small, deterministic D3D11 load for comparing graphics paths.
 // Usage: d3d11bench.exe [--draws N] [--seconds S] [--width W] [--height H] [--vsync 0|1] [--indexed 0|1]
-//                       [--overdraw K] [--csv path] [--label text] [--probe MS]
+//                       [--overdraw K] [--passes P] [--csv path] [--label text] [--probe MS]
 // --probe MS (input-to-photon probe): on every key press or mouse motion the next frame is held back MS
 // milliseconds (and the clear colour flips). The host sees the gap in its presented-frame timestamps
 // (WMTR_FRAMES / STEAMAC_PERF_FRAMES); the first frame after the gap is the response to the input, so
@@ -19,6 +19,8 @@
 // Per frame: N draws of an instanced-free textured cube grid, each with its own constant buffer
 // update (Map WRITE_DISCARD), plus K full-screen overdraw passes with a moderately heavy pixel
 // shader (fill-rate/GPU load). Writes one CSV row per frame: frame,cpu_ms,present_ms,t_s.
+// --passes P: the draws are split over P render passes that alternate between an offscreen target and the back
+// buffer (the last one), so each frame opens P render encoders, like a game's shadow/post passes (default 1).
 // Prints a summary line: frames, avg fps, p50/p95/p99 frame ms, 1% low fps.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -34,7 +36,7 @@
 #include <vector>
 
 static int g_indexed = 0;
-static int g_draws = 2000, g_seconds = 20, g_width = 1280, g_height = 800, g_vsync = 0, g_overdraw = 4;
+static int g_draws = 2000, g_seconds = 20, g_width = 1280, g_height = 800, g_vsync = 0, g_overdraw = 4, g_passes = 1;
 static const char *g_csv = "d3d11bench.csv";
 static const char *g_label = "run";
 static bool g_quit = false;
@@ -140,6 +142,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--height")) g_height = atoi(argv[i + 1]);
     else if (!strcmp(argv[i], "--vsync")) g_vsync = atoi(argv[i + 1]);
     else if (!strcmp(argv[i], "--overdraw")) g_overdraw = atoi(argv[i + 1]);
+    else if (!strcmp(argv[i], "--passes")) g_passes = std::max(1, atoi(argv[i + 1]));
     else if (!strcmp(argv[i], "--indexed")) g_indexed = atoi(argv[i + 1]);
     else if (!strcmp(argv[i], "--csv")) g_csv = argv[i + 1];
     else if (!strcmp(argv[i], "--label")) g_label = argv[i + 1];
@@ -207,6 +210,13 @@ int main(int argc, char **argv) {
 
   ID3D11Texture2D *bb; sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void **)&bb);
   ID3D11RenderTargetView *rtv; dev->CreateRenderTargetView(bb, nullptr, &rtv); bb->Release();
+  ID3D11RenderTargetView *off_rtv = nullptr; /* --passes: the offscreen target the other passes draw into */
+  if (g_passes > 1) {
+    D3D11_TEXTURE2D_DESC od = {(UINT)g_width, (UINT)g_height, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT,
+                               D3D11_BIND_RENDER_TARGET, 0, 0};
+    ID3D11Texture2D *ot; dev->CreateTexture2D(&od, nullptr, &ot);
+    dev->CreateRenderTargetView(ot, nullptr, &off_rtv); ot->Release();
+  }
 
   /* VR eye targets */
   enum { VR_RING = 3 };
@@ -273,6 +283,12 @@ int main(int argc, char **argv) {
     ctx->PSSetShaderResources(0, 1, &srv); ctx->PSSetSamplers(0, 1, &smp);
     ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
     for (int d = 0; d < g_draws; d++) {
+      if (g_passes > 1 && d % ((g_draws + g_passes - 1) / g_passes) == 0) {
+        /* pass k of P: the last one is the back buffer, the ones before alternate with the offscreen target */
+        int k = d / ((g_draws + g_passes - 1) / g_passes);
+        ID3D11RenderTargetView *target = (g_passes - 1 - k) % 2 ? off_rtv : rtv;
+        ctx->OMSetRenderTargets(1, &target, nullptr);
+      }
       D3D11_MAPPED_SUBRESOURCE ms;
       if (SUCCEEDED(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
         float *f = (float *)ms.pData;
@@ -284,6 +300,7 @@ int main(int argc, char **argv) {
       ctx->Draw(6, 0);
     }
     if (g_overdraw > 0) {
+      if (g_passes > 1) ctx->OMSetRenderTargets(1, &rtv, nullptr);
       ctx->IASetInputLayout(nullptr); ctx->VSSetShader(fvs, nullptr, 0); ctx->PSSetShader(fps, nullptr, 0);
       ctx->OMSetBlendState(blend, nullptr, 0xffffffff);
       for (int k = 0; k < g_overdraw; k++) ctx->Draw(3, 0);
@@ -349,8 +366,8 @@ int main(int argc, char **argv) {
   auto pct = [&](double p) { return s[std::min(s.size() - 1, (size_t)(p * (s.size() - 1)))]; };
   size_t n1 = std::max<size_t>(1, s.size() / 100); double worst = 0;
   for (size_t i = s.size() - n1; i < s.size(); i++) worst += s[i];
-  printf("RESULT label=%s draws=%d overdraw=%d %dx%d frames=%zu avg_fps=%.1f p50_ms=%.2f p95_ms=%.2f p99_ms=%.2f "
-         "low1_fps=%.1f max_ms=%.1f\n", g_label, g_draws, g_overdraw, g_width, g_height, v.size(), 1000.0 * v.size() / sum,
+  printf("RESULT label=%s draws=%d overdraw=%d passes=%d %dx%d frames=%zu avg_fps=%.1f p50_ms=%.2f p95_ms=%.2f p99_ms=%.2f "
+         "low1_fps=%.1f max_ms=%.1f\n", g_label, g_draws, g_overdraw, g_passes, g_width, g_height, v.size(), 1000.0 * v.size() / sum,
          pct(0.5), pct(0.95), pct(0.99), 1000.0 / (worst / n1), s.back());
   fflush(stdout);
   return 0;

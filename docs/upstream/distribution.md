@@ -21,6 +21,12 @@ A notarytool profile must be stored in Keychain once:
 “Developer ID Application” in Keychain), `NOTARY_PROFILE` (by default, `steamac-notary`);
 `--no-notarize` — signing only, for local checks (Gatekeeper will reject a downloaded copy).
 
+Without a Developer ID: `DIST_SIGN=adhoc host/launcher/dist.sh` signs the copy ad hoc with the same
+entitlements (no hardened runtime, no timestamp, no notarization) and builds the same DMG, unsigned. A
+downloaded copy opens only after **Open Anyway** in System Settings > Privacy & Security. This fork's
+release DMGs are built this way on GitHub Actions ([release builds](../release-build.md)).
+`scripts/test/dist-verify.sh <dmg> adhoc` checks the result.
+
 Licenses: `bundle.sh` puts all third-party license texts for bundled components and the
 `THIRD-PARTY-NOTICES.txt` index (component, version, SPDX, location in the bundle, sources; generated
 by `host/launcher/licenses.sh` in `work/out/licenses`, including libkrun crates and Go modules from

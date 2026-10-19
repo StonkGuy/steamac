@@ -101,7 +101,7 @@ grep -q 'fx-progress-agent sleep suspend$' "$ST/usr/lib/systemd/system/systemd-s
 for f in usr/bin/splctl usr/lib/rauc/post-install.sh usr/lib/steamac/kernelsetup.sh \
          usr/lib/steamac/rauc-shims/steamos-chroot usr/lib/steamac/steam-gfx-env \
          usr/lib/steamac/steam-shader-defaults usr/lib/steamac/steam-client \
-         usr/lib/steamac/nested-desktop usr/lib/steamac/steam-gfx-path usr/lib/steamac/steam-vr-path usr/lib/steamac/steam-frame-latency usr/lib/steamac/mem-trim \
+         usr/lib/steamac/nested-desktop usr/lib/steamac/steam-gfx-path usr/lib/steamac/steam-vr-path usr/lib/steamac/steam-frame-latency usr/lib/steamac/mem-trim usr/lib/steamac/steam-ui-gpu \
          usr/lib/steamac/desktop-bin/kwin_wayland_wrapper \
          usr/lib/steamac/desktop-bin/steamosctl usr/lib/steamos/gamescope-session; do
     [[ -x $ST/$f ]] || { echo "[layer] $f missing or not executable" >&2; exit 1; }

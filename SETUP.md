@@ -25,11 +25,12 @@ VR is experimental and off by default ([docs/vr.md](docs/vr.md)).
 
 ## Install
 
-1. This fork does not publish a prebuilt DMG yet. Check out `main` or a
+1. Download the DMG attached to a [release](https://github.com/StonkGuy/steamac/releases) (from v1.9-eac.1: built by GitHub Actions from the
+   tag, ad-hoc signed, SHA-256 next to it; [release builds](docs/release-build.md)), or check out `main` or a
    [release](https://github.com/StonkGuy/steamac/releases) tag and build with `./build.sh`
    ([requirements and building](docs/upstream/requirements-and-building.md)). For the DXMT path, run
    `make dxmt-payload` in `wmtr/` before the layer step; without it the app offers only the Vulkan path.
-2. Copy **FX Steam Launcher.app** from `work/out/` to Applications.
+2. Copy **FX Steam Launcher.app** from the DMG or `work/out/` to Applications.
 3. **First open.** The fork's builds are ad-hoc signed and not notarized, so macOS Gatekeeper blocks the first open. This
    is needed once. Right-click (or Control-click) the app, choose **Open**, then **Open** again. If macOS 15 or newer does
    not offer that, open System Settings > Privacy & Security, scroll to the "FX Steam Launcher was blocked" message,
@@ -96,6 +97,8 @@ falls back to Vulkan.
 - The default is **Vulkan (classic)**. DXMT measured faster on the one verified Mac (see Known limits), but the
   default has not been changed.
 - DXMT covers Direct3D 11 and 10, and Direct3D 12 within the limits above.
+- Direct3D 11 stream output with rasterization, or from a geometry shader, is not implemented in DXMT upstream. Games
+  that use it render wrongly on DXMT (Unigine Superposition shows black shadow areas); use **Vulkan** for them.
 
 Settings > Advanced > **Vulkan driver** (KosmicKrisp or MoltenVK) applies to the Vulkan path only.
 
