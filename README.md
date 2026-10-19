@@ -131,8 +131,7 @@ whose peak needs more than the VM and the Mac have (see *Limits*).
   reaches `301` (not played further). Other titles are untested and results differ game by game.
 - 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
   memory on both paths with an 8 GiB VM.
-- VR (Meta Quest 3 over WiVRn) is not on this branch yet. It is experimental, on the
-  [`vr-polish`](https://github.com/StonkGuy/steamac/tree/vr-polish) branch, with its guide in `docs/vr.md` there.
+- VR (Meta Quest 3 over WiVRn) is experimental and off by default: see [docs/vr.md](docs/vr.md).
 - DXMT: Direct3D 11/10. Its Direct3D 12 is limited (feature level 11_1, DXBC only, no DXIL, no ray tracing;
   ExecuteIndirect stalls the GPU); use *Vulkan* for Direct3D 12 games.
 - DXMT: Direct3D 11 stream output with rasterization or from a geometry shader is not implemented upstream; such games
@@ -155,6 +154,7 @@ whose peak needs more than the VM and the Mac have (see *Limits*).
 | [docs/fork.md](docs/fork.md) | what changed in this fork and its status |
 | [docs/eac-how-it-works.md](docs/eac-how-it-works.md) | the EAC chain and why the FEX swap is needed |
 | [docs/eac-performance.md](docs/eac-performance.md) | measurements and limits |
+| [docs/vr.md](docs/vr.md) | VR with a Quest 3 over WiVRn (experimental): setup, pairing, options, limits |
 | [fex-eac/README.md](fex-eac/README.md) | patched FEX setup and launch options |
 | [docs/upstream/README.md](docs/upstream/README.md) | upstream steamac's documentation (Apache-2.0, © FX GAMES FZ LLC) |
 

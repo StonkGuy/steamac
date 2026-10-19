@@ -1,0 +1,32 @@
+diff --git a/client/application.cpp b/client/application.cpp
+index cf46e87..50c86a5 100644
+--- a/client/application.cpp
++++ b/client/application.cpp
+@@ -1526,7 +1526,7 @@ void application::set_server_uri(std::string uri)
+ 		server_intent =
+ 		        wivrn_discover::service{
+ 		                .name = "",
+-		                .hostname = parse_result->host(),
++		                .hostname = (parse_result->host_type() == boost::urls::host_type::ipv6 ? std::string(parse_result->encoded_host_address()) : std::string(parse_result->host())),
+ 		                .port = parse_result->has_port() ? parse_result->port_number() : wivrn::default_port,
+ 		                .tcp_only = is_tcp_scheme(parse_result->scheme()),
+ 		                .pin = parse_result->password(),
+diff --git a/client/application.h b/client/application.h
+index f872b55..b5327a2 100644
+--- a/client/application.h
++++ b/client/application.h
+@@ -354,6 +354,14 @@ public:
+ 
+ 	static std::optional<wivrn_discover::service> get_intent()
+ 	{
++		// test harness: connect once to wivrn://:PIN@host:port given in WIVRN_TEST_URI
++		static bool test_uri_done = false;
++		if (!test_uri_done)
++		{
++			test_uri_done = true;
++			if (const char * u = std::getenv("WIVRN_TEST_URI"))
++				instance().set_server_uri(u);
++		}
+ 		std::unique_lock _{instance().server_intent_mutex};
+ 
+ 		auto intent = instance().server_intent;

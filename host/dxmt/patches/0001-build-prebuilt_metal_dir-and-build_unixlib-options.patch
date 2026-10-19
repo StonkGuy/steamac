@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
 Date: Sat, 10 Oct 2026 04:23:05 +0300
-Subject: [PATCH 01/24] build: prebuilt_metal_dir and build_unixlib options
+Subject: [PATCH 01/27] build: prebuilt_metal_dir and build_unixlib options
 
 prebuilt_metal_dir takes dxmt_command.metallib and air_{msad,samplepos,
 tessellation}.air built from the same revision, so the tree builds where

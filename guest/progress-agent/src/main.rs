@@ -31,7 +31,8 @@
 //! Host -> guest (same port): `collect-logs <id>`, served at any point of the
 //! lifecycle below (worker thread; the bundle goes out from the main loop);
 //! `freeze-game <appid>` / `thaw-game` / `still-background` (freeze.rs: pause
-//! the focused game while the launcher is in the background).
+//! the focused game while the launcher is in the background); `launch-vr <appid>`
+//! (launchvr.rs: start a game in its Steam VR launch mode).
 //!
 //! Lifecycle
 //!   1. port missing (older launcher) -> exit 0 quietly.
@@ -95,6 +96,7 @@ mod steamstrings;
 mod ui;
 mod uhid;
 mod freeze;
+mod launchvr;
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
@@ -319,6 +321,10 @@ fn serve_host(port: &mut Port, collector: &mut collect::Collector, freezer: &mut
                 Err(_) => eprintln!("fx-progress: freeze-game: bad app id {arg:?}"),
             },
             "thaw-game" => freezer.thaw("launcher active again"),
+            "launch-vr" => match launchvr::parse(arg) {
+                Some(id) => launchvr::launch(id),
+                None => eprintln!("fx-progress: launch-vr: bad app id {arg:?}"),
+            },
             "still-background" => freezer.keepalive(),
             "" => {}
             _ => eprintln!("fx-progress: ignoring unknown host request {cmd:?}"),

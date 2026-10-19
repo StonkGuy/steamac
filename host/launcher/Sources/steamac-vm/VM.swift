@@ -98,6 +98,7 @@ final class VM {
         // GPU: Venus only (no virgl GL), host-visible shm window for blobs. virglrenderer (in this
         // process) opens the Vulkan driver named by VKR_VULKAN_DRIVER (its patch 0013).
         Self.applyGraphicsEnv(o)
+        VRHost.apply(o, ctx: ctx, sound: hasSound && o.vrHeadsetAudio) // Settings > VR "Game audio in the headset"
         setenv("VKR_VULKAN_DRIVER", "@rpath/" + o.vulkanDriver.library, 1)
         setenv("VKR_GPU_BUDGET_MIB", String(o.gpuBudgetMiB), 1)
         OverlayView.vulkanDriver = o.vulkanDriver

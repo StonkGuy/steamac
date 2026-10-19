@@ -1,0 +1,1460 @@
+From 290fc81e40eaa26ebca63ac3c8a999217daca90b Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Sun, 11 Oct 2026 23:22:26 +0300
+Subject: [PATCH] virtio-snd(macos): VR audio region, playback to a headset and
+ its microphone back
+
+krun_snd_set_vr_audio() attaches a shared-memory region (two lock-free
+SPSC rings of S16 PCM, layout in steamac host/vrhost/include/vraudio.h)
+through which a VR host process plays the guest's audio on a headset and
+supplies the headset's microphone.
+
+Routing follows the headset, not the attachment: the VR host publishes
+what the connected headset offers and a heartbeat. While it reports a
+speaker, the CoreAudio render callback also downmixes what it plays to
+stereo and appends it to the play ring (the Mac output device stays the
+stream's clock, so hw_ptr, FIFO and latency reporting are unchanged;
+KRUN_SND_VR_MUTE_LOCAL silences the Mac meanwhile). While it reports a
+microphone, capture reads the mic ring instead of a HAL input unit,
+paced by the host clock on the pump thread with a 20 ms jitter buffer
+and WiVRn's 80 ms backlog limit; a running capture stream switches when
+the headset comes or goes. Without a headset, or with a VR host that
+stopped beating for a second, the guest's audio is the Mac's again.
+
+Cost without a region: one atomic load per render callback and one
+Option check per pump iteration.
+
+Tests: region layout and validation, ring conversion/wrap/overrun,
+heartbeat timeout, microphone pacing/priming/resampling/backlog, the
+render callback's copy and mute, playback following the headset, a
+capture period recorded from the region without touching CoreAudio.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/libkrun.h                             |  27 +
+ src/devices/src/virtio/snd/audio_backends.rs  |   2 +
+ .../virtio/snd/audio_backends/coreaudio.rs    | 397 ++++++++-
+ .../src/virtio/snd/audio_backends/vr_audio.rs | 751 ++++++++++++++++++
+ src/devices/src/virtio/snd/mod.rs             |  21 +
+ src/libkrun/src/lib.rs                        |  31 +
+ 6 files changed, 1228 insertions(+), 1 deletion(-)
+ create mode 100644 src/devices/src/virtio/snd/audio_backends/vr_audio.rs
+
+diff --git a/include/libkrun.h b/include/libkrun.h
+index 4306e36..7da0643 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -900,6 +900,33 @@ int32_t krun_snd_set_volume(uint32_t ctx_id, float gain, bool mute);
+  */
+ int32_t krun_snd_set_buffer_ms(uint32_t ctx_id, uint32_t ms);
+ 
++/* krun_snd_set_vr_audio flag: silence the Mac output while a headset plays the guest's audio. */
++#define KRUN_SND_VR_MUTE_LOCAL 1u
++
++/**
++ * Attaches a VR audio region: shared memory through which a VR host process plays the guest's
++ * audio on a headset and supplies the headset's microphone (two lock-free rings of S16 PCM;
++ * layout and protocol: steamac host/vrhost/include/vraudio.h). The embedder creates and
++ * initialises the region and hands the same fd to the VR host.
++ *
++ * Routing follows the headset, not the attachment. While the VR host reports a headset with a
++ * speaker, the guest's playback is also written to the region (the Mac output device stays the
++ * stream's clock; with KRUN_SND_VR_MUTE_LOCAL it gets silence). While it reports a headset with
++ * a microphone, the guest records from the region instead of the Mac microphone; a running
++ * capture stream switches over. When the headset disconnects, or the VR host stops updating the
++ * region for a second, the guest's audio is the Mac's again.
++ *
++ * Arguments:
++ *  "ctx_id" - the configuration context ID.
++ *  "fd"     - an mmap-able fd of a region initialised with vra_region_init(), or -1 to detach.
++ *             The fd is mapped, not consumed: the caller may close it after the call.
++ *  "flags"  - 0 or KRUN_SND_VR_MUTE_LOCAL.
++ *
++ * Returns -EINVAL also when the fd cannot be mapped or does not hold a VR audio region of the
++ * supported version.
++ */
++int32_t krun_snd_set_vr_audio(uint32_t ctx_id, int fd, uint32_t flags);
++
+ /**
+  * Pause a running VM (macOS): every vCPU leaves the guest and its thread waits, so the VM
+  * runs no guest code and its vCPUs use no CPU; guest memory and all device and host GPU state
+diff --git a/src/devices/src/virtio/snd/audio_backends.rs b/src/devices/src/virtio/snd/audio_backends.rs
+index 354b9fa..07992e0 100644
+--- a/src/devices/src/virtio/snd/audio_backends.rs
++++ b/src/devices/src/virtio/snd/audio_backends.rs
+@@ -5,6 +5,8 @@
+ mod channel_layout;
+ #[cfg(target_os = "macos")]
+ mod coreaudio;
++#[cfg(target_os = "macos")]
++pub mod vr_audio;
+ #[cfg(target_os = "linux")]
+ mod pipewire;
+ 
+diff --git a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
+index 250e4dc..4a03d8d 100644
+--- a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
++++ b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
+@@ -33,6 +33,10 @@
+ // the device's only worker thread. A watchdog fails queued I/O with IO_ERR once the pump has made
+ // no progress for IO_STALL, so the guest's queues always drain and it can retry.
+ //
++// VR (krun_snd_set_vr_audio, vr_audio.rs): while a headset is connected to the attached region's
++// host, the render callback also copies what it plays into the region's play ring (optionally
++// silencing the Mac output) and capture reads the region's mic ring instead of a HAL unit.
++//
+ // STEAMAC_SND_DUMP=/path.wav writes guest PCM before speaker mapping for the playback stream
+ // while it runs (underrun silence included) to a WAV file (a new file per format change).
+ // STEAMAC_SND_TRACE=1 logs PCM commands and a per-second heartbeat of the stream state.
+@@ -55,6 +59,7 @@ use super::super::{
+     Direction, Error, Result, SndControl, Stream,
+ };
+ use super::channel_layout::{self, Mixer, MAX_CHANNELS, MAX_DEVICE_CHANNELS};
++use super::vr_audio::{MicStream, VrAudio, HEADSET_MIC, HEADSET_SPEAKER, PLAY_CHANNELS};
+ use super::AudioBackend;
+ 
+ #[allow(non_upper_case_globals, non_snake_case, clippy::upper_case_acronyms)]
+@@ -343,6 +348,8 @@ const RING_BYTES: usize = 1 << 20;
+ /// Capture: largest IO slice the input callback accepts (frames).
+ const CAPTURE_MAX_FRAMES: usize = 16384;
+ const HOUSEKEEPING: Duration = Duration::from_secs(1);
++/// Capture from a VR headset is paced by the pump thread: its period while one records.
++const VR_MIC_POLL: Duration = Duration::from_millis(5);
+ /// A control request (PREPARE, START, RELEASE, STOP) is answered, with an error if need be,
+ /// within this long. It is a rescue for a CoreAudio call that does not return, not a latency
+ /// target: under load (a starved coreaudiod, memory pressure) a healthy AudioUnit start takes
+@@ -632,6 +639,17 @@ struct Shared {
+     scratch: UnsafeCell<Box<[u8]>>,
+     /// Changed only while the output unit is stopped/uninitialized.
+     mixer: UnsafeCell<Mixer>,
++    /// Playback: guest layout -> FL/FR for the VR play ring; changed together with `mixer`.
++    vr_mixer: UnsafeCell<Mixer>,
++    /// Playback: the VR region to copy into, or null. Published by the pump thread, which keeps
++    /// the mapping alive until a later callback has started (`HostStream::vr_retired`).
++    vr: AtomicPtr<VrAudio>,
++    /// Playback: silence the device while `vr` is set (KRUN_SND_VR_MUTE_LOCAL).
++    vr_mute: AtomicBool,
++    /// Playback: guest sample rate (what the VR play ring carries).
++    rate: AtomicU32,
++    /// Playback: stereo Float32 and S16 staging for the VR copy, IO thread only.
++    vr_scratch: UnsafeCell<(Box<[u8]>, Box<[i16]>)>,
+     wake: Arc<Semaphore>,
+ }
+ 
+@@ -684,6 +702,17 @@ impl Shared {
+             start_gate: StartGate::default(),
+             scratch: UnsafeCell::new(scratch),
+             mixer: UnsafeCell::new(Mixer::default()),
++            vr_mixer: UnsafeCell::new(Mixer::default()),
++            vr: AtomicPtr::new(ptr::null_mut()),
++            vr_mute: AtomicBool::new(false),
++            rate: AtomicU32::new(48000),
++            vr_scratch: UnsafeCell::new(match direction {
++                Direction::Input => Default::default(),
++                Direction::Output => (
++                    vec![0u8; CAPTURE_MAX_FRAMES * PLAY_CHANNELS * 4].into_boxed_slice(),
++                    vec![0i16; CAPTURE_MAX_FRAMES * PLAY_CHANNELS].into_boxed_slice(),
++                ),
++            }),
+             wake,
+         }
+     }
+@@ -755,6 +784,19 @@ extern "C" fn render_output(
+         out[off..].fill(sh.silence.load(Ordering::Relaxed));
+     }
+     mixer.render(out, device_out);
++    let vr = sh.vr.load(Ordering::Acquire);
++    if !vr.is_null() {
++        // SAFETY: see `Shared::vr`; the staging buffers and vr_mixer are this callback's, as
++        // scratch and mixer above.
++        let (vr, (stereo, pcm), vr_mixer) =
++            unsafe { (&*vr, &mut *sh.vr_scratch.get(), &*sh.vr_mixer.get()) };
++        let stereo = &mut stereo[..want / fb * PLAY_CHANNELS * 4];
++        vr_mixer.render(out, stereo);
++        vr.write_play_f32(sh.rate.load(Ordering::Relaxed), stereo, pcm);
++        if sh.vr_mute.load(Ordering::Relaxed) {
++            device_out.fill(0);
++        }
++    }
+     if running {
+         if off < want {
+             sh.silence_bytes
+@@ -1850,10 +1892,17 @@ impl UnitSlot {
+                 "ChannelMap(output)",
+             )?;
+         }
+-        // SAFETY: the unit was uninitialized above, so no render callback can read the mixer.
++        let vr_mixer = Mixer::new(
++            fmt.format,
++            source,
++            &[VIRTIO_SND_CHMAP_FL, VIRTIO_SND_CHMAP_FR],
++        );
++        // SAFETY: the unit was uninitialized above, so no render callback can read the mixers.
+         unsafe {
+             *shared.mixer.get() = mixer;
++            *shared.vr_mixer.get() = vr_mixer;
+         }
++        shared.rate.store(fmt.rate, Ordering::Relaxed);
+         log::info!(
+             "snd: routes guest {:?} to '{}' speakers {:?}",
+             source,
+@@ -1926,6 +1975,13 @@ struct HostStream {
+     suspended: bool,
+     /// STEAMAC_SND_TRACE: callback count at the last heartbeat.
+     traced_callbacks: u64,
++    /// Playback: the VR region published to the render callback (`Shared::vr`).
++    vr: Option<Arc<VrAudio>>,
++    /// Playback: regions taken away from the callback, with the callback count then. Unmapped
++    /// once a later callback has started (or the unit is stopped): none can still use them.
++    vr_retired: Vec<(Arc<VrAudio>, u64)>,
++    /// Capture: recording from the VR headset instead of a HAL unit.
++    vr_mic: Option<(Arc<VrAudio>, MicStream)>,
+ }
+ 
+ impl HostStream {
+@@ -1960,9 +2016,89 @@ impl HostStream {
+             output_restart_pending: false,
+             suspended: false,
+             traced_callbacks: 0,
++            vr: None,
++            vr_retired: Vec::new(),
++            vr_mic: None,
++        }
++    }
++
++    /// Follow the VR region (krun_snd_set_vr_audio) and its headset: playback is copied to it
++    /// while a headset with a speaker is connected; a running capture stream moves between the
++    /// headset's microphone and the Mac's when one comes or goes.
++    fn follow_vr(&mut self) {
++        let attached = self.control.vr_audio();
++        if attached.is_none()
++            && self.vr.is_none()
++            && self.vr_mic.is_none()
++            && self.vr_retired.is_empty()
++        {
++            return;
++        }
++        // SAFETY: plain clock read.
++        let now = ticks_to_nanos(unsafe { mach_absolute_time() });
++        let headset = attached.as_ref().map_or(0, |vr| vr.headset(now));
++        let same = |a: &Option<Arc<VrAudio>>, b: Option<&Arc<VrAudio>>| match (a, b) {
++            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
++            (None, None) => true,
++            _ => false,
++        };
++        match self.direction {
++            Direction::Output => {
++                let want = attached.filter(|_| headset & HEADSET_SPEAKER != 0);
++                let callbacks = self.shared.callbacks.load(Ordering::Acquire);
++                if !same(&want, self.vr.as_ref()) {
++                    let mute = want.as_ref().is_some_and(|vr| vr.mute_local());
++                    let raw = want
++                        .as_ref()
++                        .map_or(ptr::null_mut(), |vr| Arc::as_ptr(vr) as *mut VrAudio);
++                    self.shared.vr.store(raw, Ordering::Release);
++                    self.shared.vr_mute.store(mute, Ordering::Release);
++                    log::info!(
++                        "snd: stream {} {}",
++                        self.id,
++                        match (&want, mute) {
++                            (Some(_), true) => "plays on the VR headset",
++                            (Some(_), false) => "plays on the VR headset and the Mac",
++                            (None, _) => "no longer plays on the VR headset",
++                        }
++                    );
++                    if let Some(old) = std::mem::replace(&mut self.vr, want) {
++                        self.vr_retired.push((old, callbacks));
++                    }
++                }
++                if !self.vr_retired.is_empty() {
++                    let stopped =
++                        !self.unit_busy && self.slot.unit.as_ref().is_none_or(|u| !u.started);
++                    self.vr_retired.retain(|(_, at)| !stopped && callbacks == *at);
++                }
++            }
++            Direction::Input => {
++                let want = attached.filter(|_| headset & HEADSET_MIC != 0);
++                let current = self.vr_mic.as_ref().map(|(vr, _)| vr);
++                if same(&want, current)
++                    || !self.shared.running.load(Ordering::Acquire)
++                    || self.suspended
++                {
++                    return;
++                }
++                // start_capture() picks the source from the same state.
++                self.stop_unit();
++                self.shared.ring.clear();
++                if let Err(err) = self.start_unit() {
++                    log::error!("snd: stream {}: switching microphone: {err}", self.id);
++                }
++            }
+         }
+     }
+ 
++    /// Capture: the VR region to record from now, if a headset with a microphone is connected.
++    fn vr_mic_source(&self) -> Option<Arc<VrAudio>> {
++        let vr = self.control.vr_audio()?;
++        // SAFETY: plain clock read.
++        let now = ticks_to_nanos(unsafe { mach_absolute_time() });
++        (vr.headset(now) & HEADSET_MIC != 0).then_some(vr)
++    }
++
+     /// STEAMAC_SND_TRACE line with the host side of the stream (and the guest's, if given).
+     fn trace_state(&self, what: &str, guest: Option<&Stream>) {
+         if !*TRACE {
+@@ -2023,6 +2159,7 @@ impl HostStream {
+     /// selected output device appeared or went away.
+     fn apply_control(&mut self, recheck: bool) {
+         self.follow_pause();
++        self.follow_vr();
+         let generation = self.control.generation();
+         let changed = generation != self.seen_generation;
+         if self.direction != Direction::Output || !(changed || recheck) {
+@@ -2140,6 +2277,19 @@ impl HostStream {
+             return Ok(());
+         }
+         self.stop_capture();
++        if let Some(vr) = self.vr_mic_source() {
++            // The headset's microphone: nothing to open, the pump reads the region's mic ring.
++            // SAFETY: plain clock read.
++            let now = ticks_to_nanos(unsafe { mach_absolute_time() });
++            vr.set_mic_active(true);
++            log::info!(
++                "snd: stream {} recording from the VR headset at {} Hz",
++                self.id,
++                vr.mic_rate()
++            );
++            self.vr_mic = Some((vr, MicStream::new(fmt.format, fmt.rate, fmt.channels, now)));
++            return Ok(());
++        }
+         // `capture` already holds no unit, so capture I/O that arrives while the worker builds
+         // the new one is completed with silence.
+         self.shared.stop_pending.store(false, Ordering::Release);
+@@ -2175,6 +2325,9 @@ impl HostStream {
+     /// up by the stop.
+     fn detach_capture(&mut self) -> Option<CaptureState> {
+         self.suspended = false;
++        if let Some((vr, _)) = self.vr_mic.take() {
++            vr.set_mic_active(false); // the host tells the headset to stop sending
++        }
+         let running = { self.shared.capture.lock().unwrap().take() };
+         if self.shared.starting.load(Ordering::Acquire) {
+             // The start worker owns the unit (even when it has not published it yet); have it
+@@ -2443,6 +2596,38 @@ impl HostStream {
+         let fb = fmt.frame_bytes() as usize;
+         let channels = fmt.channels;
+         let mut out = Vec::new();
++        if let Some((vr, mic)) = self.vr_mic.as_mut() {
++            // SAFETY: plain clock read.
++            let now = ticks_to_nanos(unsafe { mach_absolute_time() });
++            if guest.buffers.is_empty() {
++                mic.pull(vr, now, 0, &mut out); // keep the ring drained and the backlog bounded
++            }
++            while let Some(buf) = guest.buffers.front_mut() {
++                let space = (buf.desc_len() as usize).saturating_sub(buf.pos) / fb;
++                if space > 0 {
++                    out.clear();
++                    if mic.pull(vr, now, space, &mut out) == 0 {
++                        break; // nothing more is due yet
++                    }
++                    if buf.write_input(&out).is_err() {
++                        log::error!("snd: stream {}: unwritable capture buffer", self.id);
++                        buf.message
++                            .status
++                            .store(VIRTIO_SND_S_IO_ERR, Ordering::SeqCst);
++                        buf.pos = buf.desc_len() as usize;
++                    }
++                    if buf.pos + fb <= buf.desc_len() as usize {
++                        continue;
++                    }
++                }
++                let buf = guest.buffers.pop_front().unwrap();
++                buf.message.latency_bytes.store(
++                    mic.latency_frames() as u32 * fb as u32,
++                    Ordering::Relaxed,
++                );
++            }
++            return;
++        }
+         while let Some(buf) = guest.buffers.front_mut() {
+             let space = (buf.desc_len() as usize).saturating_sub(buf.pos) / fb * fb;
+             if space > 0 {
+@@ -2721,6 +2906,9 @@ fn pump_thread(inner: Arc<Inner>) {
+             if let Some(due) = host.next_completion() {
+                 timeout = timeout.min(due);
+             }
++            if host.vr_mic.is_some() {
++                timeout = timeout.min(VR_MIC_POLL);
++            }
+         }
+         if last.elapsed() >= HOUSEKEEPING {
+             last = Instant::now();
+@@ -3350,6 +3538,213 @@ mod tests {
+         }
+     }
+ 
++    /// One render callback of 256 stereo frames on `shared`; returns what the device got.
++    fn render_once(shared: &Shared) -> Vec<f32> {
++        let mut device = vec![0u8; 256 * 2 * 4];
++        let mut io = AudioBufferList {
++            mNumberBuffers: 1,
++            mBuffers: [AudioBuffer {
++                mNumberChannels: 2,
++                mDataByteSize: device.len() as u32,
++                mData: device.as_mut_ptr() as *mut c_void,
++            }],
++        };
++        let mut flags = 0u32;
++        render_output(
++            shared as *const Shared as *mut c_void,
++            &mut flags,
++            ptr::null(),
++            0,
++            256,
++            &mut io,
++        );
++        device
++            .chunks_exact(4)
++            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
++            .collect()
++    }
++
++    /// The render callback copies what it plays into the VR play ring (stereo S16 at the guest
++    /// rate), silences the device only when asked to, and leaves the ring alone without a region.
++    #[test]
++    fn render_callback_copies_playback_to_the_vr_ring() {
++        let wake = Arc::new(Semaphore::new().unwrap());
++        let shared = Shared::new(Direction::Output, false, wake);
++        shared.rate.store(44100, Ordering::Relaxed);
++        shared.limit.store(u64::MAX, Ordering::Release);
++        shared.running.store(true, Ordering::Release);
++        let feed = |value: i16| {
++            let pcm: Vec<u8> = (0..256)
++                .flat_map(|_| [value.to_le_bytes(), (-value).to_le_bytes()].concat())
++                .collect();
++            let mut off = 0;
++            // SAFETY: this thread is the only producer.
++            unsafe {
++                shared.ring.produce(pcm.len(), |dst| {
++                    dst.copy_from_slice(&pcm[off..off + dst.len()]);
++                    off += dst.len();
++                    dst.len()
++                })
++            };
++        };
++        let vr = Arc::new(VrAudio::anonymous(0));
++        let mut got = vec![0i16; 1024];
++
++        feed(1000);
++        let device = render_once(&shared);
++        assert!((device[0] - 1000.0 / 32768.0).abs() < 1e-4);
++        assert_eq!(vr.host_read_play(&mut got), 0, "no region published");
++
++        shared
++            .vr
++            .store(Arc::as_ptr(&vr) as *mut VrAudio, Ordering::Release);
++        feed(2000);
++        let device = render_once(&shared);
++        assert!((device[1] + 2000.0 / 32768.0).abs() < 1e-4, "the Mac still plays");
++        assert_eq!(vr.host_read_play(&mut got), 256);
++        assert_eq!(&got[..4], &[2000, -2000, 2000, -2000]);
++        assert_eq!(vr.play_rate(), 44100);
++
++        shared.vr_mute.store(true, Ordering::Release);
++        feed(3000);
++        let device = render_once(&shared);
++        assert!(device.iter().all(|v| *v == 0.0), "KRUN_SND_VR_MUTE_LOCAL");
++        assert_eq!(vr.host_read_play(&mut got), 256);
++        assert_eq!(&got[..2], &[3000, -3000]);
++
++        // an underrun reaches the headset as the same silence the device plays
++        let _ = render_once(&shared);
++        assert_eq!(vr.host_read_play(&mut got), 256);
++        assert!(got[..512].iter().all(|v| *v == 0));
++    }
++
++    /// Playback follows the headset: published to the callback while the region's host reports
++    /// a speaker, taken away (and unmapped, the unit being stopped) when it does not.
++    #[test]
++    fn playback_follows_the_vr_headset() {
++        let backend = backend(CTL, STALL);
++        let control = backend.inner.hosts.lock().unwrap()[0].control.clone();
++        control.set_vr_audio(Some(VrAudio::anonymous(crate::virtio::snd::VR_MUTE_LOCAL)));
++        let vr = control.vr_audio().unwrap();
++        let published = |backend: &CoreAudioBackend| {
++            let mut hosts = backend.inner.hosts.lock().unwrap();
++            hosts[0].follow_vr();
++            (
++                !hosts[0].shared.vr.load(Ordering::Acquire).is_null(),
++                hosts[0].shared.vr_mute.load(Ordering::Acquire),
++                hosts[0].vr_retired.len(),
++            )
++        };
++        assert_eq!(published(&backend), (false, false, 0), "attached, no headset");
++        vr.host_publish(HEADSET_MIC);
++        assert_eq!(published(&backend), (false, false, 0), "a headset without a speaker");
++        vr.host_publish(HEADSET_SPEAKER | HEADSET_MIC);
++        assert_eq!(published(&backend), (true, true, 0));
++        vr.host_publish(0);
++        assert_eq!(published(&backend), (false, false, 0), "headset disconnected");
++        vr.host_publish(HEADSET_SPEAKER);
++        assert_eq!(published(&backend), (true, true, 0));
++        let weak = Arc::downgrade(&vr);
++        drop(vr);
++        control.set_vr_audio(None);
++        assert_eq!(published(&backend), (false, false, 0), "detached");
++        assert!(weak.upgrade().is_none(), "the region is unmapped");
++    }
++
++    /// A capture stream records from the VR headset's microphone while its host reports one:
++    /// no HAL unit, the region's mic ring paced into the guest's buffers, `active` telling the
++    /// host when the guest records.
++    #[test]
++    fn capture_records_from_the_vr_headset() {
++        let mut stream = Stream::default();
++        stream.direction = Direction::Input;
++        stream.params.rate = VIRTIO_SND_PCM_RATE_48000;
++        stream.params.format = VIRTIO_SND_PCM_FMT_S16;
++        stream.params.channels = 1;
++        stream.state = PCMState::SetParameters;
++        let streams = Arc::new(RwLock::new(vec![stream]));
++        let control = Arc::new(SndControl::default());
++        control.set_vr_audio(Some(VrAudio::anonymous(0)));
++        let vr = control.vr_audio().unwrap();
++        let backend =
++            CoreAudioBackend::with_deadlines(streams, control.clone(), CTL, STALL).unwrap();
++        vr.host_publish(HEADSET_SPEAKER | HEADSET_MIC);
++        vr.host_write_mic(48000, &[1000i16; 4000]); // 83 ms: cut to the 20 ms jitter buffer
++
++        backend.prepare(0).unwrap();
++        backend.start(0).unwrap();
++        assert!(vr.mic_active());
++        {
++            let hosts = backend.inner.hosts.lock().unwrap();
++            assert!(hosts[0].vr_mic.is_some());
++            assert!(!hosts[0].shared.starting.load(Ordering::Acquire), "no HAL unit");
++        }
++
++        // one guest period of 10 ms
++        let mem = GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
++        let interrupt =
++            InterruptTransport::new(DummyIrqChip::new().into(), "snd-test".into()).unwrap();
++        let message = Arc::new(IOMessage {
++            status: AtomicU32::new(VIRTIO_SND_S_OK),
++            used_len: 0.into(),
++            latency_bytes: 0.into(),
++            head_index: 0,
++            response_descriptor: Descriptor {
++                addr: 0x100,
++                len: 8,
++                flags: 0,
++                next: 0,
++            },
++            vring: Arc::new(Mutex::new(Vring {
++                mem,
++                queue: Queue::new(16),
++                interrupt,
++            })),
++        });
++        let queued = Instant::now();
++        backend.inner.streams.write().unwrap()[0]
++            .buffers
++            .push_back(Buffer::new(
++                Descriptor {
++                    addr: 0x200,
++                    len: 960,
++                    flags: 0,
++                    next: 0,
++                },
++                message.clone(),
++                Direction::Input,
++            ));
++        backend.read(0).unwrap();
++        wait_for("the capture period", Duration::from_millis(500), || {
++            completed(&message)
++        });
++        // paced by the clock (10 ms of audio take about 10 ms), not handed over at once
++        assert!(queued.elapsed() >= Duration::from_millis(4));
++        assert_eq!(message.status.load(Ordering::SeqCst), VIRTIO_SND_S_OK);
++        assert_eq!(message.latency_bytes.load(Ordering::Relaxed), 960 * 2);
++        let mut pcm = [0u8; 960];
++        {
++            use vm_memory::Bytes;
++            let vring = message.vring.lock().unwrap();
++            vring.mem.read_slice(&mut pcm, GuestAddress(0x200)).unwrap();
++        }
++        assert!(pcm
++            .chunks_exact(2)
++            .all(|b| (i16::from_le_bytes([b[0], b[1]]) - 1000).abs() <= 1));
++
++        // the headset goes away: the next START would record from the Mac again
++        // (checked under `hosts`, so the pump does not act on it and open the Mac microphone)
++        {
++            let hosts = backend.inner.hosts.lock().unwrap();
++            vr.host_publish(0);
++            assert!(hosts[0].vr_mic_source().is_none());
++            vr.host_publish(HEADSET_MIC);
++        }
++        backend.stop(0).unwrap();
++        assert!(!vr.mic_active());
++        assert!(backend.inner.hosts.lock().unwrap()[0].vr_mic.is_none());
++    }
++
+     /// Manual timing of the real CoreAudio calls a PREPARE/START/STOP/RELEASE cycle makes.
+     #[test]
+     #[ignore = "uses the real default output device"]
+diff --git a/src/devices/src/virtio/snd/audio_backends/vr_audio.rs b/src/devices/src/virtio/snd/audio_backends/vr_audio.rs
+new file mode 100644
+index 0000000..84d716f
+--- /dev/null
++++ b/src/devices/src/virtio/snd/audio_backends/vr_audio.rs
+@@ -0,0 +1,751 @@
++// SPDX-License-Identifier: Apache-2.0
++//
++// VR audio region: the guest's playback to steamac-vrhost and the headset microphone back, over
++// shared memory (layout: steamac-vrhost include/vraudio.h, mirrored here; contract:
++// docs/vr-interfaces.md section 6 of steamac). The region is created by the embedder and attached
++// with krun_snd_set_vr_audio(); nothing is linked across the boundary.
++//
++// Routing follows the headset, not the attachment: the host publishes in the region what the
++// connected headset offers (`headset`) and that it is alive (`beat`); see `VrAudio::headset`.
++// Without a headset, or with a host that stopped beating, the guest's audio is the Mac's.
++//
++// Playback: the CoreAudio render callback keeps clocking the guest stream exactly as without VR
++// (the Mac output device stays the clock, so the guest's hw_ptr, FIFO and latency reporting do
++// not change). While a headset with a speaker is connected the callback also downmixes what it
++// plays to stereo S16 and appends it to the play ring (lock-free, allocation-free); with
++// KRUN_SND_VR_MUTE_LOCAL the Mac speakers get silence meanwhile. Otherwise the callback pays
++// one atomic load.
++//
++// Capture: while a headset with a microphone is connected the guest records from the mic ring
++// instead of the Mac microphone (no HAL unit, no permission prompt); a running capture stream
++// switches source when the headset comes or goes. The pump thread paces it by the host clock at
++// the guest rate, resamples (linear) from the headset rate, primes a 20 ms jitter buffer, plays
++// silence when the headset is late (counted) and drops a backlog beyond 80 ms (WiVRn's own
++// microphone policy, server/audio/audio_pipewire.cpp).
++
++use std::collections::VecDeque;
++use std::io;
++use std::mem::size_of;
++use std::os::fd::RawFd;
++use std::ptr;
++use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
++
++use super::super::virtio_sound::*;
++
++pub const VRA_MAGIC: u32 = 0x3141_5256; // "VRA1"
++pub const VRA_VERSION: u32 = 1;
++pub const PLAY_CHANNELS: usize = 2;
++pub const MIC_CHANNELS: usize = 1;
++pub const PLAY_FRAMES: usize = 8192;
++pub const MIC_FRAMES: usize = 8192;
++
++/// krun_snd_set_vr_audio flag: silence the Mac output while the region is attached.
++pub const VR_MUTE_LOCAL: u32 = 1;
++
++/// `headset` bits (VRA_HEADSET_*).
++pub const HEADSET_SPEAKER: u32 = 1;
++pub const HEADSET_MIC: u32 = 2;
++/// VRA_BEAT_TIMEOUT_MS: a host whose beat stood still this long has no headset for us.
++const BEAT_TIMEOUT_NS: u64 = 1_000_000_000;
++
++#[repr(C)]
++struct RingHdr {
++    write: u64,
++    _pad0: [u8; 56],
++    read: u64,
++    _pad1: [u8; 56],
++    rate: u32,
++    channels: u32,
++    capacity: u32,
++    active: u32,
++    overruns: u64,
++    underruns: u64,
++    _pad2: [u8; 32],
++}
++
++#[repr(C)]
++struct Region {
++    magic: u32,
++    version: u32,
++    size: u32,
++    headset: u32,
++    beat: u32,
++    _pad: [u8; 44],
++    play: RingHdr,
++    mic: RingHdr,
++    play_data: [i16; PLAY_FRAMES * PLAY_CHANNELS],
++    mic_data: [i16; MIC_FRAMES * MIC_CHANNELS],
++}
++
++/// Bytes mapped (whole 16 KiB pages), VRA_REGION_BYTES in vraudio.h.
++pub const REGION_BYTES: usize = (size_of::<Region>() + 16383) & !16383;
++
++/// One side of a ring, as raw pointers into the mapping.
++struct Ring {
++    hdr: *mut RingHdr,
++    data: *mut i16,
++    channels: usize,
++    capacity: usize,
++}
++
++impl Ring {
++    fn write_idx(&self) -> &AtomicU64 {
++        // SAFETY: the header lives as long as the mapping, u64 fields are 8-byte aligned.
++        unsafe { AtomicU64::from_ptr(ptr::addr_of_mut!((*self.hdr).write)) }
++    }
++    fn read_idx(&self) -> &AtomicU64 {
++        // SAFETY: as above.
++        unsafe { AtomicU64::from_ptr(ptr::addr_of_mut!((*self.hdr).read)) }
++    }
++    fn u32_field(&self, f: fn(*mut RingHdr) -> *mut u32) -> &AtomicU32 {
++        // SAFETY: as above; u32 fields are 4-byte aligned.
++        unsafe { AtomicU32::from_ptr(f(self.hdr)) }
++    }
++    fn u64_field(&self, f: fn(*mut RingHdr) -> *mut u64) -> &AtomicU64 {
++        // SAFETY: as above.
++        unsafe { AtomicU64::from_ptr(f(self.hdr)) }
++    }
++    fn rate(&self) -> &AtomicU32 {
++        self.u32_field(|h| unsafe { ptr::addr_of_mut!((*h).rate) })
++    }
++    fn active(&self) -> &AtomicU32 {
++        self.u32_field(|h| unsafe { ptr::addr_of_mut!((*h).active) })
++    }
++    fn overruns(&self) -> &AtomicU64 {
++        self.u64_field(|h| unsafe { ptr::addr_of_mut!((*h).overruns) })
++    }
++    fn underruns(&self) -> &AtomicU64 {
++        self.u64_field(|h| unsafe { ptr::addr_of_mut!((*h).underruns) })
++    }
++
++    fn available(&self) -> usize {
++        (self.write_idx().load(Ordering::Acquire) - self.read_idx().load(Ordering::Acquire)) as usize
++    }
++
++    /// Producer. Frames that do not fit are dropped and counted.
++    fn write(&self, src: &[i16]) -> usize {
++        let frames = src.len() / self.channels;
++        let wr = self.write_idx().load(Ordering::Relaxed);
++        let free = self.capacity - (wr - self.read_idx().load(Ordering::Acquire)) as usize;
++        let n = frames.min(free);
++        let mut done = 0;
++        while done < n {
++            let off = (wr as usize + done) & (self.capacity - 1);
++            let k = (n - done).min(self.capacity - off);
++            // SAFETY: off + k <= capacity; the producer owns these slots until it publishes.
++            unsafe {
++                ptr::copy_nonoverlapping(
++                    src.as_ptr().add(done * self.channels),
++                    self.data.add(off * self.channels),
++                    k * self.channels,
++                )
++            };
++            done += k;
++        }
++        self.write_idx().store(wr + n as u64, Ordering::Release);
++        if n < frames {
++            self.overruns()
++                .fetch_add((frames - n) as u64, Ordering::Relaxed);
++        }
++        n
++    }
++
++    /// Consumer: up to dst.len() / channels frames.
++    fn read(&self, dst: &mut [i16]) -> usize {
++        let rd = self.read_idx().load(Ordering::Relaxed);
++        let avail = (self.write_idx().load(Ordering::Acquire) - rd) as usize;
++        let n = (dst.len() / self.channels).min(avail);
++        let mut done = 0;
++        while done < n {
++            let off = (rd as usize + done) & (self.capacity - 1);
++            let k = (n - done).min(self.capacity - off);
++            // SAFETY: as in write; the consumer owns published slots until it advances `read`.
++            unsafe {
++                ptr::copy_nonoverlapping(
++                    self.data.add(off * self.channels),
++                    dst.as_mut_ptr().add(done * self.channels),
++                    k * self.channels,
++                )
++            };
++            done += k;
++        }
++        self.read_idx().store(rd + n as u64, Ordering::Release);
++        n
++    }
++}
++
++/// A mapped VR audio region.
++pub struct VrAudio {
++    base: *mut Region,
++    play: Ring,
++    mic: Ring,
++    flags: u32,
++    /// Liveness of the host: the last beat seen and when it last changed (0 = never).
++    last_beat: AtomicU32,
++    beat_changed_ns: AtomicU64,
++}
++
++// SAFETY: all shared state is accessed through atomics or by the single producer/consumer of
++// each ring (the render callback produces `play`, the pump thread consumes `mic`).
++unsafe impl Send for VrAudio {}
++unsafe impl Sync for VrAudio {}
++
++impl VrAudio {
++    /// Maps `fd` (not consumed: the caller keeps or closes it).
++    pub fn map(fd: RawFd, flags: u32) -> io::Result<Self> {
++        // SAFETY: plain mmap of a caller-provided fd; checked below.
++        let p = unsafe {
++            libc::mmap(
++                ptr::null_mut(),
++                REGION_BYTES,
++                libc::PROT_READ | libc::PROT_WRITE,
++                libc::MAP_SHARED,
++                fd,
++                0,
++            )
++        };
++        if p == libc::MAP_FAILED {
++            return Err(io::Error::last_os_error());
++        }
++        let vr = Self::from_base(p as *mut Region, flags);
++        if !vr.valid() {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "not a VR audio region (vraudio.h version 1)",
++            ));
++        }
++        Ok(vr)
++    }
++
++    /// A private, initialised region (tests).
++    #[cfg(test)]
++    pub fn anonymous(flags: u32) -> Self {
++        // SAFETY: anonymous shared mapping.
++        let p = unsafe {
++            libc::mmap(
++                ptr::null_mut(),
++                REGION_BYTES,
++                libc::PROT_READ | libc::PROT_WRITE,
++                libc::MAP_SHARED | libc::MAP_ANON,
++                -1,
++                0,
++            )
++        };
++        assert_ne!(p, libc::MAP_FAILED);
++        let r = p as *mut Region;
++        // SAFETY: freshly mapped, zeroed; vra_region_init().
++        unsafe {
++            (*r).magic = VRA_MAGIC;
++            (*r).version = VRA_VERSION;
++            (*r).size = size_of::<Region>() as u32;
++            (*r).play.channels = PLAY_CHANNELS as u32;
++            (*r).play.capacity = PLAY_FRAMES as u32;
++            (*r).mic.channels = MIC_CHANNELS as u32;
++            (*r).mic.capacity = MIC_FRAMES as u32;
++        }
++        Self::from_base(r, flags)
++    }
++
++    fn from_base(base: *mut Region, flags: u32) -> Self {
++        // SAFETY: pointers into the mapping, valid for its lifetime.
++        unsafe {
++            Self {
++                base,
++                play: Ring {
++                    hdr: ptr::addr_of_mut!((*base).play),
++                    data: ptr::addr_of_mut!((*base).play_data) as *mut i16,
++                    channels: PLAY_CHANNELS,
++                    capacity: PLAY_FRAMES,
++                },
++                mic: Ring {
++                    hdr: ptr::addr_of_mut!((*base).mic),
++                    data: ptr::addr_of_mut!((*base).mic_data) as *mut i16,
++                    channels: MIC_CHANNELS,
++                    capacity: MIC_FRAMES,
++                },
++                flags,
++                last_beat: AtomicU32::new(0),
++                beat_changed_ns: AtomicU64::new(0),
++            }
++        }
++    }
++
++    /// What the connected headset offers (HEADSET_*), 0 while there is none or the host has not
++    /// beaten for BEAT_TIMEOUT_NS. `now_ns` is any monotonic clock; called from the pump thread.
++    pub fn headset(&self, now_ns: u64) -> u32 {
++        // SAFETY: aligned u32 fields of the mapping.
++        let (beat, headset) = unsafe {
++            (
++                AtomicU32::from_ptr(ptr::addr_of_mut!((*self.base).beat)).load(Ordering::Acquire),
++                AtomicU32::from_ptr(ptr::addr_of_mut!((*self.base).headset))
++                    .load(Ordering::Acquire),
++            )
++        };
++        if self.last_beat.swap(beat, Ordering::Relaxed) != beat {
++            self.beat_changed_ns.store(now_ns.max(1), Ordering::Relaxed);
++        }
++        let changed = self.beat_changed_ns.load(Ordering::Relaxed);
++        if changed == 0 || now_ns.saturating_sub(changed) >= BEAT_TIMEOUT_NS {
++            return 0;
++        }
++        headset
++    }
++
++    fn valid(&self) -> bool {
++        // SAFETY: header read of a mapping of at least REGION_BYTES.
++        let r = unsafe { &*self.base };
++        r.magic == VRA_MAGIC
++            && r.version == VRA_VERSION
++            && r.size as usize == size_of::<Region>()
++            && r.play.channels as usize == PLAY_CHANNELS
++            && r.play.capacity as usize == PLAY_FRAMES
++            && r.mic.channels as usize == MIC_CHANNELS
++            && r.mic.capacity as usize == MIC_FRAMES
++    }
++
++    pub fn mute_local(&self) -> bool {
++        self.flags & VR_MUTE_LOCAL != 0
++    }
++
++    /// Render callback: interleaved stereo Float32 (LE bytes, as `Mixer::render` writes it) at
++    /// `rate` -> S16 into the play ring, through `tmp` (no allocation).
++    pub fn write_play_f32(&self, rate: u32, stereo_f32: &[u8], tmp: &mut [i16]) -> usize {
++        self.play.rate().store(rate, Ordering::Relaxed);
++        let n = (stereo_f32.len() / 4).min(tmp.len()) / PLAY_CHANNELS * PLAY_CHANNELS;
++        for (d, s) in tmp[..n].iter_mut().zip(stereo_f32.chunks_exact(4)) {
++            let v = f32::from_le_bytes(s.try_into().unwrap());
++            *d = (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
++        }
++        self.play.write(&tmp[..n])
++    }
++
++    pub fn set_mic_active(&self, active: bool) {
++        self.mic.active().store(active as u32, Ordering::Release);
++    }
++
++    pub fn mic_active(&self) -> bool {
++        self.mic.active().load(Ordering::Acquire) != 0
++    }
++
++    /// Headset microphone rate; 48 kHz until the host has written any.
++    pub fn mic_rate(&self) -> u32 {
++        match self.mic.rate().load(Ordering::Acquire) {
++            0 => 48000,
++            r => r,
++        }
++    }
++
++    pub fn read_mic(&self, dst: &mut [i16]) -> usize {
++        self.mic.read(dst)
++    }
++
++    pub fn mic_available(&self) -> usize {
++        self.mic.available()
++    }
++
++    fn add_mic_underruns(&self, frames: u64) {
++        self.mic.underruns().fetch_add(frames, Ordering::Relaxed);
++    }
++
++    // --- the other ends, for tests (steamac-vrhost's side) ---
++    #[cfg(test)]
++    pub fn host_read_play(&self, dst: &mut [i16]) -> usize {
++        self.play.read(dst)
++    }
++    #[cfg(test)]
++    pub fn play_rate(&self) -> u32 {
++        self.play.rate().load(Ordering::Acquire)
++    }
++    #[cfg(test)]
++    pub fn play_overruns(&self) -> u64 {
++        self.play.overruns().load(Ordering::Relaxed)
++    }
++    #[cfg(test)]
++    pub fn host_write_mic(&self, rate: u32, src: &[i16]) -> usize {
++        self.mic.rate().store(rate, Ordering::Release);
++        self.mic.write(src)
++    }
++    /// The host's tick: publish the headset and beat.
++    #[cfg(test)]
++    pub fn host_publish(&self, headset: u32) {
++        // SAFETY: as in headset().
++        unsafe {
++            AtomicU32::from_ptr(ptr::addr_of_mut!((*self.base).headset))
++                .store(headset, Ordering::Release);
++            AtomicU32::from_ptr(ptr::addr_of_mut!((*self.base).beat))
++                .fetch_add(1, Ordering::Release);
++        }
++    }
++    #[cfg(test)]
++    pub fn mic_underruns(&self) -> u64 {
++        self.mic.underruns().load(Ordering::Relaxed)
++    }
++}
++
++impl Drop for VrAudio {
++    fn drop(&mut self) {
++        // SAFETY: mapped in map()/anonymous() with this length.
++        unsafe { libc::munmap(self.base as *mut libc::c_void, REGION_BYTES) };
++    }
++}
++
++/// Guest capture from the mic ring: host-clock pacing at the guest rate, linear resampling,
++/// jitter buffer, conversion to the guest's format and channel count.
++pub struct MicStream {
++    format: u8,
++    rate: u32,
++    channels: usize,
++    start_ns: u64,
++    /// Guest frames delivered since `start_ns`.
++    produced: u64,
++    /// Mono samples at the guest rate, ready to deliver.
++    fifo: VecDeque<f32>,
++    primed: bool,
++    // resampler (headset rate -> guest rate)
++    in_rate: u32,
++    pos: f64,
++    prev: f32,
++    scratch: Vec<i16>,
++}
++
++impl MicStream {
++    /// Jitter buffer the guest is fed from once primed (WiVRn's headset sends 5 ms packets).
++    pub const PRIME_MS: u64 = 20;
++    /// Backlog beyond which the oldest audio is dropped (WiVRn server: 80 ms).
++    pub const MAX_MS: u64 = 80;
++
++    pub fn new(format: u8, rate: u32, channels: u32, now_ns: u64) -> Self {
++        Self {
++            format,
++            rate,
++            channels: channels as usize,
++            start_ns: now_ns,
++            produced: 0,
++            fifo: VecDeque::new(),
++            primed: false,
++            in_rate: 0,
++            pos: 0.0,
++            prev: 0.0,
++            scratch: vec![0; MIC_FRAMES],
++        }
++    }
++
++    pub fn frame_bytes(&self) -> usize {
++        self.channels * sample_bytes(self.format)
++    }
++
++    /// Latency the guest should be told about, in guest frames.
++    pub fn latency_frames(&self) -> u64 {
++        self.rate as u64 * Self::PRIME_MS / 1000
++    }
++
++    fn pull_ring(&mut self, vr: &VrAudio) {
++        let in_rate = vr.mic_rate();
++        if in_rate != self.in_rate {
++            self.in_rate = in_rate;
++            self.pos = 0.0;
++        }
++        loop {
++            let mut buf = std::mem::take(&mut self.scratch);
++            let n = vr.read_mic(&mut buf);
++            self.resample(&buf[..n]);
++            self.scratch = buf;
++            if n < MIC_FRAMES {
++                break;
++            }
++        }
++    }
++
++    /// Same algorithm as steamac-vrhost's pcm::Resampler: x(-1) = last frame of the previous
++    /// block, `pos` = position of the next output frame on that axis.
++    fn resample(&mut self, input: &[i16]) {
++        let n = input.len();
++        if n == 0 {
++            return;
++        }
++        if self.in_rate == self.rate {
++            self.fifo
++                .extend(input.iter().map(|&s| s as f32 / 32768.0));
++            return;
++        }
++        let step = self.in_rate as f64 / self.rate as f64;
++        let x = |i: isize| -> f32 {
++            if i < 0 {
++                self.prev
++            } else {
++                input[i as usize] as f32 / 32768.0
++            }
++        };
++        let mut out = Vec::with_capacity((n as f64 / step) as usize + 2);
++        while self.pos <= (n - 1) as f64 {
++            let i = self.pos.floor() as isize;
++            let f = (self.pos - i as f64) as f32;
++            let a = x(i);
++            let b = if f > 0.0 { x(i + 1) } else { a };
++            out.push(a + (b - a) * f);
++            self.pos += step;
++        }
++        self.pos -= n as f64;
++        self.prev = input[n - 1] as f32 / 32768.0;
++        self.fifo.extend(out);
++    }
++
++    /// Guest frames due at `now_ns` (host clock), at most `max_frames`, appended to `out` in the
++    /// guest format. Silence fills what the headset has not delivered (after priming: counted as
++    /// underruns in the ring).
++    pub fn pull(&mut self, vr: &VrAudio, now_ns: u64, max_frames: usize, out: &mut Vec<u8>) -> usize {
++        self.pull_ring(vr);
++        let prime = (self.rate as u64 * Self::PRIME_MS / 1000) as usize;
++        let max = (self.rate as u64 * Self::MAX_MS / 1000) as usize;
++        if self.fifo.len() > max {
++            let drop = self.fifo.len() - prime;
++            self.fifo.drain(..drop);
++        }
++        let elapsed = now_ns.saturating_sub(self.start_ns) as u128;
++        let due_total = (elapsed * self.rate as u128 / 1_000_000_000) as u64;
++        if due_total.saturating_sub(self.produced) > max as u64 {
++            // The guest took nothing for a while (no buffers queued, a paused VM): that time is
++            // gone, do not make it up with a burst.
++            self.produced = due_total - prime as u64;
++        }
++        let due = (due_total.saturating_sub(self.produced) as usize).min(max_frames);
++        if due == 0 {
++            return 0;
++        }
++        if !self.primed && self.fifo.len() >= prime {
++            self.primed = true;
++        }
++        let have = if self.primed { self.fifo.len().min(due) } else { 0 };
++        if self.primed && have < due {
++            vr.add_mic_underruns((due - have) as u64);
++            self.primed = false; // re-prime: a late headset costs one gap, not a stutter
++        }
++        out.reserve(due * self.frame_bytes());
++        for i in 0..due {
++            let v = if i < have {
++                self.fifo.pop_front().unwrap()
++            } else {
++                0.0
++            };
++            for _ in 0..self.channels {
++                encode(self.format, v, out);
++            }
++        }
++        self.produced += due as u64;
++        due
++    }
++}
++
++fn sample_bytes(format: u8) -> usize {
++    match format {
++        VIRTIO_SND_PCM_FMT_U8 => 1,
++        VIRTIO_SND_PCM_FMT_S16 => 2,
++        _ => 4,
++    }
++}
++
++fn encode(format: u8, v: f32, out: &mut Vec<u8>) {
++    let v = v.clamp(-1.0, 1.0);
++    match format {
++        VIRTIO_SND_PCM_FMT_U8 => out.push(((v * 127.0).round() as i16 + 128) as u8),
++        VIRTIO_SND_PCM_FMT_S16 => out.extend_from_slice(&((v * 32767.0).round() as i16).to_le_bytes()),
++        VIRTIO_SND_PCM_FMT_S32 => {
++            out.extend_from_slice(&((v as f64 * 2147483647.0).round() as i32).to_le_bytes())
++        }
++        _ => out.extend_from_slice(&v.to_le_bytes()),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn layout_matches_vraudio_h() {
++        assert_eq!(size_of::<RingHdr>(), 192);
++        assert_eq!(
++            size_of::<Region>(),
++            64 + 2 * 192 + 2 * (PLAY_FRAMES * 2 + MIC_FRAMES)
++        );
++        assert_eq!(std::mem::offset_of!(Region, headset), 12);
++        assert_eq!(std::mem::offset_of!(Region, beat), 16);
++        assert_eq!(std::mem::offset_of!(Region, play), 64);
++        assert_eq!(std::mem::offset_of!(RingHdr, read), 64);
++        assert_eq!(std::mem::offset_of!(RingHdr, rate), 128);
++        assert_eq!(std::mem::offset_of!(RingHdr, overruns), 144);
++        assert_eq!(REGION_BYTES, 65536);
++    }
++
++    #[test]
++    fn map_validates_the_region() {
++        let name = std::ffi::CString::new(format!("/krun-vra-{}", std::process::id())).unwrap();
++        // SAFETY: plain shm calls on a private name.
++        let fd = unsafe {
++            let fd = libc::shm_open(name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600);
++            libc::shm_unlink(name.as_ptr());
++            assert!(fd >= 0);
++            assert_eq!(libc::ftruncate(fd, REGION_BYTES as libc::off_t), 0);
++            fd
++        };
++        assert!(VrAudio::map(fd, 0).is_err(), "a zeroed region is refused");
++        // initialise through one mapping, attach through another (as steamac-vm and libkrun)
++        let init = VrAudio::from_base(
++            // SAFETY: as in map().
++            unsafe {
++                libc::mmap(
++                    ptr::null_mut(),
++                    REGION_BYTES,
++                    libc::PROT_READ | libc::PROT_WRITE,
++                    libc::MAP_SHARED,
++                    fd,
++                    0,
++                )
++            } as *mut Region,
++            0,
++        );
++        // SAFETY: freshly mapped.
++        unsafe {
++            let r = &mut *init.base;
++            r.magic = VRA_MAGIC;
++            r.version = VRA_VERSION;
++            r.size = size_of::<Region>() as u32;
++            r.play.channels = 2;
++            r.play.capacity = PLAY_FRAMES as u32;
++            r.mic.channels = 1;
++            r.mic.capacity = MIC_FRAMES as u32;
++        }
++        let vr = VrAudio::map(fd, VR_MUTE_LOCAL).unwrap();
++        assert!(vr.mute_local());
++        vr.set_mic_active(true);
++        assert!(init.mic_active(), "both mappings see the same memory");
++        // SAFETY: fd from shm_open.
++        unsafe { libc::close(fd) };
++    }
++
++    #[test]
++    fn play_ring_converts_and_wraps() {
++        let vr = VrAudio::anonymous(0);
++        let mut tmp = vec![0i16; 4096];
++        let mut f32s = Vec::new();
++        for i in 0..1000 {
++            let v = (i as f32 / 1000.0) * 2.0 - 1.0;
++            f32s.extend_from_slice(&v.to_le_bytes());
++            f32s.extend_from_slice(&(-v).to_le_bytes());
++        }
++        let mut dst = vec![0i16; 2000];
++        let mut total = 0;
++        for _ in 0..20 {
++            assert_eq!(vr.write_play_f32(44100, &f32s, &mut tmp), 1000);
++            assert_eq!(vr.host_read_play(&mut dst), 1000);
++            total += 1000;
++            assert_eq!(dst[0], -32767);
++            assert_eq!(dst[1], 32767);
++            assert_eq!(dst[1000], 0);
++        }
++        assert!(total > PLAY_FRAMES, "wrapped");
++        assert_eq!(vr.play_rate(), 44100);
++        // overrun: the free part only, the rest counted
++        for _ in 0..9 {
++            vr.write_play_f32(48000, &f32s, &mut tmp);
++        }
++        assert_eq!(vr.play_overruns(), 9000 - PLAY_FRAMES as u64);
++    }
++
++    #[test]
++    fn headset_needs_a_beating_host() {
++        let vr = VrAudio::anonymous(0);
++        let ms = 1_000_000u64;
++        assert_eq!(vr.headset(5 * ms), 0, "no host yet");
++        vr.host_publish(HEADSET_SPEAKER | HEADSET_MIC);
++        assert_eq!(vr.headset(10 * ms), HEADSET_SPEAKER | HEADSET_MIC);
++        assert_eq!(vr.headset(900 * ms), HEADSET_SPEAKER | HEADSET_MIC);
++        assert_eq!(vr.headset(1010 * ms), 0, "the host stopped beating");
++        vr.host_publish(HEADSET_SPEAKER);
++        assert_eq!(vr.headset(1020 * ms), HEADSET_SPEAKER);
++        vr.host_publish(0);
++        assert_eq!(vr.headset(1025 * ms), 0, "headset disconnected");
++    }
++
++    fn s16(out: &[u8]) -> Vec<i16> {
++        out.chunks_exact(2)
++            .map(|b| i16::from_le_bytes([b[0], b[1]]))
++            .collect()
++    }
++
++    #[test]
++    fn mic_is_paced_primed_and_converted() {
++        let vr = VrAudio::anonymous(0);
++        let ms = 1_000_000u64;
++        let mut mic = MicStream::new(VIRTIO_SND_PCM_FMT_S16, 48000, 2, 0);
++        let mut out = Vec::new();
++        // nothing from the headset yet: silence at the guest rate, paced by the clock
++        assert_eq!(mic.pull(&vr, 10 * ms, 10_000, &mut out), 480);
++        assert!(out.iter().all(|b| *b == 0));
++        assert_eq!(mic.pull(&vr, 10 * ms, 10_000, &mut out), 0, "nothing more is due");
++        // the headset delivers 30 ms of a constant: primed (20 ms), delivered as stereo
++        out.clear();
++        vr.host_write_mic(48000, &[1000i16; 1440]);
++        assert_eq!(mic.pull(&vr, 20 * ms, 10_000, &mut out), 480);
++        let v = s16(&out);
++        assert_eq!(v.len(), 960);
++        assert!(v.iter().all(|s| (*s - 1000).abs() <= 1), "{:?}", &v[..4]);
++        // late headset: 20 ms left, 30 ms due -> 10 ms of silence, counted
++        out.clear();
++        let n = mic.pull(&vr, 50 * ms, 10_000, &mut out);
++        assert_eq!(n, 1440);
++        let v = s16(&out);
++        assert!(v[..1920].iter().all(|s| (*s - 1000).abs() <= 1));
++        assert!(v[1920..].iter().all(|s| *s == 0));
++        assert_eq!(vr.mic_underruns(), 480);
++        // a backlog of 150 ms is cut to the 20 ms jitter buffer
++        out.clear();
++        vr.host_write_mic(48000, &[500i16; 7200]);
++        mic.pull(&vr, 51 * ms, 0, &mut out);
++        assert_eq!(mic.fifo.len(), 960);
++        // max_frames bounds what is delivered (the guest's free buffer space)
++        assert_eq!(mic.pull(&vr, 60 * ms, 100, &mut out), 100);
++        // a guest that took nothing for 2 s (paused VM) does not get the 2 s in a burst
++        out.clear();
++        assert_eq!(mic.pull(&vr, 2060 * ms, 100_000, &mut out), 960);
++    }
++
++    #[test]
++    fn mic_resamples_and_formats() {
++        // 44.1 kHz headset -> 48 kHz mono float guest: 1 s of a 440 Hz tone keeps its pitch
++        let vr = VrAudio::anonymous(0);
++        let tone: Vec<i16> = (0..44100)
++            .map(|k| (8000.0 * (2.0 * std::f64::consts::PI * 440.0 * k as f64 / 44100.0).sin()) as i16)
++            .collect();
++        let mut mic = MicStream::new(VIRTIO_SND_PCM_FMT_FLOAT, 48000, 1, 0);
++        let mut out = Vec::new();
++        let mut got = Vec::new();
++        for step in 1..=100u64 {
++            let k = (step as usize - 1) * 441;
++            vr.host_write_mic(44100, &tone[k..k + 441]);
++            out.clear();
++            mic.pull(&vr, step * 10_000_000, 100_000, &mut out);
++            got.extend(
++                out.chunks_exact(4)
++                    .map(|b| f32::from_le_bytes(b.try_into().unwrap())),
++            );
++        }
++        assert_eq!(got.len(), 48000);
++        let start = got.iter().position(|v| *v != 0.0).unwrap();
++        let mut rising = Vec::new();
++        for i in start + 1..got.len() {
++            if got[i - 1] < 0.0 && got[i] >= 0.0 {
++                rising.push(i);
++            }
++        }
++        let hz = (rising.len() - 1) as f64 * 48000.0
++            / (rising[rising.len() - 1] - rising[0]) as f64;
++        assert!((hz - 440.0).abs() < 2.0, "{hz}");
++        // U8 / S32 encodings
++        let mut b = Vec::new();
++        encode(VIRTIO_SND_PCM_FMT_U8, 0.0, &mut b);
++        encode(VIRTIO_SND_PCM_FMT_U8, -1.0, &mut b);
++        encode(VIRTIO_SND_PCM_FMT_S32, 1.0, &mut b);
++        assert_eq!(&b[..2], &[128, 1]);
++        assert_eq!(i32::from_le_bytes(b[2..6].try_into().unwrap()), i32::MAX);
++    }
++}
+diff --git a/src/devices/src/virtio/snd/mod.rs b/src/devices/src/virtio/snd/mod.rs
+index 9946b9e..d0975d0 100644
+--- a/src/devices/src/virtio/snd/mod.rs
++++ b/src/devices/src/virtio/snd/mod.rs
+@@ -20,6 +20,8 @@ pub use stream::Stream;
+ 
+ #[cfg(target_os = "macos")]
+ pub use self::audio_backends::output_device_exists;
++#[cfg(target_os = "macos")]
++pub use self::audio_backends::vr_audio::{VrAudio, VR_MUTE_LOCAL};
+ 
+ /// Host-side audio settings changed at runtime (krun_snd_set_*), shared between the embedder
+ /// and the audio backend. Every change bumps `generation` and wakes the backend.
+@@ -35,6 +37,10 @@ pub struct SndControl {
+     paused: AtomicBool,
+     generation: AtomicU64,
+     waker: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
++    /// VR audio region (krun_snd_set_vr_audio): playback is also sent there, capture records
++    /// from it.
++    #[cfg(target_os = "macos")]
++    vr_audio: Mutex<Option<Arc<audio_backends::vr_audio::VrAudio>>>,
+ }
+ 
+ impl Default for SndControl {
+@@ -49,6 +55,8 @@ impl Default for SndControl {
+             paused: AtomicBool::new(false),
+             generation: AtomicU64::new(0),
+             waker: Mutex::new(None),
++            #[cfg(target_os = "macos")]
++            vr_audio: Mutex::new(None),
+         }
+     }
+ }
+@@ -113,6 +121,19 @@ impl SndControl {
+         self.paused.load(Ordering::Relaxed)
+     }
+ 
++    /// Attach (Some) or detach (None) the VR audio region. Playback follows at once; capture
++    /// switches source at the guest's next START.
++    #[cfg(target_os = "macos")]
++    pub fn set_vr_audio(&self, vr: Option<audio_backends::vr_audio::VrAudio>) {
++        *self.vr_audio.lock().unwrap() = vr.map(Arc::new);
++        self.changed();
++    }
++
++    #[cfg(target_os = "macos")]
++    pub fn vr_audio(&self) -> Option<Arc<audio_backends::vr_audio::VrAudio>> {
++        self.vr_audio.lock().unwrap().clone()
++    }
++
+     pub fn generation(&self) -> u64 {
+         self.generation.load(Ordering::Acquire)
+     }
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index 8fb4f51..b535bbe 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -2157,6 +2157,37 @@ pub extern "C" fn krun_snd_set_buffer_ms(ctx_id: u32, ms: u32) -> i32 {
+     }
+ }
+ 
++#[no_mangle]
++pub extern "C" fn krun_snd_set_vr_audio(ctx_id: u32, fd: i32, flags: u32) -> i32 {
++    #[cfg(all(feature = "snd", target_os = "macos"))]
++    {
++        use devices::virtio::snd::{VrAudio, VR_MUTE_LOCAL};
++        if flags & !VR_MUTE_LOCAL != 0 {
++            return -libc::EINVAL;
++        }
++        let vr = if fd < 0 {
++            None
++        } else {
++            match VrAudio::map(fd, flags) {
++                Ok(vr) => Some(vr),
++                Err(err) => {
++                    error!("krun_snd_set_vr_audio: {err}");
++                    return -libc::EINVAL;
++                }
++            }
++        };
++        with_snd_control(ctx_id, |control| {
++            control.set_vr_audio(vr);
++            KRUN_SUCCESS
++        })
++    }
++    #[cfg(not(all(feature = "snd", target_os = "macos")))]
++    {
++        let _ = (ctx_id, fd, flags);
++        -libc::ENOTSUP
++    }
++}
++
+ /// Pause controls of started VMs (krun_pause / krun_resume).
+ #[cfg(target_os = "macos")]
+ static VM_PAUSES: Lazy<Mutex<HashMap<u32, std::sync::Arc<vmm::VmPause>>>> =
+-- 
+2.39.5 (Apple Git-154)
+

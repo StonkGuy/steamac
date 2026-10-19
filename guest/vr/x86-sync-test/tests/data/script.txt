@@ -1,0 +1,17 @@
+# vr-fakehost script for vr-testapp: press at frame 30, release at frame 90 (frame-keyed, sorted)
+30 in R A_CLICK 1
+30 in R A_TOUCH 1
+30 in L THUMBSTICK_X 0.5
+30 in L THUMBSTICK_Y -0.5
+30 in L THUMBSTICK_TOUCH 1
+30 in R TRIGGER_VALUE 0.75
+30 in R TRIGGER_TOUCH 1
+30 in L SQUEEZE_VALUE 0.9
+90 in R A_CLICK 0
+90 in R A_TOUCH 0
+90 in L THUMBSTICK_X 0
+90 in L THUMBSTICK_Y 0
+90 in L THUMBSTICK_TOUCH 0
+90 in R TRIGGER_VALUE 0
+90 in R TRIGGER_TOUCH 0
+90 in L SQUEEZE_VALUE 0

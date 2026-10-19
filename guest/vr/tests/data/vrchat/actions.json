@@ -1,0 +1,125 @@
+{
+  "actions": [
+    {
+      "name": "/actions/Global/in/Pose",
+      "type": "pose"
+    },
+    {
+      "name": "/actions/Global/in/SkeletonLeftHand",
+      "type": "skeleton",
+      "skeleton": "/skeleton/hand/left",
+      "requirement": "suggested"
+    },
+    {
+      "name": "/actions/Global/in/SkeletonRightHand",
+      "type": "skeleton",
+      "skeleton": "/skeleton/hand/right"
+    },
+    {
+      "name": "/actions/Global/in/HeadsetOnHead",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/Global/in/Safe_Mode",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/Global/in/Interact",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/Global/in/Grab",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/Global/in/Move",
+      "type": "vector2"
+    },
+    {
+      "name": "/actions/Global/in/Rotate",
+      "type": "vector2"
+    },
+    {
+      "name": "/actions/Global/in/Jump",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/Global/in/Menu",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/Global/in/Stick_Click",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/Global/in/Trigger_Axis",
+      "type": "vector1"
+    },
+    {
+      "name": "/actions/Global/in/Grip_Axis",
+      "type": "vector1"
+    },
+    {
+      "name": "/actions/Global/in/Gesture_Activator_Thumb",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/Global/out/Haptic",
+      "type": "vibration"
+    },
+    {
+      "name": "/actions/One_Hand/in/Use",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/One_Hand/in/Aim_Axis",
+      "type": "vector1"
+    },
+    {
+      "name": "/actions/Menu/in/Select",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/Menu/in/Unbound",
+      "type": "boolean"
+    }
+  ],
+  "action_sets": [
+    {
+      "name": "/actions/Global",
+      "usage": "leftright"
+    },
+    {
+      "name": "/actions/One_Hand",
+      "usage": "single"
+    },
+    {
+      "name": "/actions/Menu",
+      "usage": "single"
+    }
+  ],
+  "default_bindings": [
+    {
+      "controller_type": "vive_controller",
+      "binding_url": "bindings_missing.json"
+    },
+    {
+      "controller_type": "oculus_touch",
+      "binding_url": "bindings_oculus_touch.json"
+    },
+    {
+      "controller_type": "knuckles",
+      "binding_url": "bindings_knuckles.json"
+    },
+    {
+      "controller_type": "generic_hmd",
+      "binding_url": "binding_generic_hmd.json"
+    }
+  ],
+  "localization": [
+    {
+      "language_tag": "en_US",
+      "/actions/Global/in/Jump": "Jump"
+    }
+  ]
+}

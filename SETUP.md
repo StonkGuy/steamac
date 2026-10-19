@@ -10,7 +10,7 @@ enforcement is the game publisher's decision.
 
 Status: only one machine (M2 MacBook Air, 16 GB, macOS 27.0) has been verified. VRChat is verified in game on both
 graphics paths; Mini Royale's EAC launcher also reaches `301` (not played further). Results differ game by game.
-VR is not part of this release.
+VR is experimental and off by default ([docs/vr.md](docs/vr.md)).
 
 ## Requirements
 
@@ -177,7 +177,7 @@ on an external APFS, Mac OS Extended or exFAT volume (FAT32 is rejected). exFAT 
   ([docs/eac-performance.md](docs/eac-performance.md)). GPU-bound and power-limited.
 - 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
   memory on both paths with an 8 GiB VM.
-- VR is not part of this branch (experimental, [`vr-polish`](https://github.com/StonkGuy/steamac/tree/vr-polish) branch, guide in `docs/vr.md` there).
+- VR is experimental and off by default: see [docs/vr.md](docs/vr.md).
 - Anti-cheat that blocks virtual machines will not work.
 - DXMT: Direct3D 11/10. Direct3D 12 under the DXMT setting is limited (see above); use Vulkan for those games.
 - The DXMT setting applies to every game; there is no per-game opt-out.

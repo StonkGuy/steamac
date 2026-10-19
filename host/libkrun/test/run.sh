@@ -10,6 +10,6 @@ bin=$root/work/build/host-libkrun/smoke
 
 mkdir -p "$(dirname "$bin")"
 clang -std=c11 -Wall -Wextra -Werror -o "$bin" "$here/smoke.c" \
-	-I"$out/include" -L"$out/lib" -lkrun -Wl,-rpath,"$out/lib"
+	-I"$out/include" -I"$root/host/vrhost/include" -L"$out/lib" -lkrun -Wl,-rpath,"$out/lib"
 codesign --force -s - --entitlements "$here/hypervisor.entitlements" "$bin"
 "$bin"

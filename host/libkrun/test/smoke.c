@@ -2,14 +2,18 @@
 // launcher makes before krun_start_enter() must succeed with the GPU/input build.
 // It never starts a VM.
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <libkrun.h>
 #include <libkrun_display.h>
 #include <libkrun_input.h>
+#include <vraudio.h> // host/vrhost/include: the VR audio region krun_snd_set_vr_audio maps
 
 static int failures;
 
@@ -192,6 +196,31 @@ int main(void)
     };
     check("krun_add_input_device",
           krun_add_input_device(ctx, &config, sizeof(config), &events, sizeof(events)), 0);
+
+    // VR audio region (patch 0025): created as the launcher does, shm object + vra_region_init.
+    check("krun_snd_set_vr_audio(no snd device)", krun_snd_set_vr_audio(ctx, -1, 0), -ENODEV);
+    check("krun_set_snd_device(true)", krun_set_snd_device(ctx, true), 0);
+    char name[64];
+    snprintf(name, sizeof name, "/krun-smoke-%d", (int)getpid());
+    int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    shm_unlink(name);
+    check("shm_open + ftruncate(VRA_REGION_BYTES)", fd >= 0 && ftruncate(fd, VRA_REGION_BYTES) == 0,
+          1);
+    check("krun_snd_set_vr_audio(zeroed region)", krun_snd_set_vr_audio(ctx, fd, 0), -EINVAL);
+    struct vra_region *region =
+        mmap(NULL, VRA_REGION_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    check("mmap(region)", region != MAP_FAILED, 1);
+    if (region != MAP_FAILED)
+        vra_region_init(region);
+    check("krun_snd_set_vr_audio(region, 0)", krun_snd_set_vr_audio(ctx, fd, 0), 0);
+    check("krun_snd_set_vr_audio(region, MUTE_LOCAL)",
+          krun_snd_set_vr_audio(ctx, fd, KRUN_SND_VR_MUTE_LOCAL), 0);
+    check("krun_snd_set_vr_audio(unknown flag)", krun_snd_set_vr_audio(ctx, fd, 2), -EINVAL);
+    check("krun_snd_set_vr_audio(not an fd)", krun_snd_set_vr_audio(ctx, 9999, 0), -EINVAL);
+    check("krun_snd_set_vr_audio(unknown ctx)", krun_snd_set_vr_audio(ctx + 1000, fd, 0),
+          -ENODEV);
+    check("krun_snd_set_vr_audio(-1) [detach]", krun_snd_set_vr_audio(ctx, -1, 0), 0);
+    close(fd);
 
     check("krun_free_ctx", krun_free_ctx(ctx), 0);
 

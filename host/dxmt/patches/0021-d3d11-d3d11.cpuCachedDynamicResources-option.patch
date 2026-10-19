@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 19:08:18 +0300
-Subject: [PATCH 21/24] d3d11: d3d11.cpuCachedDynamicResources option
+Subject: [PATCH 21/27] d3d11: d3d11.cpuCachedDynamicResources option
 
 DYNAMIC buffers and textures are allocated write-combined. The CPU only
 writes them, but some titles also read back what they wrote (partial

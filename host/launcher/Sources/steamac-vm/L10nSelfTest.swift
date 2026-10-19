@@ -10,11 +10,16 @@ enum L10nSelfTest {
     static let languages = ["ru", "zh-Hans"]
 
     /// Strings of the launcher's own settings and windows (graphics path, render scale, frame latency,
-    /// GPU-idle card) whose translation must be present in every language.
+    /// GPU-idle card, Settings > VR, the pairing PIN in the window title, VR host errors) whose
+    /// translation must be present in every language.
     static var probes: [String] {
         ["Graphics path", "DXMT (lean)", "Vulkan (classic)", "Applies from the next start.",
          "Not available here: %@; Vulkan is used.", "Render scale", "Off (1.0×)", "Upscale lower game resolutions",
-         "Frame latency", "Loading…", "not included in this build (%@)"]
+         "Frame latency", "Loading…", "not included in this build (%@)",
+         "VR (experimental)", "VR pairing PIN %@", "Pairing PIN", "Let new headsets ask to pair", "Start in VR",
+         "Game audio in the headset", "Treat game images as sRGB", "Upscaler", "Preset",
+         "The VR host did not answer.", "No headset is connected, or it does not offer this refresh rate.",
+         "“%@” tried to connect but is not paired, and pairing is off."]
     }
 
     static func run() -> Never {

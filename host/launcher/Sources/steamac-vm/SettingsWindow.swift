@@ -35,7 +35,7 @@ final class SettingsContext: ObservableObject {
 /// App menu "FX Steam Launcher → Settings…" (Cmd+,): toolbar-style tabs, one SwiftUI form each.
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     enum Tab: Int, CaseIterable {
-        case general, display, mouse, controller, sound, advanced
+        case general, display, mouse, controller, sound, vr, advanced
 
         var name: String {
             switch self {
@@ -44,6 +44,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return "mouse"
             case .controller: return "controller"
             case .sound: return "sound"
+            case .vr: return "vr"
             case .advanced: return "advanced"
             }
         }
@@ -55,6 +56,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return String(localized: "Mouse")
             case .controller: return String(localized: "Controller")
             case .sound: return String(localized: "Sound")
+            case .vr: return String(localized: "VR")
             case .advanced: return String(localized: "Advanced")
             }
         }
@@ -66,6 +68,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return "computermouse"
             case .controller: return "gamecontroller"
             case .sound: return "speaker.wave.2"
+            case .vr: return "visionpro"
             case .advanced: return "slider.horizontal.3"
             }
         }
@@ -78,6 +81,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return 470
             case .controller: return 620
             case .sound: return 440
+            case .vr: return 800
             case .advanced: return 720
             }
         }
@@ -179,6 +183,7 @@ private struct SettingsTabRoot: View {
                 case .mouse: MouseTab()
                 case .controller: ControllerTab()
                 case .sound: SoundTab()
+                case .vr: VRTab()
                 case .advanced: AdvancedTab()
                 }
             }
@@ -190,7 +195,7 @@ private struct SettingsTabRoot: View {
 }
 
 /// "applies now" / "applies on next start" + the command-line override note.
-private struct Applies: View {
+struct Applies: View {
     let now: Bool
     var key: LauncherSettings.Key? = nil
     @EnvironmentObject var settings: LauncherSettings
@@ -210,7 +215,7 @@ private struct Applies: View {
 }
 
 /// A labelled row: title, optional explanation, the "applies" tag.
-private struct Label2: View {
+struct Label2: View {
     let title: LocalizedStringResource
     var detail: String? = nil
     let now: Bool

@@ -179,6 +179,28 @@
         }
       }
     },
+    "%@ of %@ Mbit/s, %lld frames sent" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ of %2$@ Mbit/s, %3$lld frames sent"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ из %2$@ Мбит/с, отправлено кадров: %3$lld"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ / %2$@ Mbit/s，已发送 %3$lld 帧"
+          }
+        }
+      }
+    },
     "%@ of memory in use" : {
       "localizations" : {
         "ru" : {
@@ -308,6 +330,28 @@
         }
       }
     },
+    "%@: %@×%@ per eye, %lld Hz" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@: %2$@×%3$@ per eye, %4$lld Hz"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@: %2$@×%3$@ на глаз, %4$lld Гц"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@：每眼 %2$@×%3$@，%4$lld Hz"
+          }
+        }
+      }
+    },
     "%@: not a SteamOS disk with home as its last partition" : {
       "localizations" : {
         "ru" : {
@@ -320,6 +364,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@：不是以 home 为最后一个分区的 SteamOS 磁盘"
+          }
+        }
+      }
+    },
+    "%lld %%" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld %%"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld%%"
+          }
+        }
+      }
+    },
+    "%lld %%, charging" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld %%, заряжается"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld%%，正在充电"
           }
         }
       }
@@ -352,6 +428,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld Hz"
+          }
+        }
+      }
+    },
+    "%lld Mbit/s" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld Мбит/с"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld Mbit/s"
           }
         }
       }
@@ -438,6 +530,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "同名文件已存在，且不会被覆盖。请选择其他名称。"
+          }
+        }
+      }
+    },
+    "A headset that is not paired yet opens pairing when it connects: its PIN appears here and in the VM window's title. Off: new headsets are refused until you pair them here." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ещё не сопряжённая гарнитура при подключении открывает сопряжение: её PIN-код появляется здесь и в заголовке окна ВМ. Выключено: новые гарнитуры отклоняются, пока вы не сопряжёте их здесь."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "尚未配对的头显连接时会开启配对：其 PIN 码显示在此处和虚拟机窗口标题中。关闭时：新头显会被拒绝，直到你在此处配对。"
           }
         }
       }
@@ -698,6 +806,22 @@
         }
       }
     },
+    "Automatic uses HEVC when the headset supports it (sharper at the same bitrate). H.264 can help a headset whose HEVC decoder struggles." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "«Автоматически» использует HEVC, если гарнитура его поддерживает (чётче при том же битрейте). H.264 может помочь гарнитуре, чей декодер HEVC не справляется."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“自动”在头显支持时使用 HEVC（相同码率下更清晰）。若头显的 HEVC 解码器吃力，H.264 可能有帮助。"
+          }
+        }
+      }
+    },
     "Automatic: half of this Mac's RAM (4 to 16 GB). The Mac's GPU memory comes from the same RAM, so the rest stays with macOS and the games' graphics." : {
       "localizations" : {
         "ru" : {
@@ -730,6 +854,54 @@
         }
       }
     },
+    "Bilinear" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Билинейный"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "双线性"
+          }
+        }
+      }
+    },
+    "Bitrate" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Битрейт"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "码率"
+          }
+        }
+      }
+    },
+    "Bonjour name" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Имя Bonjour"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bonjour 名称"
+          }
+        }
+      }
+    },
     "Booting Linux kernel…" : {
       "localizations" : {
         "ru" : {
@@ -758,6 +930,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "缓冲区"
+          }
+        }
+      }
+    },
+    "Build WiVRn's Linux client from the v26.9 tag (client on, server off) and connect to this Mac by IP address, port 9757." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Соберите Linux-клиент WiVRn из тега v26.9 (клиент включён, сервер выключен) и подключитесь к этому Mac по IP-адресу, порт 9757."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从 v26.9 标签构建 WiVRn 的 Linux 客户端（开启客户端、关闭服务端），并通过 IP 地址和端口 9757 连接这台 Mac。"
           }
         }
       }
@@ -1034,6 +1222,22 @@
         }
       }
     },
+    "Chosen by the headset" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выбирает гарнитура"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "由头显决定"
+          }
+        }
+      }
+    },
     "Click or press a key or controller button to wake it" : {
       "localizations" : {
         "ru" : {
@@ -1083,6 +1287,22 @@
         }
       }
     },
+    "Codec" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Кодек"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "编解码器"
+          }
+        }
+      }
+    },
     "Collecting launcher logs…" : {
       "localizations" : {
         "ru" : {
@@ -1127,6 +1347,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "命令"
+          }
+        }
+      }
+    },
+    "Compose (Mac GPU)" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Компоновка (GPU Mac)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "合成（Mac GPU）"
+          }
+        }
+      }
+    },
+    "Connect the headset first, then start the game." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сначала подключите гарнитуру, затем запустите игру."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请先连接头显，再启动游戏。"
+          }
+        }
+      }
+    },
+    "connected" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "подключена"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已连接"
           }
         }
       }
@@ -1820,6 +2088,22 @@
         }
       }
     },
+    "DXMT path only: starts the bundled steamac-vrhost with the VM, which streams games' VR eye images to a standalone headset running the WiVRn v26.9 client on the same network. Games run with the guest's OpenVR runtime; start them in VR mode (below, or from the headset's app list). steamac-vrhost is GPL-3.0 software; see the licences in the app." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Только для пути DXMT: вместе с ВМ запускается встроенный steamac-vrhost, который передаёт VR-изображения для глаз из игр на автономную гарнитуру с клиентом WiVRn v26.9 в той же сети. Игры работают со средой OpenVR в гостевой системе; запускайте их в режиме VR (ниже или из списка приложений на гарнитуре). steamac-vrhost — ПО под GPL-3.0; см. лицензии в приложении."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅限 DXMT 路径：随虚拟机启动内置的 steamac-vrhost，将游戏的 VR 双眼画面串流到同一网络中运行 WiVRn v26.9 客户端的一体机头显。游戏使用客户机中的 OpenVR 运行时；请以 VR 模式启动（在下方，或从头显的应用列表）。steamac-vrhost 为 GPL-3.0 软件；许可证见应用内。"
+          }
+        }
+      }
+    },
     "Edit" : {
       "comment" : "Standard text editing menu",
       "localizations" : {
@@ -1885,6 +2169,60 @@
         }
       }
     },
+    "Encode" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Кодирование"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "编码"
+          }
+        }
+      }
+    },
+    "encode %@ ms, headset decode %@ ms" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "encode %1$@ ms, headset decode %2$@ ms"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "кодирование %1$@ мс, декодирование в гарнитуре %2$@ мс"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "编码 %1$@ ms，头显解码 %2$@ ms"
+          }
+        }
+      }
+    },
+    "Encryption" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Шифрование"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加密"
+          }
+        }
+      }
+    },
     "Enter a valid email address." : {
       "localizations" : {
         "ru" : {
@@ -1897,6 +2235,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "请输入有效的电子邮件地址。"
+          }
+        }
+      }
+    },
+    "Enter it in the WiVRn app on the new headset. The PIN never leaves this network." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Введите его в приложении WiVRn на новой гарнитуре. PIN-код не выходит за пределы этой сети."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在新头显的 WiVRn 应用中输入。PIN 码不会传出本地网络。"
+          }
+        }
+      }
+    },
+    "Every %lld s" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Каждые %lld с"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "每 %lld 秒"
           }
         }
       }
@@ -1929,6 +2299,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在解压 Steam 更新"
+          }
+        }
+      }
+    },
+    "For a game that looks washed out or too bright in the headset: its images hold sRGB colours without saying so. Leave off otherwise." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Для игры, которая в гарнитуре выглядит блёклой или слишком светлой: её изображения содержат цвета sRGB, но не помечены так. В остальных случаях не включайте."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "适用于在头显中显得发白或过亮的游戏：其图像包含 sRGB 颜色但未标明。其他情况请保持关闭。"
+          }
+        }
+      }
+    },
+    "Frames sent" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отправлено кадров"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已发送帧"
           }
         }
       }
@@ -2265,6 +2667,108 @@
         }
       }
     },
+    "Game" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Игра"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "游戏"
+          }
+        }
+      }
+    },
+    "Game audio in the headset" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Звук игры в гарнитуре"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "头显中的游戏声音"
+          }
+        }
+      }
+    },
+    "Game frame copy" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Копирование кадра игры"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "游戏帧复制"
+          }
+        }
+      }
+    },
+    "Game frame rate" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Частота кадров игры"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "游戏帧率"
+          }
+        }
+      }
+    },
+    "Game frame to network" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "От кадра игры до сети"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "游戏帧到网络"
+          }
+        }
+      }
+    },
+    "game frame to network %@ ms, encode %@ ms, headset decode %@ ms" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "game frame to network %1$@ ms, encode %2$@ ms, headset decode %3$@ ms"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "от кадра игры до сети %1$@ мс, кодирование %2$@ мс, декодирование в гарнитуре %3$@ мс"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "游戏帧到网络 %1$@ ms，编码 %2$@ ms，头显解码 %3$@ ms"
+          }
+        }
+      }
+    },
     "GPU budget: %lld MiB. macOS and driver reserve: %lld MiB." : {
       "localizations" : {
         "en" : {
@@ -2528,6 +3032,102 @@
       }
     },
     "H" : {},
+    "Headset" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Гарнитура"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "头显"
+          }
+        }
+      }
+    },
+    "Headset battery" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Батарея гарнитуры"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "头显电量"
+          }
+        }
+      }
+    },
+    "Headset decode" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Декодирование в гарнитуре"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "头显解码"
+          }
+        }
+      }
+    },
+    "Headset default" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По умолчанию для гарнитуры"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "头显默认"
+          }
+        }
+      }
+    },
+    "Headset setup" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Настройка гарнитуры"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "头显设置"
+          }
+        }
+      }
+    },
+    "Headsets on the same network list the Mac under this name; WiVRn can also connect by IP address." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Гарнитуры в той же сети показывают Mac под этим именем; WiVRn может подключаться и по IP-адресу."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同一网络中的头显会以此名称列出这台 Mac；WiVRn 也可以通过 IP 地址连接。"
+          }
+        }
+      }
+    },
     "Help" : {
       "comment" : "Application help menu",
       "localizations" : {
@@ -2562,6 +3162,22 @@
         }
       }
     },
+    "High" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Высокое"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高"
+          }
+        }
+      }
+    },
     "Home partition (games, sparse)" : {
       "localizations" : {
         "ru" : {
@@ -2590,6 +3206,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "我接受 Valve 的 SteamOS 许可和 Steam 订户协议"
+          }
+        }
+      }
+    },
+    "ID" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ID"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ID"
           }
         }
       }
@@ -2658,6 +3290,22 @@
         }
       }
     },
+    "Install WiVRn v26.9 (WiVRn-release.apk from the release page) with adb in developer mode, and turn off automatic updates for WiVRn: a newer client does not connect." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Установите WiVRn v26.9 (WiVRn-release.apk со страницы выпуска) через adb в режиме разработчика и отключите автообновление WiVRn: более новый клиент не подключится."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在开发者模式下用 adb 安装 WiVRn v26.9（发布页上的 WiVRn-release.apk），并关闭 WiVRn 的自动更新：更新的客户端无法连接。"
+          }
+        }
+      }
+    },
     "Installing Steam update" : {
       "localizations" : {
         "ru" : {
@@ -2722,6 +3370,22 @@
         }
       }
     },
+    "Keyframe interval" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Интервал ключевых кадров"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关键帧间隔"
+          }
+        }
+      }
+    },
     "LAN Remote Play" : {
       "localizations" : {
         "ru" : {
@@ -2734,6 +3398,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "局域网 Remote Play"
+          }
+        }
+      }
+    },
+    "Last connected %@" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Последнее подключение: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次连接：%@"
+          }
+        }
+      }
+    },
+    "Latency" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Задержка"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "延迟"
+          }
+        }
+      }
+    },
+    "Let new headsets ask to pair" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Новые гарнитуры могут запросить сопряжение"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许新头显请求配对"
           }
         }
       }
@@ -2914,6 +3626,38 @@
         }
       }
     },
+    "Lost frames (keyframes requested)" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Потерянные кадры (запрошены ключевые)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "丢失帧（已请求关键帧）"
+          }
+        }
+      }
+    },
+    "Low" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Низкое"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "低"
+          }
+        }
+      }
+    },
     "Low (10 ms)" : {
       "localizations" : {
         "ru" : {
@@ -2942,6 +3686,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "越低则延迟越小；“稳定”可避免高负载下的爆音。"
+          }
+        }
+      }
+    },
+    "Medium" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Среднее"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "中"
           }
         }
       }
@@ -2990,6 +3750,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Mesa 基于 Metal 4 的 Vulkan 驱动（macOS 26 或更高版本）。比 MoltenVK 更快：在 M1 Max 上，Stellar Blade Demo 约为 29 FPS，而 MoltenVK 约为 18 FPS。"
+          }
+        }
+      }
+    },
+    "Meta Quest and Pico" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Meta Quest и Pico"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Meta Quest 和 Pico"
           }
         }
       }
@@ -3195,6 +3971,38 @@
         }
       }
     },
+    "Needs the running VR host." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нужен запущенный VR-хост."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要 VR 主机正在运行。"
+          }
+        }
+      }
+    },
+    "Needs the VM running with VR on." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нужна запущенная ВМ с включённым VR."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要在开启 VR 的情况下运行虚拟机。"
+          }
+        }
+      }
+    },
     "Network" : {
       "localizations" : {
         "ru" : {
@@ -3207,6 +4015,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "网络"
+          }
+        }
+      }
+    },
+    "Never connected" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ещё не подключалась"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从未连接"
           }
         }
       }
@@ -3240,6 +4064,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "新"
+          }
+        }
+      }
+    },
+    "No headset is connected, or it does not offer this refresh rate." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Гарнитура не подключена или не поддерживает эту частоту обновления."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未连接头显，或头显不支持此刷新率。"
+          }
+        }
+      }
+    },
+    "No headset name given to unpair." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не указано имя гарнитуры для разрыва пары."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未指定要取消配对的头显名称。"
+          }
+        }
+      }
+    },
+    "No headset paired yet." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Пока нет сопряжённых гарнитур."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "尚未配对头显。"
           }
         }
       }
@@ -3356,6 +4228,22 @@
         }
       }
     },
+    "Not advertised" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не объявляется"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未广播"
+          }
+        }
+      }
+    },
     "Not available here: %@; MoltenVK is used." : {
       "localizations" : {
         "ru" : {
@@ -3388,6 +4276,38 @@
         }
       }
     },
+    "Not included in this build." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не входит в эту сборку."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此版本未包含。"
+          }
+        }
+      }
+    },
+    "Not running" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не запущен"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未运行"
+          }
+        }
+      }
+    },
     "Not supported on this Mac's GPU." : {
       "localizations" : {
         "ru" : {
@@ -3400,6 +4320,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此 Mac 的 GPU 不支持。"
+          }
+        }
+      }
+    },
+    "Off (trusted network only)" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выключено (только доверенная сеть)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭（仅限可信网络）"
           }
         }
       }
@@ -3548,6 +4484,22 @@
         }
       }
     },
+    "On (AES-128, paired headsets)" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включено (AES-128, сопряжённые гарнитуры)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开启（AES-128，已配对头显）"
+          }
+        }
+      }
+    },
     "On top of the guest's own volume." : {
       "localizations" : {
         "ru" : {
@@ -3624,6 +4576,102 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "输出设备"
+          }
+        }
+      }
+    },
+    "Pair a new headset" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сопрячь новую гарнитуру"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "配对新头显"
+          }
+        }
+      }
+    },
+    "Pair this headset" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сопрячь эту гарнитуру"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "配对此头显"
+          }
+        }
+      }
+    },
+    "Paired %lld times (a reinstalled or test client); Unpair removes all of them." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сопряжений: %lld (переустановленный или тестовый клиент); «Разорвать пару» удаляет все записи."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已配对 %lld 次（重装或测试客户端）；“取消配对”会全部移除。"
+          }
+        }
+      }
+    },
+    "Pairing" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сопряжение"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "配对"
+          }
+        }
+      }
+    },
+    "Pairing needs encryption, which is off." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Для сопряжения нужно шифрование, а оно выключено."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "配对需要加密，但加密已关闭。"
+          }
+        }
+      }
+    },
+    "Pairing PIN" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PIN-код сопряжения"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "配对 PIN 码"
           }
         }
       }
@@ -3820,6 +4868,38 @@
         }
       }
     },
+    "Preset" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Предустановка"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "预设"
+          }
+        }
+      }
+    },
+    "Quality" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Качество"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "画质"
+          }
+        }
+      }
+    },
     "Quit" : {
       "localizations" : {
         "ru" : {
@@ -4012,6 +5092,22 @@
         }
       }
     },
+    "Render resolution" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешение рендеринга"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "渲染分辨率"
+          }
+        }
+      }
+    },
     "Render scale" : {
       "localizations" : {
         "ru" : {
@@ -4185,6 +5281,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "将所有 FX Steam Launcher 设置还原为默认值？"
+          }
+        }
+      }
+    },
+    "Resolution per eye" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешение на глаз"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "每眼分辨率"
           }
         }
       }
@@ -4379,6 +5491,150 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "在访达中显示"
+          }
+        }
+      }
+    },
+    "Running, port %@" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Работает, порт %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在运行，端口 %@"
+          }
+        }
+      }
+    },
+    "Sends the video over TCP instead of UDP, for networks that drop UDP. Adds latency when packets are lost." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Передаёт видео по TCP вместо UDP — для сетей, которые теряют UDP. При потере пакетов увеличивает задержку."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通过 TCP 而非 UDP 发送视频，适用于丢弃 UDP 的网络。丢包时会增加延迟。"
+          }
+        }
+      }
+    },
+    "Set in the WiVRn app on the headset (as are its resolution scale and microphone); the host encodes at that rate." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Задаётся в приложении WiVRn на гарнитуре (как и масштаб разрешения и микрофон); хост кодирует с этой частотой."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在头显上的 WiVRn 应用中设置（分辨率缩放和麦克风也是）；主机按该刷新率编码。"
+          }
+        }
+      }
+    },
+    "Sets bitrate and sharpening together: Low for a weak Wi-Fi link, Ultra for a strong one. Refresh rate and stream size stay with the headset." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Задаёт битрейт и резкость вместе: «Низкое» — для слабой сети Wi-Fi, «Ультра» — для сильной. Частота обновления и размер потока остаются за гарнитурой."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同时设置码率和锐化：“低”适合较弱的 Wi-Fi，“超高”适合较强的 Wi-Fi。刷新率和串流尺寸仍由头显决定。"
+          }
+        }
+      }
+    },
+    "Sharpening" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Резкость"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "锐化"
+          }
+        }
+      }
+    },
+    "Sharpens the image while it is prepared for encoding; helps an upscaled or softly encoded picture. No measurable cost." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Повышает резкость изображения при подготовке к кодированию; помогает масштабированной или мягко закодированной картинке. Затраты неизмеримо малы."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在准备编码时锐化图像；有助于放大后或编码偏软的画面。无可测开销。"
+          }
+        }
+      }
+    },
+    "Show live statistics" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Показывать статистику"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示实时统计"
+          }
+        }
+      }
+    },
+    "Size of the encoded image for each eye. Headset default uses what the headset asks for; a smaller size encodes faster, which high refresh rates need." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Размер кодируемого изображения для каждого глаза. «По умолчанию для гарнитуры» — размер, который запрашивает гарнитура; меньший размер кодируется быстрее, что нужно для высокой частоты обновления."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "每只眼睛编码图像的尺寸。“头显默认”使用头显请求的尺寸；尺寸越小编码越快，高刷新率需要这样。"
+          }
+        }
+      }
+    },
+    "Size the game renders each eye at, relative to what the headset asks for. Below 100 percent the Mac upscales the image before encoding (the game draws fewer pixels); above 100 percent is supersampling." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Размер, в котором игра рендерит каждый глаз, относительно запрошенного гарнитурой. Ниже 100 % Mac масштабирует изображение перед кодированием (игра рисует меньше пикселей); выше 100 % — суперсэмплинг."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "游戏渲染每只眼的尺寸，相对于头显请求的尺寸。低于 100% 时 Mac 在编码前放大图像（游戏绘制更少像素）；高于 100% 为超采样。"
           }
         }
       }
@@ -4854,6 +6110,22 @@
         }
       }
     },
+    "Start in VR" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Запустить в VR"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以 VR 启动"
+          }
+        }
+      }
+    },
     "Start SteamOS to finish growing the home partition and filesystem." : {
       "localizations" : {
         "ru" : {
@@ -4966,6 +6238,54 @@
         }
       }
     },
+    "Statistics" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Статистика"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "统计"
+          }
+        }
+      }
+    },
+    "Status" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Состояние"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "状态"
+          }
+        }
+      }
+    },
+    "Steam app ID" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ID приложения Steam"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Steam 应用 ID"
+          }
+        }
+      }
+    },
     "Steam Deck client" : {
       "localizations" : {
         "ru" : {
@@ -5010,6 +6330,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Steam Deck，16:10"
+          }
+        }
+      }
+    },
+    "Steam Frame" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Steam Frame"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Steam Frame"
           }
         }
       }
@@ -5122,6 +6458,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Steam 更新已安装"
+          }
+        }
+      }
+    },
+    "steamac-vrhost is GPL-3.0 software based on WiVRn; its licence and source are listed in the app's licences." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "steamac-vrhost — программа под лицензией GPL-3.0 на основе WiVRn; её лицензия и исходный код указаны в лицензиях приложения."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "steamac-vrhost 是基于 WiVRn 的 GPL-3.0 软件；其许可证和源代码列在应用的许可证中。"
           }
         }
       }
@@ -5480,6 +6832,22 @@
         }
       }
     },
+    "Stop pairing" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Остановить сопряжение"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止配对"
+          }
+        }
+      }
+    },
     "Stopped — Create continues where it left off" : {
       "localizations" : {
         "ru" : {
@@ -5492,6 +6860,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已停止 — 点按“创建”可从上次停止的位置继续"
+          }
+        }
+      }
+    },
+    "Stream" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Поток"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "串流"
+          }
+        }
+      }
+    },
+    "Stream bitrate" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Битрейт потока"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "串流码率"
           }
         }
       }
@@ -5673,6 +7073,22 @@
         }
       }
     },
+    "TCP only" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Только TCP"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅 TCP"
+          }
+        }
+      }
+    },
     "Text and images copied on the Mac can be pasted in SteamOS (Ctrl+V) and the other way round; up to 1 MB of text and 16 MB images. Desktop Mode included." : {
       "localizations" : {
         "ru" : {
@@ -5685,6 +7101,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "在 Mac 上拷贝的文本和图像可粘贴到 SteamOS（Ctrl+V），反之亦然；文本最大 1 MB，图像最大 16 MB。也支持桌面模式。"
+          }
+        }
+      }
+    },
+    "The bitrate must be 1 to 400 Mbit/s." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Битрейт должен быть от 1 до 400 Мбит/с."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "码率必须在 1 到 400 Mbit/s 之间。"
+          }
+        }
+      }
+    },
+    "The game “Start in VR” starts in its VR mode (steam://launch/ID/vr; a normal start may pick desktop mode). The headset's WiVRn app also lists it under its apps, from the next start. VRChat is 438100." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Игра, которую «Запустить в VR» запускает в режиме VR (steam://launch/ID/vr; обычный запуск может выбрать режим рабочего стола). Приложение WiVRn на гарнитуре также показывает её в списке приложений, начиная со следующего запуска. VRChat — 438100."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“以 VR 启动”以 VR 模式启动的游戏（steam://launch/ID/vr；普通启动可能选择桌面模式）。从下次启动起，头显上的 WiVRn 应用也会在其应用列表中列出它。VRChat 为 438100。"
+          }
+        }
+      }
+    },
+    "The refresh rate must be given in Hz." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Частоту обновления нужно указать в Гц."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "刷新率必须以 Hz 为单位。"
           }
         }
       }
@@ -5951,6 +7415,38 @@
         }
       }
     },
+    "The VR host did not answer." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR-хост не ответил."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR 主机没有响应。"
+          }
+        }
+      }
+    },
+    "The VR host did not understand the request (a different version?)." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR-хост не понял запрос (другая версия?)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR 主机无法识别该请求（版本不同？）。"
+          }
+        }
+      }
+    },
     "This SteamOS build is signed with Valve's development key (steamos-dev-images) and can't be verified; choose stable or try again later." : {
       "localizations" : {
         "ru" : {
@@ -6047,6 +7543,70 @@
         }
       }
     },
+    "Total for both eyes. Higher is sharper and needs a faster Wi-Fi link; the headset can lower it while streaming. Applies at once to a running VR host." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Суммарно для обоих глаз. Чем выше, тем чётче, но нужна более быстрая сеть Wi-Fi; гарнитура может снизить его во время трансляции. Сразу применяется к работающему VR-хосту."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "双眼合计。越高越清晰，但需要更快的 Wi-Fi 连接；头显可在串流时降低它。立即应用于正在运行的 VR 主机。"
+          }
+        }
+      }
+    },
+    "Treat game images as sRGB" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Считать изображения игры sRGB"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将游戏图像视为 sRGB"
+          }
+        }
+      }
+    },
+    "Turn on VR above, then start the VM." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включите VR выше, затем запустите ВМ."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在上方开启 VR，然后启动虚拟机。"
+          }
+        }
+      }
+    },
+    "Ultra" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ультра"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "超高"
+          }
+        }
+      }
+    },
     "Undo" : {
       "localizations" : {
         "ru" : {
@@ -6075,6 +7635,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "未知游戏"
+          }
+        }
+      }
+    },
+    "Unpair" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разорвать пару"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消配对"
+          }
+        }
+      }
+    },
+    "Unpair all" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разорвать все пары"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全部取消配对"
           }
         }
       }
@@ -6127,6 +7719,22 @@
         }
       }
     },
+    "Upscaler" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Метод масштабирования"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "放大算法"
+          }
+        }
+      }
+    },
     "Use Default" : {
       "localizations" : {
         "ru" : {
@@ -6175,6 +7783,22 @@
         }
       }
     },
+    "Used when the render resolution is below 100 percent. MetalFX (spatial) keeps edges sharper but competes with the game for the Mac's GPU (12-15 ms per frame while VRChat ran, against 4-5 ms for bilinear). Only for games limited by GPU pixels; VRChat was not faster at a lower render resolution. Temporal MetalFX needs motion vectors and depth, which OpenVR games do not hand over." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Используется при разрешении рендеринга ниже 100 процентов. MetalFX (пространственный) сохраняет края чётче, но конкурирует с игрой за GPU Mac (12–15 мс на кадр при работе VRChat против 4–5 мс у билинейного). Только для игр, упирающихся в пиксели GPU; VRChat при меньшем разрешении рендеринга быстрее не стал. Временному MetalFX нужны векторы движения и глубина, которые игры OpenVR не передают."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在渲染分辨率低于 100% 时使用。MetalFX（空间）边缘更锐利，但会与游戏争用 Mac GPU（VRChat 运行时每帧 12–15 毫秒，双线性为 4–5 毫秒）。仅适用于受 GPU 像素限制的游戏；降低渲染分辨率后 VRChat 并未变快。时间性 MetalFX 需要运动矢量和深度，而 OpenVR 游戏不提供这些。"
+          }
+        }
+      }
+    },
     "User" : {
       "localizations" : {
         "ru" : {
@@ -6187,6 +7811,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "用户"
+          }
+        }
+      }
+    },
+    "Video codec" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Видеокодек"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "视频编解码器"
           }
         }
       }
@@ -6400,6 +8040,86 @@
         }
       }
     },
+    "VR" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR"
+          }
+        }
+      }
+    },
+    "VR (experimental)" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR (экспериментально)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR（实验性）"
+          }
+        }
+      }
+    },
+    "VR host" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR-хост"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR 主机"
+          }
+        }
+      }
+    },
+    "VR is on: the host starts with the VM (DXMT graphics path)." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR включён: хост запускается вместе с ВМ (графический путь DXMT)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR 已开启：主机随虚拟机启动（DXMT 图形路径）。"
+          }
+        }
+      }
+    },
+    "VR pairing PIN %@" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PIN-код сопряжения VR %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VR 配对 PIN 码 %@"
+          }
+        }
+      }
+    },
     "Vulkan (classic)" : {
       "localizations" : {
         "ru" : {
@@ -6465,6 +8185,38 @@
       }
     },
     "W" : {},
+    "Waiting for a headset" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ожидание гарнитуры"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在等待头显"
+          }
+        }
+      }
+    },
+    "Waiting for a headset (pairing open)" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ожидание гарнитуры (сопряжение открыто)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在等待头显（配对已开启）"
+          }
+        }
+      }
+    },
     "Waiting for SteamOS to draw…" : {
       "localizations" : {
         "ru" : {
@@ -6594,6 +8346,38 @@
         }
       }
     },
+    "When needed" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По необходимости"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按需"
+          }
+        }
+      }
+    },
+    "When needed: a full frame only when the headset reports a lost one (lowest bitrate). A fixed interval recovers from damage the headset did not report, at the cost of a bitrate spike each time." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "«По необходимости»: полный кадр, только когда гарнитура сообщает о потерянном (минимальный битрейт). Фиксированный интервал устраняет повреждения, о которых гарнитура не сообщила, ценой всплеска битрейта каждый раз."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“按需”：仅在头显报告丢帧时发送完整帧（码率最低）。固定间隔可修复头显未报告的损坏，代价是每次码率突增。"
+          }
+        }
+      }
+    },
     "When the game renders below the window's size (its own resolution setting), the guest sends the game's size and the Mac upscales it to fill the window, instead of the guest upscaling it to the full Retina size. MetalFX up to 1.5×, bilinear beyond. The guest display's maximum is unchanged. Off: no change." : {
       "localizations" : {
         "ru" : {
@@ -6626,6 +8410,22 @@
         }
       }
     },
+    "While a headset is connected, the guest's sound plays in the headset and its microphone is the guest's input (the microphone opens only while a game records). Off: sound stays on the Mac." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Пока гарнитура подключена, звук гостевой системы играет в гарнитуре, а её микрофон служит входом гостевой системы (микрофон открывается, только пока игра записывает). Выключено: звук остаётся на Mac."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "头显连接期间，客户机声音在头显中播放，头显麦克风作为客户机输入（仅在游戏录音时开启麦克风）。关闭时：声音留在 Mac 上。"
+          }
+        }
+      }
+    },
     "Window" : {
       "comment" : "Standard window management menu",
       "localizations" : {
@@ -6639,6 +8439,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "窗口"
+          }
+        }
+      }
+    },
+    "WiVRn v26.9 release" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выпуск WiVRn v26.9"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "WiVRn v26.9 发布页"
           }
         }
       }
@@ -7512,6 +9328,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "you@example.com"
+          }
+        }
+      }
+    },
+    "“%@” tried to connect but is not paired, and pairing is off." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "«%@» пытался подключиться, но не сопряжён, а сопряжение выключено."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”尝试连接，但尚未配对，且配对已关闭。"
           }
         }
       }

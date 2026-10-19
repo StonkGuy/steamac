@@ -1,0 +1,27 @@
+{
+  "controller_type": "knuckles",
+  "bindings": {
+    "/actions/main": {
+      "sources": [
+        { "path": "/user/hand/right/input/a", "mode": "button", "inputs": { "click": { "output": "/actions/main/in/Jump" } } },
+        { "path": "/user/hand/left/input/grip", "mode": "grab", "inputs": { "grab": { "output": "/actions/main/in/Grab" } } },
+        { "path": "/user/hand/left/input/y", "mode": "button", "inputs": { "click": { "output": "/actions/main/in/Menu" } } },
+        { "path": "/user/hand/left/input/joystick", "mode": "joystick", "inputs": { "position": { "output": "/actions/main/in/Move" } } },
+        { "path": "/user/hand/right/input/trigger", "mode": "trigger",
+          "parameters": { "click_activate_threshold": "0.8" },
+          "inputs": { "pull": { "output": "/actions/main/in/Trigger" } } }
+      ],
+      "poses": [
+        { "output": "/actions/main/in/LeftHand", "path": "/user/hand/left/pose/raw" },
+        { "output": "/actions/main/in/RightAim", "path": "/user/hand/right/pose/tip" }
+      ],
+      "haptics": [
+        { "output": "/actions/main/out/Haptic", "path": "/user/hand/left/output/haptic" },
+        { "output": "/actions/main/out/Haptic", "path": "/user/hand/right/output/haptic" }
+      ],
+      "skeleton": [
+        { "output": "/actions/main/in/SkeletonLeft", "path": "/user/hand/left/input/skeleton/left" }
+      ]
+    }
+  }
+}

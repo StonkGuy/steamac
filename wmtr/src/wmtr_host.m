@@ -14,6 +14,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +23,7 @@
 #include "airconv_thunks.h"
 #include "wmtr_wire.h"
 #include "wmtr_host.h"
+#include "wmtr_vr.h"
 
 typedef int NTSTATUS;
 typedef NTSTATUS (*impl_fn)(void *);
@@ -36,13 +38,13 @@ extern const void *wmtr_impl_funcs[];
 #define WMTR_CLASS_B 2
 #define WMTR_CLASS_C 3
 #define WMTR_CLASS_N 4
-static const uint8_t call_class[146] = {
+static const uint8_t call_class[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = WMTR_CLASS_##c,
 #include "wmtr_calls.inc"
 #undef X
 };
 /* the params struct each call's implementation reads and writes (the client sends exactly this) */
-static const uint32_t call_params_size[146] = {
+static const uint32_t call_params_size[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = sizeof(t),
 #include "wmtr_calls.inc"
 #undef X
@@ -77,6 +79,9 @@ struct wmtr_host {
   struct wmtr_handle { _Atomic uint64_t id; _Atomic uint64_t obj; } *handles;
   /* how long the executor polls an empty ring before it sleeps, in mach ticks (WMTR_HOST_SPIN_US) */
   _Atomic uint64_t spin_ticks;
+  /* VR export (call 146); owned when created from the environment */
+  struct wmtr_vr *_Atomic vr;
+  int owns_vr;
 };
 
 static int log_level = 1;
@@ -146,14 +151,26 @@ frames_out(void) {
  * t_ns,call,name,class,count,sync,exec_ns (plus rows 200/201: executor sleeps and kicks, in count);
  * consecutive snapshots give the per-frame call profile of a
  * running game (presentDrawable = calls 47/48) without touching the guest. Off (one getenv) unless set. */
-static const char *const call_name[146] = {
+static const char *const call_name[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = #n,
 #include "wmtr_calls.inc"
 #undef X
 };
-static _Atomic uint64_t cs_count[146], cs_sync[146], cs_ns[146];
+static _Atomic uint64_t cs_count[WMTR_NCALLS], cs_sync[WMTR_NCALLS], cs_ns[WMTR_NCALLS];
 /* executor sleeps (ring empty after the spin) and kicks (a client woke it): rows 200/201, class 9 */
 static _Atomic uint64_t cs_sleeps, cs_kicks;
+/* the process's VR link, for rows 210-213 (class 9): frames in count, the stage's cumulative time in exec_ns */
+static _Atomic(struct wmtr_vr *) cs_vr;
+static const char *const cs_vr_stage[WMTR_VR_STAGES] = {"_vr_submit_to_encoded", "_vr_encoded_to_rendered", "_vr_copy", "_vr_copied_to_sent"};
+/* render-pass profile counters (pp_pass / pp_commit below) */
+static _Atomic uint64_t pp_cb_count, pp_cb_gpu_ns, pp_passes, pp_load_bytes, pp_store_bytes, pp_resolve_bytes,
+    pp_msaa_store_bytes, pp_msaa_passes;
+#define PP_SIGS 512
+static struct pp_sig { char name[96]; uint64_t count, bytes; } pp_sig[PP_SIGS];
+static pthread_mutex_t pp_lock = PTHREAD_MUTEX_INITIALIZER;
+/* the order of the last frame's encoders (row 250, one line): R<sig index> render pass, C compute, B blit, | present */
+static char pp_seq[2][4096];
+static int pp_seq_len, pp_seq_done; /* pp_seq[0] being filled, pp_seq[1] the last complete frame */
 static FILE *cs_file;
 static pthread_mutex_t cs_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -162,7 +179,7 @@ callstats_dump(void) {
   pthread_mutex_lock(&cs_lock);
   if (!cs_file) { pthread_mutex_unlock(&cs_lock); return; }
   uint64_t t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  for (int i = 0; i < 146; i++) {
+  for (int i = 0; i < WMTR_NCALLS; i++) {
     uint64_t n = atomic_load(&cs_count[i]);
     if (!n) continue;
     fprintf(cs_file, "%llu,%d,%s,%u,%llu,%llu,%llu\n", (unsigned long long)t, i, call_name[i] ? call_name[i] : "?",
@@ -171,7 +188,44 @@ callstats_dump(void) {
   }
   fprintf(cs_file, "%llu,200,_executor_sleeps,9,%llu,0,0\n%llu,201,_kicks,9,%llu,0,0\n", (unsigned long long)t,
           (unsigned long long)atomic_load(&cs_sleeps), (unsigned long long)t, (unsigned long long)atomic_load(&cs_kicks));
+  struct wmtr_vr *vr = atomic_load(&cs_vr);
+  if (vr) {
+    struct wmtr_vr_stats v;
+    wmtr_vr_get_stats(vr, &v);
+    for (int i = 0; i < WMTR_VR_STAGES; i++)
+      fprintf(cs_file, "%llu,%d,%s,9,%llu,0,%llu\n", (unsigned long long)t, 210 + i, cs_vr_stage[i],
+              (unsigned long long)v.stage_frames, (unsigned long long)v.stage_ns[i]);
+    fprintf(cs_file, "%llu,214,_vr_dropped,9,%llu,0,0\n", (unsigned long long)t, (unsigned long long)v.dropped);
+  }
+  fprintf(cs_file, "%llu,220,_gpu_cmdbuf,9,%llu,0,%llu\n", (unsigned long long)t, (unsigned long long)atomic_load(&pp_cb_count),
+          (unsigned long long)atomic_load(&pp_cb_gpu_ns));
+  fprintf(cs_file, "%llu,221,_pass_load_bytes,9,%llu,0,%llu\n%llu,222,_pass_store_bytes,9,%llu,0,%llu\n"
+                   "%llu,223,_pass_resolve_bytes,9,%llu,0,%llu\n%llu,224,_pass_msaa_store_bytes,9,%llu,0,%llu\n",
+          (unsigned long long)t, (unsigned long long)atomic_load(&pp_passes), (unsigned long long)atomic_load(&pp_load_bytes),
+          (unsigned long long)t, (unsigned long long)atomic_load(&pp_passes), (unsigned long long)atomic_load(&pp_store_bytes),
+          (unsigned long long)t, (unsigned long long)atomic_load(&pp_passes), (unsigned long long)atomic_load(&pp_resolve_bytes),
+          (unsigned long long)t, (unsigned long long)atomic_load(&pp_msaa_passes),
+          (unsigned long long)atomic_load(&pp_msaa_store_bytes));
+  pthread_mutex_lock(&pp_lock);
+  for (int i = 0; i < PP_SIGS; i++)
+    if (pp_sig[i].count)
+      fprintf(cs_file, "%llu,%d,_sig %s,9,%llu,0,%llu\n", (unsigned long long)t, 230 + i, pp_sig[i].name,
+              (unsigned long long)pp_sig[i].count, (unsigned long long)pp_sig[i].bytes);
+  if (pp_seq_done) {
+    for (char *c = pp_seq[1]; *c; c++) if (*c == ',') *c = ';';
+    fprintf(cs_file, "%llu,250,_seq %s,9,1,0,0\n", (unsigned long long)t, pp_seq[1]);
+  }
+  pthread_mutex_unlock(&pp_lock);
   fflush(cs_file);
+  pthread_mutex_unlock(&cs_lock);
+}
+
+/* the VR link the snapshots report: `now` replaces it, `was` is forgotten before its owner destroys it */
+static void
+callstats_vr(struct wmtr_vr *was, struct wmtr_vr *now) {
+  pthread_mutex_lock(&cs_lock);
+  if (now) atomic_store(&cs_vr, now);
+  else if (was && atomic_load(&cs_vr) == was) atomic_store(&cs_vr, NULL);
   pthread_mutex_unlock(&cs_lock);
 }
 
@@ -250,10 +304,104 @@ callstats_on(void) {
 
 static inline void
 callstats_add(uint16_t call, int sync, uint64_t ns) {
-  if (call >= 146) return;
+  if (call >= WMTR_NCALLS) return;
   atomic_fetch_add_explicit(&cs_count[call], 1, memory_order_relaxed);
   if (sync) atomic_fetch_add_explicit(&cs_sync[call], 1, memory_order_relaxed);
   atomic_fetch_add_explicit(&cs_ns[call], ns, memory_order_relaxed);
+}
+
+/* Render-pass profile (with the call statistics only, rows 220-239): GPU time of every committed command
+ * buffer, and per render pass the attachments' estimated memory traffic (load / store / MSAA resolve bytes from
+ * the attachment sizes and actions) plus the most expensive pass signatures. Shows what a frame's passes cost
+ * on a tile GPU (stored MSAA attachments, redundant loads) without a frame capture of the game. */
+
+static uint64_t
+pp_tex_bytes(id<MTLTexture> t) {
+  if (!t) return 0;
+  NSUInteger bpp;
+  switch (t.pixelFormat) {
+  case MTLPixelFormatRGBA16Float: case MTLPixelFormatRG32Float: case MTLPixelFormatRGBA16Unorm: bpp = 8; break;
+  case MTLPixelFormatRGBA32Float: bpp = 16; break;
+  case MTLPixelFormatR8Unorm: bpp = 1; break;
+  case MTLPixelFormatRG8Unorm: case MTLPixelFormatR16Float: case MTLPixelFormatDepth16Unorm: bpp = 2; break;
+  case MTLPixelFormatDepth32Float_Stencil8: bpp = 5; break;
+  default: bpp = 4; break;
+  }
+  return (uint64_t)t.width * t.height * bpp * (t.sampleCount ? t.sampleCount : 1);
+}
+
+static void
+pp_pass(const struct WMTRenderPassInfo *info) {
+  uint64_t load = 0, store = 0, resolve = 0, msaa_store = 0;
+  int msaa = 0;
+  char sig[96];
+  int n = 0;
+  for (int i = 0; i < 8; i++) {
+    id<MTLTexture> t = (id<MTLTexture>)info->colors[i].texture;
+    if (!t) continue;
+    uint64_t b = pp_tex_bytes(t);
+    int st = info->colors[i].store_action;
+    if (info->colors[i].load_action == WMTLoadActionLoad) load += b;
+    if (st == WMTStoreActionStore || st == WMTStoreActionStoreAndMultisampleResolve) store += b;
+    if (t.sampleCount > 1) {
+      msaa = 1;
+      if (st == WMTStoreActionStore || st == WMTStoreActionStoreAndMultisampleResolve) msaa_store += b;
+    }
+    if (info->colors[i].resolve_texture) resolve += pp_tex_bytes((id<MTLTexture>)info->colors[i].resolve_texture);
+    if (n < 70)
+      n += snprintf(sig + n, sizeof sig - n, "c%lux%lu/f%lu/s%lu/L%d/S%d ", (unsigned long)t.width, (unsigned long)t.height,
+                    (unsigned long)t.pixelFormat, (unsigned long)t.sampleCount, info->colors[i].load_action, st);
+  }
+  id<MTLTexture> d = (id<MTLTexture>)info->depth.texture;
+  if (d) {
+    uint64_t b = pp_tex_bytes(d);
+    if (info->depth.load_action == WMTLoadActionLoad) load += b;
+    if (info->depth.store_action == WMTStoreActionStore) store += b;
+    if (d.sampleCount > 1 && info->depth.store_action == WMTStoreActionStore) msaa_store += b;
+    if (n < 80) n += snprintf(sig + n, sizeof sig - n, "d/s%lu/L%d/S%d", (unsigned long)d.sampleCount, info->depth.load_action,
+                              info->depth.store_action);
+  }
+  if (!n) snprintf(sig, sizeof sig, "no attachments %ux%u", info->render_target_width, info->render_target_height);
+  atomic_fetch_add_explicit(&pp_passes, 1, memory_order_relaxed);
+  atomic_fetch_add_explicit(&pp_load_bytes, load, memory_order_relaxed);
+  atomic_fetch_add_explicit(&pp_store_bytes, store, memory_order_relaxed);
+  atomic_fetch_add_explicit(&pp_resolve_bytes, resolve, memory_order_relaxed);
+  atomic_fetch_add_explicit(&pp_msaa_store_bytes, msaa_store, memory_order_relaxed);
+  if (msaa) atomic_fetch_add_explicit(&pp_msaa_passes, 1, memory_order_relaxed);
+  pthread_mutex_lock(&pp_lock);
+  int slot = -1;
+  for (int i = 0; i < PP_SIGS; i++) {
+    if (!pp_sig[i].count) { if (slot < 0) slot = i; continue; }
+    if (!strcmp(pp_sig[i].name, sig)) { slot = i; break; }
+  }
+  if (pp_seq_len < (int)sizeof pp_seq[0] - 8) pp_seq_len += snprintf(pp_seq[0] + pp_seq_len, sizeof pp_seq[0] - pp_seq_len, "R%d ", slot);
+  if (slot >= 0) {
+    if (!pp_sig[slot].count) snprintf(pp_sig[slot].name, sizeof pp_sig[slot].name, "%s", sig);
+    pp_sig[slot].count++;
+    pp_sig[slot].bytes += load + store + resolve;
+  }
+  pthread_mutex_unlock(&pp_lock);
+}
+
+static void
+pp_event(const char *e) {
+  pthread_mutex_lock(&pp_lock);
+  if (e[0] == '|') {
+    if (pp_seq_len) { memcpy(pp_seq[1], pp_seq[0], sizeof pp_seq[0]); pp_seq_done = 1; }
+    pp_seq_len = 0;
+    pp_seq[0][0] = 0;
+  } else if (pp_seq_len < (int)sizeof pp_seq[0] - 8)
+    pp_seq_len += snprintf(pp_seq[0] + pp_seq_len, sizeof pp_seq[0] - pp_seq_len, "%s ", e);
+  pthread_mutex_unlock(&pp_lock);
+}
+
+static void
+pp_commit(id<MTLCommandBuffer> cb) {
+  [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+    double g = done.GPUEndTime - done.GPUStartTime;
+    if (g > 0 && g < 10) atomic_fetch_add_explicit(&pp_cb_gpu_ns, (uint64_t)(g * 1e9), memory_order_relaxed);
+    atomic_fetch_add_explicit(&pp_cb_count, 1, memory_order_relaxed);
+  }];
 }
 
 /* The launcher's layer policy (VMView: game layer visibility, Metal HUD placement) acts on a layer's Metal
@@ -609,6 +757,14 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     if (lid) push_event(h, lid, 0);
     return STATUS_SUCCESS;
   }
+  case 17: { /* encodeSignalEvent: with a VR link, the time is kept for the exporter's stage split */
+    struct wmtr_vr *vr = atomic_load(&h->vr);
+    if (vr) wmtr_vr_note_signal(vr, ((struct unixcall_generic_obj_obj_uint64_noret *)params)->arg0,
+                                ((struct unixcall_generic_obj_obj_uint64_noret *)params)->arg1);
+    break;
+  }
+  case 146: /* WMTVRSubmit: the executor's VR exporter (not DXMT's unix side, which has no VR host) */
+    return wmtr_vr_submit(atomic_load(&h->vr), &((struct unixcall_wmtvr_submit *)params)->info);
   case 112: case 113: case 115: case 117: case 119: if (h->ops->map_path) {
     /* the path is the first relocated field of these calls */
     for (int i = 0; i < r->n_reloc; i++) {
@@ -630,6 +786,13 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
   }
   impl_fn f = (impl_fn)wmtr_impl_funcs[call];
   if (!f) return STATUS_UNSUCCESSFUL;
+  if (__builtin_expect(cs_state == 1, 0)) { /* render-pass profile (rows 220-239) */
+    if (call == 32) pp_pass((const struct WMTRenderPassInfo *)((struct unixcall_generic_obj_uint64_obj_ret *)params)->arg);
+    else if (call == 12) pp_commit((id<MTLCommandBuffer>)((struct unixcall_generic_obj_noret *)params)->handle);
+    else if (call == 31) pp_event("C");
+    else if (call == 30 || call == 129) pp_event("B");
+    else if (call == 47 || call == 48 || call == 146) pp_event(call == 146 ? "V" : "|");
+  }
   if (call == 47 || call == 48) { /* presentDrawable (both param structs start with buffer, drawable) */
     id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)((struct unixcall_generic_obj_obj_noret *)params)->handle;
     if (frames_out()) frame_record_on_completion(cb); /* record when the frame is done */
@@ -738,8 +901,11 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
   }
   if (st == STATUS_SUCCESS) {
     if (r->h.flags & WMTR_F_CONTROL) {
-      st = STATUS_SUCCESS; /* PING and HELLO need no work */
-    } else if (r->h.call < 146) {
+      if (r->h.call == WMTR_CTL_VR_QUERY) /* answered from cached state: never blocks the executor */
+        st = wmtr_vr_query(atomic_load(&h->vr), payload, r->h.params_size);
+      else
+        st = STATUS_SUCCESS; /* PING and HELLO need no work */
+    } else if (r->h.call < WMTR_NCALLS) {
       if (r->h.params_size < call_params_size[r->h.call]) {
         st = STATUS_INVALID_PARAMETER; /* the implementation would read and write past the params */
         LOG(0, "call %u: params %u bytes, expected %u\n", r->h.call, r->h.params_size, call_params_size[r->h.call]);
@@ -853,7 +1019,7 @@ executor(void *arg) {
     atomic_fetch_add(&h->n_req, 1);
     atomic_fetch_add(&h->n_bytes, hdr.size);
     if (hdr.flags & WMTR_F_SYNC) atomic_fetch_add(&h->n_sync, 1);
-    uint8_t cls = hdr.call < 146 && !(hdr.flags & WMTR_F_CONTROL) ? call_class[hdr.call] : WMTR_CLASS_S;
+    uint8_t cls = hdr.call < WMTR_NCALLS && !(hdr.flags & WMTR_F_CONTROL) ? call_class[hdr.call] : WMTR_CLASS_S;
     if (cls == WMTR_CLASS_B || cls == WMTR_CLASS_C) {
       struct job *j = malloc(sizeof *j);
       j->h = h; j->len = hdr.size; j->copy = calloc(1, hdr.size + WMTR_COPY_SLACK);
@@ -866,6 +1032,44 @@ executor(void *arg) {
   }
   free(scratch);
   return NULL;
+}
+
+/* WMTR_VR_FD: one link per process while contexts are alive. Proton's steam.exe may ask the runtime for the
+ * headset before the game creates its device: the contexts share the link instead of the first one claiming
+ * it. The last context closes the duplicated fd so the launcher can stop the host; a later context reattaches. */
+static struct wmtr_vr *shared_vr;
+static unsigned shared_vr_users;
+static pthread_mutex_t shared_vr_lock = PTHREAD_MUTEX_INITIALIZER;
+
+struct wmtr_vr *
+wmtr_host_vr(struct wmtr_host *h) {
+  return atomic_load(&h->vr);
+}
+
+static struct wmtr_vr *
+vr_shared_link(const char *vf, const char *vm) {
+  pthread_mutex_lock(&shared_vr_lock);
+  if (!shared_vr) {
+    int fd = dup(atoi(vf)); /* a dup: closing it would not end the host's session */
+    shared_vr = fd >= 0 ? wmtr_vr_create(fd, vm) : NULL;
+    if (!shared_vr && fd >= 0) close(fd);
+    LOG(shared_vr ? 1 : 0, "VR link %s (fd %s, %s)\n", shared_vr ? "attached" : "failed", vf, vm);
+  }
+  struct wmtr_vr *vr = shared_vr;
+  if (vr) shared_vr_users++;
+  pthread_mutex_unlock(&shared_vr_lock);
+  return vr;
+}
+
+static void
+vr_shared_release(struct wmtr_vr *vr) {
+  pthread_mutex_lock(&shared_vr_lock);
+  if (vr && vr == shared_vr && shared_vr_users && !--shared_vr_users) {
+    shared_vr = NULL;
+    callstats_vr(vr, NULL);
+    wmtr_vr_destroy(vr);
+  }
+  pthread_mutex_unlock(&shared_vr_lock);
 }
 
 struct wmtr_host *
@@ -902,8 +1106,24 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   pthread_attr_t a;
   pthread_attr_init(&a);
   pthread_attr_set_qos_class_np(&a, QOS_CLASS_USER_INTERACTIVE, 0);
+  const char *vs = getenv("WMTR_VR_SOCKET"), *vf = getenv("WMTR_VR_FD"), *vm = getenv("WMTR_VR_MACH_NAME");
+  if (vf && *vf && vm && *vm) {
+    /* steamac-vm (same process) holds the socketpair end and spawned steamac-vrhost with the other one */
+    struct wmtr_vr *vr = vr_shared_link(vf, vm);
+    if (vr) { atomic_store(&h->vr, vr); h->owns_vr = 2; callstats_vr(NULL, vr); } /* shared link ref held until destroy */
+  } else if (vs && *vs && vm && *vm) {
+    struct wmtr_vr *vr = wmtr_vr_connect(vs, vm);
+    LOG(vr ? 1 : 0, "VR link %s (%s, %s)\n", vr ? "connected" : "failed", vs, vm);
+    if (vr) { atomic_store(&h->vr, vr); h->owns_vr = 1; callstats_vr(NULL, vr); }
+  }
   pthread_create(&h->thread, &a, executor, h);
   return h;
+}
+
+void
+wmtr_host_set_vr(struct wmtr_host *h, struct wmtr_vr *vr) {
+  callstats_vr(atomic_load(&h->vr), vr);
+  atomic_store(&h->vr, vr);
 }
 
 void
@@ -940,6 +1160,12 @@ wmtr_host_destroy(struct wmtr_host *h) {
   h->n_views = 0;
   free(h->views); h->views = NULL; h->cap_views = 0;
   pthread_mutex_unlock(&h->view_lock);
+  if (h->owns_vr) {
+    struct wmtr_vr *vr = atomic_exchange(&h->vr, NULL);
+    if (h->owns_vr == 2) vr_shared_release(vr);
+    else { callstats_vr(vr, NULL); wmtr_vr_destroy(vr); }
+    h->owns_vr = 0;
+  }
 }
 
 uint64_t

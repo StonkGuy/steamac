@@ -17,10 +17,10 @@ ZSTD_LIB ?= $(shell pkg-config --variable=libdir libzstd 2>/dev/null)/libzstd.a
 OUT ?= build
 CC = clang
 
-INC = -Iinclude -Isrc -I$(DXMT)/src/winemetal -I$(DXMT)/src/airconv
+INC = -Iinclude -Isrc -I../host/vrhost/include -I../guest/vr/include -I$(DXMT)/src/winemetal -I$(DXMT)/src/airconv
 CFLAGS = -O2 -g -Wall -Wno-unused-function $(INC)
 FRAMEWORKS = -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore -framework Cocoa \
-             -framework CoreGraphics -framework ColorSync -framework CoreFoundation
+             -framework CoreGraphics -framework ColorSync -framework CoreFoundation -framework IOSurface
 LLVM_LIBS = -L$(LLVM)/lib -lLLVMPasses -lLLVMTarget -lLLVMObjCARCOpts -lLLVMCoroutines -lLLVMipo \
   -lLLVMInstrumentation -lLLVMVectorize -lLLVMLinker -lLLVMIRReader -lLLVMAsmParser -lLLVMFrontendOpenMP \
   -lLLVMScalarOpts -lLLVMInstCombine -lLLVMAggressiveInstCombine -lLLVMTransformUtils -lLLVMBitWriter \
@@ -43,9 +43,11 @@ $(OUT)/cache.o: $(DXMT)/src/winemetal/unix/cache.c | $(OUT)
 	$(CC) $(CFLAGS) -ObjC -c $< -o $@
 $(OUT)/wmtr_host.o: src/wmtr_host.m include/*.h src/wmtr_calls.inc | $(OUT)
 	$(CC) $(CFLAGS) -ObjC -c $< -o $@
+$(OUT)/wmtr_vr.o: src/wmtr_vr.m include/wmtr_vr.h ../host/vrhost/include/vrlink.h | $(OUT)
+	$(CC) $(CFLAGS) -ObjC -c $< -o $@
 
 host: $(OUT)/libwmtr_host.dylib
-$(OUT)/libwmtr_host.dylib: $(OUT)/wmtr_host.o $(OUT)/winemetal_unix.o $(OUT)/cache.o $(AIRCONV)
+$(OUT)/libwmtr_host.dylib: $(OUT)/wmtr_host.o $(OUT)/wmtr_vr.o $(OUT)/winemetal_unix.o $(OUT)/cache.o $(AIRCONV)
 	$(CC) -dynamiclib -install_name @rpath/libwmtr_host.dylib -o $@ $^ $(LLVM_LIBS) $(FRAMEWORKS) -lsqlite3
 	codesign -s - -f $@
 
@@ -70,8 +72,8 @@ $(OUT)/wmtr_spin_test: tests/wmtr_spin_test.c include/wmtr_spin.h | $(OUT)
 	$(CC) -O2 -Wall $(INC) -o $@ tests/wmtr_spin_test.c -lpthread
 $(OUT)/wmtr_present_test: tests/wmtr_present_test.m $(OUT)/libwmtr_host.dylib
 	$(CC) $(CFLAGS) -o $@ tests/wmtr_present_test.m -L$(OUT) -lwmtr_host -Wl,-rpath,@executable_path -framework Cocoa -framework Metal -framework QuartzCore
-$(OUT)/wmtr_loopback: tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_client.c include/*.h | $(OUT)
-	$(CC) $(CFLAGS) -o $@ tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_client.c -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore
+$(OUT)/wmtr_loopback: tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_vr.m src/wmtr_client.c include/*.h | $(OUT)
+	$(CC) $(CFLAGS) -o $@ tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_vr.m src/wmtr_client.c -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore -framework IOSurface
 
 # -mtls-dialect=gnu: newer GCC defaults to TLS descriptors, which need GLIBC_ABI_GNU2_TLS (absent in the
 # Steam Runtime's and the FEX rootfs's glibc), so the unixlib would not load

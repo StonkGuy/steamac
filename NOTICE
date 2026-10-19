@@ -30,6 +30,13 @@ airconv shader compiler with DXBCParser). The library is loaded by libkrun at ru
 rebuilt one of the same name replaces it. The pinned DXMT source, host/dxmt/patches/ and wmtr/ are attached
 to each release in FX-Steam-Launcher-<version>-gpl-sources.tar (pin: host/dxmt/pin.env).
 
+BSD-3-Clause (LICENSES/BSD-3-Clause.txt, guest/vr/third_party/openvr/LICENSE) - Valve's OpenVR API header,
+compiled into the guest OpenVR runtime (guest/vr, Apache-2.0 otherwise):
+  guest/vr/third_party/openvr/openvr.h   Copyright (c) 2015, Valve Corporation
+
+LGPL-2.1-or-later (LICENSES/LGPL-2.1-only.txt) - patches for Proton's vrclient_x64 (Wine code):
+  guest/proton-vrclient/patches/
+
 Apache-2.0 WITH LLVM-exception (LICENSES/LLVM-15-Apache-2.0-WITH-LLVM-exception.txt) - LLVM 15.0.7, linked
 statically into libwmtr_host.dylib by airconv.
 
@@ -68,6 +75,10 @@ fork are listed in docs/fork.md. New files added by this fork:
                            github.com/StonkGuy/dxmt branch steamac; adopted commits keep their authors
                            (David Grinberg, osy, Holly Hamilton, SteveTanSaMa, hanzpo, Mybono,
                            NerRobDog, 时雨, Jakey-Jakey), credits in that branch's STEAMAC-README.md
+  host/vrhost/             steamac-vrhost, the experimental VR host: GPL-3.0-or-later (host/vrhost/COPYING),
+                           because it contains WiVRn code (github.com/WiVRn/WiVRn, GPL-3.0-or-later). It is a
+                           separate executable; steamac-vm does not link it. magic_enum (vendored by WiVRn) is MIT.
+  docs/vr.md, docs/vr-interfaces.md  fork documentation, Apache-2.0
   docs/upstream/           upstream steamac's README text, reorganised into pages
                            (upstream text, Apache-2.0, © 2026 FX GAMES FZ LLC)
 

@@ -1,0 +1,24 @@
+{
+  "bindings": {
+    "/actions/Global": {
+      "chords": [],
+      "poses": [],
+      "haptics": [],
+      "sources": [
+        {
+          "inputs": {
+            "click": {
+              "output": "/actions/Global/in/HeadsetOnHead"
+            }
+          },
+          "mode": "button",
+          "path": "/user/head/proximity"
+        }
+      ],
+      "skeleton": []
+    }
+  },
+  "controller_type": "generic_hmd",
+  "description": "",
+  "name": "generic hmd defaults"
+}

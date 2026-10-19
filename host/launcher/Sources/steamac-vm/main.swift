@@ -27,6 +27,7 @@ if options.selftestMetalCache { MetalCompilerCache.selfTest() }
 if options.selftestGameLayers { GameLayerSelfTest.run() }
 if options.selftestL10n { L10nSelfTest.run() }
 if options.selftestGraphicsPath { GraphicsPathSelfTest.run(options) }
+if options.selftestVR { VRSelfTest.run(options) }
 // Before CrashReporting's GPU tags, the window or either Vulkan driver can initialise Metal.
 MetalCompilerCache.prepare()
 
@@ -527,7 +528,17 @@ do {
     }
     console.start()
     vm.start()
-    withExtendedLifetime((presenter, gamepad, progressPort, supervisorWatch, perfSubscription, gamePause, suspender, clipboard)) {
+    // VR boots: "Start in VR" / the headset's app list reach the guest agent; the pairing PIN shows on the window.
+    var vrRelay: VRRelay?
+    if options.vr {
+        VRHost.guestSend = { progressPort.send($0) }
+        vrRelay = MainActor.assumeIsolated {
+            VRRelay { [weak wc] pin in
+                wc?.window.subtitle = pin.map { String(localized: "VR pairing PIN \($0)") } ?? ""
+            }
+        }
+    }
+    withExtendedLifetime((presenter, gamepad, progressPort, supervisorWatch, perfSubscription, gamePause, suspender, clipboard, vrRelay)) {
         app.run()
     }
 } catch {

@@ -1,0 +1,213 @@
+From 1c746acc94c62f70e504a09220c821f097913717 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 21:36:45 +0300
+Subject: [PATCH] vrclient: Submit D3D11 textures from DXMT as
+ TextureType_Metal.
+
+DXMT (steamac's Direct3D 11 on Metal) has no Vulkan interop, so the DXVK
+path rejects its textures and the raw ID3D11Texture2D pointer reached
+the Linux runtime. When the texture implements DXMT's
+IMTLD3D11ExportableTexture, flush and pass its Metal texture handle,
+completion event and description (struct svr_metal_texture) with
+eType TextureType_Metal; the runtime submits it through DXMT's own
+remoting channel. Depth and motion attachments are dropped. Textures
+from other D3D11 implementations take the DXVK path as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ vrclient_x64/dxmt-interop.h        | 48 ++++++++++++++++++++++
+ vrclient_x64/vrclient_main.c       |  1 +
+ vrclient_x64/vrclient_structs.h    |  1 +
+ vrclient_x64/vrcompositor_manual.c | 64 +++++++++++++++++++++++++++++-
+ 4 files changed, 112 insertions(+), 2 deletions(-)
+ create mode 100644 vrclient_x64/dxmt-interop.h
+
+diff --git a/vrclient_x64/dxmt-interop.h b/vrclient_x64/dxmt-interop.h
+new file mode 100644
+index 00000000..ff5f8a0f
+--- /dev/null
++++ b/vrclient_x64/dxmt-interop.h
+@@ -0,0 +1,48 @@
++/*
++ * DXMT (Direct3D 11 on Metal) texture export for VR compositors, as implemented by steamac's DXMT build
++ * (IMTLD3D11ExportableTexture, DXMT src/d3d11/d3d11_interfaces.hpp), and the texture description handed to
++ * the OpenVR runtime as TextureType_Metal (steamac guest/vr/include/steamac_vr_guest.h).
++ *
++ * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
++ * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ */
++#ifndef __DXMT_INTEROP_H
++#define __DXMT_INTEROP_H
++
++#include "unknwn.h"
++
++/* ad6245d1-3a11-4dd6-87b7-7a58048b55d3 */
++DEFINE_GUID(IID_IMTLD3D11ExportableTexture, 0xad6245d1, 0x3a11, 0x4dd6, 0x87,0xb7, 0x7a,0x58,0x04,0x8b,0x55,0xd3);
++
++typedef struct IMTLD3D11ExportableTexture IMTLD3D11ExportableTexture;
++typedef struct IMTLD3D11ExportableTextureVtbl
++{
++    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IMTLD3D11ExportableTexture *This, REFIID riid, void **object);
++    ULONG (STDMETHODCALLTYPE *AddRef)(IMTLD3D11ExportableTexture *This);
++    ULONG (STDMETHODCALLTYPE *Release)(IMTLD3D11ExportableTexture *This);
++    /* Flushes the immediate context; *texture is the MTLTexture of the current allocation, complete once the
++     * MTLSharedEvent *shared_event reaches *value. */
++    HRESULT (STDMETHODCALLTYPE *GetMetalTexture)(IMTLD3D11ExportableTexture *This, UINT64 *texture,
++                                                 UINT64 *shared_event, UINT64 *value);
++} IMTLD3D11ExportableTextureVtbl;
++struct IMTLD3D11ExportableTexture
++{
++    const IMTLD3D11ExportableTextureVtbl *lpVtbl;
++};
++
++#define SVR_METAL_TEXTURE_MAGIC 0x54525653u /* "SVRT" */
++struct svr_metal_texture
++{
++    uint32_t magic; /* SVR_METAL_TEXTURE_MAGIC */
++    uint32_t size;  /* sizeof(struct svr_metal_texture) */
++    uint64_t handle;
++    uint64_t event_handle;
++    uint64_t event_value;
++    uint32_t width, height;
++    uint32_t dxgi_format;
++    uint32_t array_size, sample_count;
++    uint32_t array_index; /* layer to show for this eye */
++};
++
++#endif /* __DXMT_INTEROP_H */
+diff --git a/vrclient_x64/vrclient_main.c b/vrclient_x64/vrclient_main.c
+index f994fbb9..a58e6822 100644
+--- a/vrclient_x64/vrclient_main.c
++++ b/vrclient_x64/vrclient_main.c
+@@ -15,6 +15,7 @@
+ #include "d3d11_4.h"
+ #include "vkd3d-proton-interop.h"
+ #include "dxvk-interop.h"
++#include "dxmt-interop.h"
+
+ #include "vrclient_private.h"
+
+diff --git a/vrclient_x64/vrclient_structs.h b/vrclient_x64/vrclient_structs.h
+index 0aa3e32d..804b3b2c 100644
+--- a/vrclient_x64/vrclient_structs.h
++++ b/vrclient_x64/vrclient_structs.h
+@@ -155,6 +155,7 @@ enum ETextureType
+     TextureType_IOSurface = 3,
+     TextureType_DirectX12 = 4,
+     TextureType_DXGISharedHandle = 5,
++    TextureType_Metal = 6,
+ };
+
+ struct u_iface
+diff --git a/vrclient_x64/vrcompositor_manual.c b/vrclient_x64/vrcompositor_manual.c
+index c598b208..4df50ad0 100644
+--- a/vrclient_x64/vrcompositor_manual.c
++++ b/vrclient_x64/vrcompositor_manual.c
+@@ -7,6 +7,7 @@
+ #define COBJMACROS
+ #include "d3d11_4.h"
+ #include "dxvk-interop.h"
++#include "dxmt-interop.h"
+ #include "vkd3d-proton-interop.h"
+ #include "vrclient_private.h"
+
+@@ -30,6 +31,7 @@ struct submit_state
+     ID3D12DXVKInteropDevice *d3d12_device;
+     ID3D12DXVKInteropDevice2 *d3d12_device2;
+     ID3D12CommandQueue *d3d12_queue;
++    struct svr_metal_texture mtdata;
+ };
+
+ static void dxvk_transition_image_layout( IDXGIVkInteropDevice *dxvk_device, IDXGIVkInteropSurface *dxvk_surface,
+@@ -145,6 +147,60 @@ static const w_Texture_t *load_compositor_texture_dxvk( uint32_t eye, const w_Te
+     return &state->texture.texture;
+ }
+
++/* D3D11 on DXMT (steamac): hand the runtime the texture's Metal handle and completion event as
++ * TextureType_Metal. The runtime submits it through DXMT's own remoting channel, so no Vulkan interop exists or
++ * is needed. Depth and motion textures are not forwarded (the host compositor does not use them). */
++static const w_Texture_t *load_compositor_texture_dxmt( uint32_t eye, const w_Texture_t *texture, uint32_t *flags,
++                                                        struct submit_state *state, uint32_t array_index )
++{
++    IMTLD3D11ExportableTexture *exportable;
++    D3D11_TEXTURE2D_DESC desc = {0};
++    ID3D11Texture2D *texture2d;
++    IUnknown *texture_iface;
++    UINT64 handle, event, value;
++    HRESULT hr;
++
++    if (!(texture_iface = texture->handle)) return NULL;
++    if (FAILED(texture_iface->lpVtbl->QueryInterface( texture_iface, &IID_IMTLD3D11ExportableTexture, (void **)&exportable )))
++        return NULL;
++    hr = exportable->lpVtbl->GetMetalTexture( exportable, &handle, &event, &value );
++    exportable->lpVtbl->Release( exportable );
++    if (FAILED(hr))
++    {
++        WARN( "GetMetalTexture failed, hr %#lx.\n", hr );
++        return NULL;
++    }
++    if (SUCCEEDED(texture_iface->lpVtbl->QueryInterface( texture_iface, &IID_ID3D11Texture2D, (void **)&texture2d )))
++    {
++        texture2d->lpVtbl->GetDesc( texture2d, &desc );
++        texture2d->lpVtbl->Release( texture2d );
++    }
++
++    TRACE( "eye %u, metal texture %#I64x, %ux%u format %u array %u (index %u) samples %u, event %#I64x value %I64u.\n", eye,
++           handle, desc.Width, desc.Height, desc.Format, desc.ArraySize, array_index, desc.SampleDesc.Count, event, value );
++    state->mtdata.magic = SVR_METAL_TEXTURE_MAGIC;
++    state->mtdata.size = sizeof(state->mtdata);
++    state->mtdata.handle = handle;
++    state->mtdata.event_handle = event;
++    state->mtdata.event_value = value;
++    state->mtdata.width = desc.Width;
++    state->mtdata.height = desc.Height;
++    state->mtdata.dxgi_format = desc.Format;
++    state->mtdata.array_size = desc.ArraySize;
++    state->mtdata.sample_count = desc.SampleDesc.Count;
++    /* as for DXVK: an array texture without an explicit index holds one eye per layer */
++    state->mtdata.array_index = array_index != ~0u ? array_index : desc.ArraySize > 1 ? eye : 0;
++
++    if (*flags & Submit_TextureWithPose)
++        state->texture.texture_with_pose = *(const w_VRTextureWithPose_t *)texture;
++    else
++        state->texture.texture = *texture;
++    state->texture.texture.handle = &state->mtdata;
++    state->texture.texture.eType = TextureType_Metal;
++    *flags &= ~((Submit_TextureWithMotion | Submit_TextureWithDepth) & ~Submit_TextureWithPose);
++    return &state->texture.texture;
++}
++
+ static void free_compositor_texture_dxvk( struct submit_state *state )
+ {
+     if (!state->dxvk_device) return;
+@@ -442,7 +498,11 @@ static const w_Texture_t *load_compositor_texture( uint32_t eye, const w_Texture
+     switch (texture->eType)
+     {
+     case TextureType_DirectX:
++    {
++        const w_Texture_t *dxmt_texture;
++        if ((dxmt_texture = load_compositor_texture_dxmt( eye, texture, flags, state, array_index ))) return dxmt_texture;
+         return load_compositor_texture_dxvk( eye, texture, flags, state, array_index );
++    }
+     case TextureType_DirectX12:
+         return load_compositor_texture_d3d12( eye, texture, flags, state, array_index );
+     default: return texture;
+@@ -2345,7 +2405,7 @@ uint32_t __thiscall winIVRCompositor_IVRCompositor_028_SubmitWithArrayIndex( str
+             .nSubmitFlags = nSubmitFlags,
+         };
+
+-        params.pTexture = load_compositor_texture_dxvk( eEye, pTexture, &params.nSubmitFlags, &state, unTextureArrayIndex );
++        params.pTexture = load_compositor_texture( eEye, pTexture, &params.nSubmitFlags, &state, unTextureArrayIndex );
+         VRCLIENT_CALL( IVRCompositor_IVRCompositor_028_Submit, &params );
+         ret = params._ret;
+     }
+@@ -2530,7 +2590,7 @@ uint32_t __thiscall winIVRCompositor_IVRCompositor_029_SubmitWithArrayIndex( str
+             .nSubmitFlags = nSubmitFlags,
+         };
+
+-        params.pTexture = load_compositor_texture_dxvk( eEye, pTexture, &params.nSubmitFlags, &state, unTextureArrayIndex );
++        params.pTexture = load_compositor_texture( eEye, pTexture, &params.nSubmitFlags, &state, unTextureArrayIndex );
+         VRCLIENT_CALL( IVRCompositor_IVRCompositor_029_Submit, &params );
+         ret = params._ret;
+     }

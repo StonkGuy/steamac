@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Package corresponding source for a release: the GPL kernel and static initramfs tools, and the LGPL
-# DXMT source (pinned tarball, host/dxmt/patches, wmtr/) behind libwmtr_host.dylib.
+# Package corresponding source for a release: the GPL kernel and static initramfs tools, the LGPL
+# DXMT source (pinned tarball, host/dxmt/patches, wmtr/) behind libwmtr_host.dylib, and the GPL-3.0
+# steamac-vrhost (host/vrhost + its pinned OpenSSL tarball) when the app bundles it.
 # Usage: scripts/gpl-sources.sh [GIT_REF] (HEAD uses the current working tree).
 # The tagged files are read with git archive, never checked out over the working tree.
 set -euo pipefail
@@ -26,6 +27,9 @@ if [[ $REF == HEAD ]]; then
         # Tracked files only: build output under wmtr/ stays out.
         git -C "$ROOT" ls-files -z -- host/dxmt wmtr | tar -C "$ROOT" --null -T - -cf - | tar -xf - -C "$ST/repo"
     fi
+    if [[ -f $ROOT/work/out/host/bin/steamac-vrhost ]]; then
+        git -C "$ROOT" ls-files -z -- host/vrhost | tar -C "$ROOT" --null -T - -cf - | tar -xf - -C "$ST/repo"
+    fi
 else
     git -C "$ROOT" rev-parse --verify "$REF^{commit}" >/dev/null
     git -C "$ROOT" archive "$REF" host/launcher/Info.plist scripts/config.env \
@@ -35,6 +39,10 @@ else
     rm -rf "$ST/repo/host"
     if git -C "$ROOT" cat-file -e "$REF:host/dxmt/pin.env" 2>/dev/null; then
         git -C "$ROOT" archive "$REF" host/dxmt wmtr | tar -xf - -C "$ST/repo"
+    fi
+    # The VR host ships only in apps built with host/vrhost/build.sh; include its source whenever the tag has it.
+    if git -C "$ROOT" cat-file -e "$REF:host/vrhost/CMakeLists.txt" 2>/dev/null; then
+        git -C "$ROOT" archive "$REF" host/vrhost | tar -xf - -C "$ST/repo"
     fi
 fi
 version=$(plutil -extract CFBundleShortVersionString raw -o - "$ST/Info.plist")
@@ -97,6 +105,29 @@ and are not part of the library. The shader compiler links LLVM $LLVM_VERSION
 statically (Apache-2.0 with LLVM exception; its licence text is in the app's
 licenses folder), built from the llvmorg-$LLVM_VERSION tag of
 github.com/llvm/llvm-project."
+fi
+
+# steamac-vrhost (GPL-3.0-or-later: contains WiVRn code), present when the app bundles the VR host.
+vrhost_notes=
+if [[ -f $ST/repo/host/vrhost/CMakeLists.txt ]]; then
+    ossl_version=$(sed -n 's/^[[:space:]]*set(VRHOST_OPENSSL_VERSION \(.*\))$/\1/p' "$ST/repo/host/vrhost/CMakeLists.txt")
+    ossl_sha=$(sed -n 's/^[[:space:]]*set(VRHOST_OPENSSL_SHA256 \(.*\))$/\1/p' "$ST/repo/host/vrhost/CMakeLists.txt")
+    [[ $ossl_version =~ ^[0-9]+(\.[0-9]+)*$ && $ossl_sha =~ ^[[:xdigit:]]{64}$ ]] || {
+        echo 'missing OpenSSL pin in host/vrhost/CMakeLists.txt' >&2; exit 1;
+    }
+    copy_source "$ROOT/work/build/host-vrhost/openssl_static-prefix/src/openssl-$ossl_version.tar.gz" \
+        "https://github.com/openssl/openssl/releases/download/openssl-$ossl_version/openssl-$ossl_version.tar.gz" \
+        "$ossl_sha" "openssl-$ossl_version.tar.gz"
+    vrhost_notes="
+Contents/MacOS/steamac-vrhost (experimental VR host, a separate executable):
+GPL-3.0-or-later, repo/host/vrhost/ (licence: repo/host/vrhost/COPYING). It
+contains WiVRn v26.9 code, vendored unmodified in
+repo/host/vrhost/third_party/wivrn/ (see UPSTREAM.md there). Build with
+repo/host/vrhost/build.sh (CMake + Ninja). It links libcrypto from OpenSSL
+$ossl_version (Apache-2.0) statically: sources/openssl-$ossl_version.tar.gz
+(SHA-256 $ossl_sha), configured as in repo/host/vrhost/CMakeLists.txt.
+Header-only build inputs fetched by CMake at pinned tags: OpenXR-SDK
+release-1.1.58 and Boost.PFR boost-1.89.0."
 fi
 
 # Resolve busybox-static's *source* version from the same snapshot/architecture
@@ -186,6 +217,7 @@ repo/guest/initramfs/init. Its static binaries are:
     statically in step 20. See that script for all configure/make flags.
 
 $dxmt_notes
+$vrhost_notes
 Debian snapshot archive: $snapshot
 EOF
 
