@@ -1,0 +1,267 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Mon, 19 Oct 2026 09:58:39 +0300
+Subject: [PATCH] rutabaga_gfx(macos): wmtr: bound blob ids and sizes, refuse a
+ short ring
+
+The guest chooses every wmtr blob's id and size and blob 0's size. Three
+gaps let it reach VMM memory or exhaust it:
+
+- blob_id is a u64 but was narrowed to u32 before the range check, so
+  1 << 32 aliased the ring (blob 0) and replaced its table entry;
+- a second create of a live id replaced the table entry: the first
+  mapping leaked and the executor's blob moved under it;
+- size was unbounded (host memory DoS), although the capset advertises
+  max_blob = 4 GiB.
+
+The id is now range-checked before narrowing (below 1024), a live id is
+refused (a released arena blob's number, patch 0028, can be created
+again) and size is capped at max_blob. RING additionally refuses a blob
+0 smaller than the executor's ring layout when the library exports
+wmtr_layout: the executor reads and writes the ring at fixed offsets up
+to that size (12 MiB). libwmtr_host checks this itself since steamac
+7a3b67c; the check here keeps an older library from starting on a short
+ring. Cost: one map lookup per blob create, one call per RING.
+
+The ring PING test wrote ring version 1; the protocol is at 2 since
+client-assigned handles, so it failed whenever STEAMAC_WMTR_LIB was set
+(CI leaves it unset and skips it). It now writes 2.
+
+Upstream state: wmtr is steamac's own context type (patch 0021); stock
+libkrun v1.19.6 has no equivalent. Same limits as the review fix on the
+upstream PR branch (pr15-fixes fc905a0), adapted to 0028's detach.
+
+Tests (cargo test --lib wmtr in rutabaga_gfx, no host library or GPU):
+blob_ids_are_unique_and_in_range (ring id reuse, 1 << 32, u64::MAX,
+1024, size 0 and max_blob + 1 refused, ring entry unchanged, one
+mapping) and short_ring_is_refused_before_executor_start (16 KiB ring
+refused before wmtr_host_create, full ring reaches it). Before: both
+FAIL; after: pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/rutabaga_gfx/src/wmtr.rs | 132 +++++++++++++++++++++++++++++++----
+ 1 file changed, 117 insertions(+), 15 deletions(-)
+
+diff --git a/src/rutabaga_gfx/src/wmtr.rs b/src/rutabaga_gfx/src/wmtr.rs
+index a9c5e24..426fdf0 100644
+--- a/src/rutabaga_gfx/src/wmtr.rs
++++ b/src/rutabaga_gfx/src/wmtr.rs
+@@ -34,6 +34,10 @@ const WMTR_VGPU_RING: u32 = 1;
+ const WMTR_VGPU_KICK: u32 = 2;
+ const WMTR_VGPU_WAIT: u32 = 3;
+ const CMD_SIZE: usize = 24;
++/// Blob ids are wmtr blob numbers 0..MAX_BLOBS (0 is the ring).
++const MAX_BLOBS: u64 = 1024;
++/// Largest blob, advertised to the guest as max_blob in the capset.
++const MAX_BLOB_SIZE: u64 = 4 << 30;
+ 
+ #[repr(C)]
+ struct WmtrHostOps {
+@@ -50,6 +54,7 @@ type HostProgress = unsafe extern "C" fn(*mut c_void, u32) -> u64;
+ type ViewCreate = extern "C" fn(*mut c_void, u64, *mut c_void, *mut u64) -> u64;
+ type ViewRelease = extern "C" fn(*mut c_void, u64);
+ type MapPath = extern "C" fn(*mut c_void, *const i8, *mut i8, u64) -> *const i8;
++type Layout = unsafe extern "C" fn(*mut u64, *mut u64, *mut u64, *mut u64);
+ 
+ #[derive(Clone, Copy)]
+ struct HostLib {
+@@ -60,6 +65,8 @@ struct HostLib {
+     create_view: Option<ViewCreate>,
+     release_view: Option<ViewRelease>,
+     map_path: Option<MapPath>,
++    /// wmtr_layout: the ring blob size the executor needs (checked before RING).
++    layout: Option<Layout>,
+ }
+ 
+ unsafe impl Send for HostLib {}
+@@ -107,6 +114,7 @@ fn load_host_lib() -> Option<HostLib> {
+             release_view: opt("wmtr_present_release_view")
+                 .map(|p| std::mem::transmute::<*mut c_void, ViewRelease>(p)),
+             map_path: opt("wmtr_map_path").map(|p| std::mem::transmute::<*mut c_void, MapPath>(p)),
++            layout: opt("wmtr_layout").map(|p| std::mem::transmute::<*mut c_void, Layout>(p)),
+         })
+     }
+ }
+@@ -211,11 +219,19 @@ impl RutabagaContext for WmtrContext {
+         resource_create_blob: ResourceCreateBlob,
+         _handle_opt: Option<RutabagaHandle>,
+     ) -> RutabagaResult<RutabagaResource> {
+-        let blob = resource_create_blob.blob_id as u32;
++        // Checked before narrowing: blob_id is a u64 and 1 << 32 must not alias the ring (blob 0).
++        let id = resource_create_blob.blob_id;
+         let size = resource_create_blob.size;
+-        if size == 0 || blob as usize >= 1024 {
++        if id >= MAX_BLOBS || size == 0 || size > MAX_BLOB_SIZE {
+             return Err(RutabagaError::SpecViolation("wmtr: bad blob"));
+         }
++        let blob = id as u32;
++        // The executor may hold a live blob's address, so a live id is never replaced: a second
++        // create would leak the first mapping and move the blob under it. A released (detached)
++        // arena blob's number can be created again.
++        if self.shared.blobs.lock().unwrap().contains_key(&blob) {
++            return Err(RutabagaError::SpecViolation("wmtr: blob id in use"));
++        }
+         let name = CString::new(format!("/wmtr.{}.{}.{}", std::process::id(), resource_id, blob)).unwrap();
+         // SAFETY: plain POSIX shm calls; every result is checked.
+         let (fd, ptr) = unsafe {
+@@ -277,10 +293,22 @@ impl RutabagaContext for WmtrContext {
+                     if !self.host().is_null() {
+                         return Err(RutabagaError::SpecViolation("wmtr: ring already started"));
+                     }
+-                    let ring = match self.shared.blobs.lock().unwrap().get(&0) {
+-                        Some(&(p, _)) => p,
++                    let (ring, ring_size) = match self.shared.blobs.lock().unwrap().get(&0) {
++                        Some(&(p, n)) => (p, n),
+                         None => return Err(RutabagaError::SpecViolation("wmtr: no ring blob")),
+                     };
++                    // The guest sized blob 0; the executor uses fixed offsets up to its ring
++                    // layout. The library checks this too; refuse here as well so a library
++                    // without that check never starts on a short ring.
++                    if let Some(layout) = self.shared.lib.layout {
++                        let (mut need, mut a, mut b, mut c) = (0, 0, 0, 0);
++                        // SAFETY: wmtr_layout only writes the four u64 out-parameters.
++                        unsafe { layout(&mut need, &mut a, &mut b, &mut c) };
++                        if ring_size < need {
++                            error!("wmtr: ring blob of {ring_size} bytes, need {need}");
++                            return Err(RutabagaError::SpecViolation("wmtr: ring blob too small"));
++                        }
++                    }
+                     let ctx = Arc::as_ptr(&self.shared) as *mut c_void;
+                     // SAFETY: ring is our mapping of blob 0; ops and ctx outlive the executor
+                     // (destroyed in Drop before they are freed).
+@@ -410,7 +438,7 @@ impl RutabagaComponent for Wmtr {
+         let mut v = Vec::with_capacity(16);
+         v.extend_from_slice(&1u32.to_le_bytes());
+         v.extend_from_slice(&16384u32.to_le_bytes());
+-        v.extend_from_slice(&(4u64 << 30).to_le_bytes());
++        v.extend_from_slice(&MAX_BLOB_SIZE.to_le_bytes());
+         v
+     }
+ 
+@@ -454,8 +482,7 @@ mod tests {
+     //! Needs the built host library: STEAMAC_WMTR_LIB=/path/to/libwmtr_host.dylib (skipped when unset).
+     use super::*;
+     use crate::rutabaga_os::AsRawDescriptor;
+-
+-    type Layout = unsafe extern "C" fn(*mut u64, *mut u64, *mut u64, *mut u64);
++    use std::sync::atomic::{AtomicU32, Ordering};
+ 
+     fn footprint() -> u64 {
+         // SAFETY: an all-zero rusage_info_v2 is a valid out-parameter.
+@@ -480,21 +507,96 @@ mod tests {
+         0
+     }
+ 
+-    /// An arena blob the guest releases (detach, then the VMM's unref drops the fd) leaves this
+-    /// process's footprint and the executor's blob table; the ring blob stays; the number can be
+-    /// added again. No host library or GPU needed: blobs are plain shared memory.
+-    #[test]
+-    fn detach_releases_the_blob_memory() {
++    /// A component over stub host calls (no library or GPU): blobs are plain shared memory.
++    fn stub_component(create: HostCreate, layout: Option<Layout>) -> Wmtr {
+         let lib = HostLib {
+-            create: no_create,
++            create,
+             kick: no_void,
+             destroy: no_void,
+             progress: no_progress,
+             create_view: None,
+             release_view: None,
+             map_path: None,
++            layout,
++        };
++        Wmtr { lib, fence_handler: RutabagaFenceHandler::new(|_| {}) }
++    }
++
++    fn blob(id: u64, size: u64) -> ResourceCreateBlob {
++        ResourceCreateBlob { blob_mem: 2, blob_flags: 3, blob_id: id, size }
++    }
++
++    fn as_wmtr(c: &dyn RutabagaContext) -> &WmtrContext {
++        // SAFETY: the only RutabagaContext this component creates is a WmtrContext.
++        unsafe { &*(c as *const dyn RutabagaContext as *const WmtrContext) }
++    }
++
++    /// Blob ids are range-checked before narrowing to u32 (1 << 32 would alias the ring), a live
++    /// id is not created twice (the first mapping would leak and the blob move), and no blob is
++    /// larger than the max_blob the capset advertises. Rejections leave the existing blob alone.
++    #[test]
++    fn blob_ids_are_unique_and_in_range() {
++        let comp = stub_component(no_create, None);
++        let mut ctx =
++            comp.create_context(1, RUTABAGA_CAPSET_WMTR, None, RutabagaFenceHandler::new(|_| {})).unwrap();
++        let _ring = ctx.context_create_blob(11, blob(0, 65536), None).unwrap();
++        let ring = as_wmtr(ctx.as_ref()).shared.blobs.lock().unwrap()[&0];
++        assert!(ctx.context_create_blob(12, blob(0, 65536), None).is_err());
++        assert!(ctx.context_create_blob(13, blob(1 << 32, 4096), None).is_err());
++        assert!(ctx.context_create_blob(14, blob(u64::MAX, 4096), None).is_err());
++        assert!(ctx.context_create_blob(15, blob(MAX_BLOBS, 4096), None).is_err());
++        assert!(ctx.context_create_blob(16, blob(1, 0), None).is_err());
++        assert!(ctx.context_create_blob(17, blob(1, MAX_BLOB_SIZE + 1), None).is_err());
++        assert_eq!(as_wmtr(ctx.as_ref()).shared.blobs.lock().unwrap()[&0], ring);
++        assert_eq!(as_wmtr(ctx.as_ref()).maps.len(), 1);
++        // the last valid id works; the guest is told the size limit
++        let _last = ctx.context_create_blob(18, blob(MAX_BLOBS - 1, 4096), None).unwrap();
++        let caps = comp.get_capset(RUTABAGA_CAPSET_WMTR, 1);
++        assert_eq!(u64::from_le_bytes(caps[8..16].try_into().unwrap()), MAX_BLOB_SIZE);
++    }
++
++    static CREATES: AtomicU32 = AtomicU32::new(0);
++    unsafe extern "C" fn count_create(_: *mut c_void, _: *const WmtrHostOps, _: *mut c_void) -> *mut c_void {
++        CREATES.fetch_add(1, Ordering::SeqCst);
++        std::ptr::null_mut()
++    }
++    unsafe extern "C" fn layout_1mib(ring: *mut u64, a: *mut u64, b: *mut u64, c: *mut u64) {
++        *ring = 1 << 20;
++        *a = 0;
++        *b = 0;
++        *c = 0;
++    }
++
++    /// RING on a blob 0 smaller than the library's ring layout is refused before the executor is
++    /// created (it would read and write at fixed offsets past the mapping); a full-size ring is
++    /// handed to it.
++    #[test]
++    fn short_ring_is_refused_before_executor_start() {
++        let comp = stub_component(count_create, Some(layout_1mib));
++        let ring_cmd = {
++            let mut v = vec![0u8; CMD_SIZE];
++            v[0..4].copy_from_slice(&WMTR_VGPU_RING.to_le_bytes());
++            v
+         };
+-        let comp = Wmtr { lib, fence_handler: RutabagaFenceHandler::new(|_| {}) };
++        let mut ctx =
++            comp.create_context(1, RUTABAGA_CAPSET_WMTR, None, RutabagaFenceHandler::new(|_| {})).unwrap();
++        let _ring = ctx.context_create_blob(21, blob(0, 16384), None).unwrap();
++        assert!(ctx.submit_cmd(&mut ring_cmd.clone(), &[]).is_err());
++        assert_eq!(CREATES.load(Ordering::SeqCst), 0, "executor started on a short ring");
++        let mut ctx =
++            comp.create_context(2, RUTABAGA_CAPSET_WMTR, None, RutabagaFenceHandler::new(|_| {})).unwrap();
++        let _ring = ctx.context_create_blob(22, blob(0, 1 << 20), None).unwrap();
++        // the stub executor fails to start, but it was asked to
++        assert!(ctx.submit_cmd(&mut ring_cmd.clone(), &[]).is_err());
++        assert_eq!(CREATES.load(Ordering::SeqCst), 1);
++    }
++
++    /// An arena blob the guest releases (detach, then the VMM's unref drops the fd) leaves this
++    /// process's footprint and the executor's blob table; the ring blob stays; the number can be
++    /// added again. No host library or GPU needed: blobs are plain shared memory.
++    #[test]
++    fn detach_releases_the_blob_memory() {
++        let comp = stub_component(no_create, None);
+         let mut ctx =
+             comp.create_context(1, RUTABAGA_CAPSET_WMTR, None, RutabagaFenceHandler::new(|_| {})).unwrap();
+         let wmtr = |c: &mut Box<dyn RutabagaContext>| -> *const Shared {
+@@ -583,7 +685,7 @@ mod tests {
+         // SAFETY: offsets come from the host library's own layout.
+         unsafe {
+             *(base as *mut u32) = 0x52544d57; // magic
+-            *(base.add(4) as *mut u32) = 1; // version
++            *(base.add(4) as *mut u32) = 2; // version (WMTR_VERSION)
+         }
+         let cmd = |ty: u32, slot: u32, seq: u64| {
+             let mut v = Vec::with_capacity(CMD_SIZE);
+-- 
+2.39.5 (Apple Git-154)
+

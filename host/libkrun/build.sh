@@ -108,7 +108,8 @@ done
 	# CoreAudio backend: control requests and the pump stalling each other (patch 0022).
 	RUSTFLAGS="-L native=$out/lib -C link-args=-Wl,-rpath,$out/lib" \
 		cargo test -q --features gpu,snd --lib -- virtio::snd
-	# The wmtr context frees an arena blob the guest released (patch 0028).
+	# The wmtr context frees an arena blob the guest released (patch 0028) and bounds blob ids,
+	# sizes and the ring (patch 0029). With STEAMAC_WMTR_LIB set the ring test runs against it.
 	(cd ../rutabaga_gfx &&
 		RUSTFLAGS="-L native=$out/lib -C link-args=-Wl,-rpath,$out/lib" \
 			cargo test -q --features gpu,virgl_renderer --lib -- wmtr)
