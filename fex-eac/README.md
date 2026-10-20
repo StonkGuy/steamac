@@ -2,7 +2,7 @@
 
 Run Easy Anti-Cheat games (tested: VRChat) on a steamac Mac by replacing the FEX inside Steam's own FEX compatibility tool
 (Steam app 3127680) with the patched FEX from [StonkGuy/FEX](https://github.com/StonkGuy/FEX/tree/eac-2610): branch `eac-2610` = FEX-2610 plus the EAC fidelity patches, pinned here to tag
-[`eac-2610.2`](https://github.com/StonkGuy/FEX/releases/tag/eac-2610.2).
+[`eac-2610.3`](https://github.com/StonkGuy/FEX/releases/tag/eac-2610.3).
 
 EAC's Linux module runs the game under the x86-64 Proton that itself runs inside Steam's FEX tool. The module drives the
 game through `ptrace` and depends on exact Linux signal semantics; Valve's FEX-2607 build fails that under emulation, so
@@ -21,13 +21,13 @@ the session never authenticates. The patched FEX passes the `ptrace` and signal-
 | 0003, 0005, 0006, 0009, 0024 | accounting and profiling only |
 
 Required for VRChat: 0001, 0002 and 0007/0008. 0004 is performance; 0003, 0005, 0006, 0009 and 0024 are accounting and profiling only.
-`build-fex.sh` clones StonkGuy/FEX at tag `eac-2610.2` and checks its commit (`cc1cc2a1`); the tag holds patches
-0001–0020, 0022–0026, 0033 and 0035, one commit each on FEX-2610 (`14c92681`), with the commit list in its
+`build-fex.sh` clones StonkGuy/FEX at tag `eac-2610.3` and checks its commit (`938eedfc`); the tag holds patches
+0001–0020, 0022–0026, 0033, 0035–0039 and 0041–0053, one commit each on FEX-2610 (`14c92681`), with the commit list in its
 [EAC-README.md](https://github.com/StonkGuy/FEX/blob/eac-2610/EAC-README.md) and the regression tests in
 [eac-tests/](https://github.com/StonkGuy/FEX/tree/eac-2610/eac-tests). Patch 0021 (`pop r/m`) was withdrawn — it broke
 the normal path and hung the EAC launcher.
 
-**Downstream forks.** FEX patches now come from StonkGuy/FEX tag `eac-2610.2` instead of `fex-eac/patches/`. A
+**Downstream forks.** FEX patches now come from StonkGuy/FEX tag `eac-2610.3` instead of `fex-eac/patches/`. A
 downstream 0027 (`/proc/<pid>/maps` for a tracer) corresponds to our 0033.
 
 **Scope.** These patches do not try to make FEX a replica of native x86-64 Linux. Like upstream FEX, they make a
@@ -71,7 +71,7 @@ env FEX_NEEDSSECCOMP=1 %command%
 Enable SSH in the guest (Settings > Advanced > Enable SSH), copy `fex-eac/` over, then:
 
 ```sh
-sh build-fex.sh            # clones StonkGuy/FEX at eac-2610.2, builds, stages into ~/fex-eac-work/stage
+sh build-fex.sh            # clones StonkGuy/FEX at eac-2610.3, builds, stages into ~/fex-eac-work/stage
 sh install-fex-tool.sh     # swaps the stage into the compat tool; backs up Valve's files first
 sh install-fex-tool.sh status    # which build is installed
 sh install-fex-tool.sh restore   # put Valve's build back
