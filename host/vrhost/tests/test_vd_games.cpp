@@ -136,6 +136,8 @@ int main()
 	CHECK(a.id == "438100" and a.seq == 1);
 	auto st = ctl.handle("status");
 	CHECK(st.find("\"app_request\":{\"id\":\"438100\",\"seq\":1}") != std::string::npos);
+	// the launcher's VRRelay decodes encryption + pin (required keys in the installed launcher)
+	CHECK(st.find("\"encryption\":\"") != std::string::npos and st.find("\"pin\":\"\"") != std::string::npos);
 	CHECK(session.stats().bad_messages >= 1); // the truncated LaunchGame
 
 	// the launcher's relay (VRHost.swift VRRelay): a launch-vr per seq step, so polling twice starts it once

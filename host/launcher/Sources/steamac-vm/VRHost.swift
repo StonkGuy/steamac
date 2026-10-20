@@ -295,6 +295,10 @@ enum VRSelfTest {
         let r2 = VRRelay.actions(nil, lastSeq: 4)
         check(r0.start == nil && r0.seq == 3 && r0.pin == nil && r1.start == 438100 && r1.seq == 4 && r1.pin == "123456"
               && r2.start == nil && r2.seq == 4 && r2.pin == nil, "relay actions: \(r0) \(r1) \(r2)")
+        // an adapter without PIN pairing (Virtual Desktop) leaves encryption/pin out; its Games-tab pick still starts
+        let vd = try? JSONDecoder().decode(VRRelay.Reply.self, from: Data(#"{"app_request":{"id":"438100","seq":2}}"#.utf8))
+        let r3 = VRRelay.actions(vd, lastSeq: 1)
+        check(r3.start == 438100 && r3.seq == 2 && r3.pin == nil, "relay actions without encryption/pin: \(r3)")
         check(LauncherSettings.vrEyeSizes.allSatisfy(LauncherSettings.vrEyeSizeValid)
               && !["", "1440", "1441x1584", "8x8", "axb"].contains(where: LauncherSettings.vrEyeSizeValid), "eye size validation")
         failures += VRPanelSelfTest.text()
@@ -354,15 +358,15 @@ enum VRSelfTest {
 final class VRRelay {
     struct Reply: Decodable {
         struct AppRequest: Decodable { var id: String; var seq: UInt64 }
-        var encryption: String
-        var pin: String
+        var encryption: String?   // WiVRn's; absent from adapters without PIN pairing
+        var pin: String?
         var app_request: AppRequest?
     }
 
     /// What one status reply asks for: the app to start (a new request since `lastSeq`) and the PIN to show.
     nonisolated static func actions(_ r: Reply?, lastSeq: UInt64?) -> (start: Int?, seq: UInt64?, pin: String?) {
         guard let r else { return (nil, lastSeq, nil) }
-        let pin = r.encryption == "pairing" && !r.pin.isEmpty ? r.pin : nil
+        let pin = r.encryption == "pairing" && !(r.pin ?? "").isEmpty ? r.pin : nil
         guard let a = r.app_request else { return (nil, lastSeq, pin) }
         // the first reply only sets the baseline: a request from before this launcher run is not repeated
         let start = lastSeq != nil && a.seq > lastSeq! ? Int(a.id) : nil

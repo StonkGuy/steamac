@@ -1374,6 +1374,11 @@ bool VdSession::pairing() const
 	return p->pairing;
 }
 
+bool VdSession::encrypted() const
+{
+	return p->cfg.encrypt_local and p->cfg.discovery_key.has_value();
+}
+
 std::string VdSession::accounts_file() const
 {
 	return p->accounts.file();
@@ -1447,6 +1452,10 @@ std::vector<SessionControl::Param> VdControl::params() const
 	        {"port", int64_t(ports.control)},
 	        {"discovery_port", int64_t(ports.discovery)},
 	        {"render_divisor", int64_t(s.render_divisor())},
+	        // the launcher's status relay (VRRelay, which starts Games-tab picks) reads these two like WiVRn's;
+	        // VD pairs by account, never by PIN
+	        {"encryption", s.pairing() ? "pairing" : s.encrypted() ? "enabled" : "disabled"},
+	        {"pin", ""},
 	};
 }
 

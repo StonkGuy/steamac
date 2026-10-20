@@ -100,6 +100,7 @@ public:
 	uint32_t render_divisor() const;
 	bool set_pairing(bool on);
 	bool pairing() const;
+	bool encrypted() const; // AES stream wrapper on the LAN
 	std::string accounts_file() const;
 	uint32_t bitrate_bps() const;
 	const VdStats & stats() const;
