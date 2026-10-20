@@ -936,7 +936,7 @@ extension WindowController {
         CGAssociateMouseAndMouseCursorPosition(1)
         NSCursor.unhide()
         lastPointerMotion = Date()
-        if lookMoved { reanchorAt = Date().addingTimeInterval(WindowController.lookReanchorDelay) }
+        if lookMoved || reanchorAt != nil { reanchorAt = Date().addingTimeInterval(WindowController.lookReanchorDelay) }
     }
 
     func releaseAll() {
@@ -986,12 +986,19 @@ extension WindowController {
     }
 
     /// Auto mode: steer the guest cursor onto the host pointer with relative motion.
-    private func moveEmulated(_ e: NSEvent) {
+    /// `reanchor: false` (a right press that starts mouse-look): never the far jump, which the game would read as
+    /// camera motion in the same frame as the press; the re-anchor waits until after the hold.
+    private func moveEmulated(_ e: NSEvent, reanchor: Bool = true) {
         guard let inputs else { return }
         let target = guestPoint(e)
         let now = Date()
         let afterLook = reanchorAt.map { now >= $0 } ?? false
         if guestCursor == nil || afterLook || now.timeIntervalSince(lastPointerMotion) > WindowController.reanchorAfterIdle {
+            if !reanchor {
+                reanchorAt = now
+                lastPointerMotion = now
+                return
+            }
             reanchorAt = nil
             let far = -Int32(4 * (scanoutSize.0 + scanoutSize.1))
             inputs.mouse.send([(EV.REL, REL.X, far), (EV.REL, REL.Y, far)])
@@ -1025,7 +1032,11 @@ extension WindowController {
     func pointerMoved(_ e: NSEvent) {
         if pauseView.shown || guestAsleep { return }   // nothing reaches a frozen game / sleeping guest
         if captured || lookHold {
-            if lookHold && (e.deltaX != 0 || e.deltaY != 0) { lookMoved = true }
+            if lookHold {
+                // The hold is pointer activity: no idle re-anchor (its far jump would be mouse-look) when it ends.
+                lastPointerMotion = Date()
+                if e.deltaX != 0 || e.deltaY != 0 { lookMoved = true }
+            }
             moveRelative(dx: Double(e.deltaX), dy: Double(e.deltaY))
         } else if inPicture(e) || NSEvent.pressedMouseButtons != 0 {
             if usesTablet { moveTablet(e) } else { moveEmulated(e) }
@@ -1077,7 +1088,9 @@ extension WindowController {
             return
         }
         if down {
-            if !usesTablet { moveEmulated(e) }
+            // During mouse-look the Mac pointer is held and the game reads raw motion: another button must not move
+            // (or re-anchor) the guest cursor, or the camera takes the motion (left+right to run, abilities).
+            if !usesTablet && !lookHold { moveEmulated(e, reanchor: !(b == BTN.RIGHT && rightDragMouseLook)) }
             if mouseButtons.insert(b).inserted { inputs.mouse.send([(EV.KEY, b, 1)]) }
             if b == BTN.RIGHT && !usesTablet && rightDragMouseLook { startLookHold() }
         } else if mouseButtons.remove(b) != nil {
@@ -1088,7 +1101,7 @@ extension WindowController {
 
     func scroll(_ e: NSEvent) {
         guard inputs != nil, !pauseView.shown, !guestAsleep else { return }
-        if !captured {
+        if !captured && !lookHold {   // mouse-look: the wheel must not move (or re-anchor) the guest cursor
             guard inPicture(e) else { return }
             if usesTablet { moveTablet(e) } else { moveEmulated(e) }
         }
