@@ -57,6 +57,9 @@ struct VdConfig
 	// render size before the foveated encoding. Default 2/3: the game renders at the stream size (the GPU load of
 	// the adapter before the encoding fix; the centre is upscaled instead of 1:1). 1 = VD's own quality.
 	float render_scale = 2.f / 3;
+	// The headset's Games tab (RequestGames / LaunchGame): Steam app id + name, the same list the WiVRn adapter offers
+	// (--app). A selection is only counted (app_request) for whoever can start the game (the launcher's launch-vr).
+	std::vector<std::pair<std::string, std::string>> applications;
 	ns latency_ns = 30'000'000; // wake-up to display (render + encode + network + decode), for predicted_display
 	std::function<void(const std::string &)> log = nullptr;
 };
@@ -105,6 +108,8 @@ public:
 	void set_streamer_setting(const std::string & key, const std::string & json_value);
 	// Host-side commands the Streamer sends to the headset (passthrough, performance overlay, foveated toggle).
 	bool send_command(vd::Msg);
+	// The last game the headset picked in its Games tab (seq counts the picks; 0 = none yet).
+	SessionControl::AppRequest app_request() const;
 
 private:
 	struct impl;
@@ -124,6 +129,7 @@ public:
 	int unpair(const std::string & name) override;
 	uint32_t bitrate_bps() const override { return s.bitrate_bps(); }
 	Counters counters() const override;
+	AppRequest app_request() const override { return s.app_request(); }
 
 private:
 	VdSession & s;

@@ -69,6 +69,7 @@ struct FakeVdResult
 	std::string streamer_settings;
 	std::vector<std::pair<std::string, std::string>> streamer_changes; // {"key": value} split
 	std::vector<uint8_t> control_types;                                // every control message type received
+	std::vector<std::pair<uint8_t, std::vector<uint8_t>>> control_messages; // ... with its payload
 	std::optional<int32_t> bandwidth_probe;
 	std::vector<vrhost::vd::VideoFormat> formats;
 	std::vector<vrhost::vd::FrameMetadata> frames;

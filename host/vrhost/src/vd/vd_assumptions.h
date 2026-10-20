@@ -75,6 +75,8 @@ enum class Msg : uint8_t
 	recenter = 29,
 	request_games = 30,
 	games = 31,
+	request_game_thumbnails = 32,
+	game_thumbnail = 33,
 	launch_game = 34,
 	exit_game = 35,
 	game_exited = 36,
@@ -92,6 +94,20 @@ enum class Msg : uint8_t
 	computer_awaken = 91,
 	log = 100,
 };
+// VD-FACT(games-list): the headset's Games tab. RequestGames (payload: optional u8, non-zero = rescan the library)
+// is answered with Games: BE i16 count, then per game u8 GamePlatform + BE u64 id (the Steam app id) + u8 running
+// (1 while the Streamer started it and it has not exited). No names: the Streamer sends none; the headset resolves
+// Steam titles and art itself and asks for thumbnails (RequestGameThumbnails: BE i16 n + n x (u8 platform, BE u64
+// id), each answered by GameThumbnail: platform, id, BE i32 length, JPEG; optional, we send none).
+// LaunchGame / ExitGame: u8 platform + BE u64 id. GameExited is never sent by the Streamer.
+// TODO(vd-live:games-names): that the headset names an entry with no thumbnail from the Steam app id alone.
+enum class GamePlatform : uint8_t
+{
+	oculus_rift,
+	steam,
+	viveport,
+};
+inline constexpr std::size_t games_entry_size = 10;
 // VD-FACT(settings-payload): reload = the whole object as compact UTF-8 JSON (no BOM, no length); changed = a JSON
 // object with the one member that changed, {"Name":value}. Enums are numbers. The Streamer owns the streamer object
 // (sends its reload on connect); the headset owns the user and mobile objects.

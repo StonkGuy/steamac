@@ -125,6 +125,7 @@ FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<voi
 				break;
 			std::lock_guard lock(rm);
 			r.control_types.push_back(hdr[0]);
+			r.control_messages.push_back({hdr[0], payload});
 			std::string text(payload.begin(), payload.end());
 			if (Msg(hdr[0]) == Msg::reload_streamer_settings)
 				r.streamer_settings = text;

@@ -81,7 +81,7 @@ static void usage()
 	        "  --frames N          self-test frames (default 600)\n"
 	        "  --fps F             self-test frame rate (default 90)\n"
 	        "  --codec auto|hevc|h264  video codec (default auto: HEVC when the headset has it; self-test hevc)\n"
-	        "  --app ID=NAME       offer an app in the headset's app list; start requests show in the control status\n"
+	        "  --app ID=NAME       offer an app in the headset's app list (VD: Games tab, Steam app ids); picks show in the control status\n"
 	        "  --bitrate BPS       total bitrate (default 50000000)\n"
 	        "  self-test tuning:   --layout eyes|serial|sbs  --prioritize-speed  --max-frame-delay N  --qp N\n"
 	        "                      --no-low-latency-rc  --csv (one summary line)\n"
@@ -381,10 +381,11 @@ struct VdOptions
 	float render_scale = 0; // 0 = the VD adapter's default
 };
 
-static Adapter make_vd(const VdOptions & o, uint32_t w, uint32_t h, uint32_t bitrate, bool pair)
+static Adapter make_vd(const VdOptions & o, uint32_t w, uint32_t h, uint32_t bitrate, bool pair,
+                       std::vector<std::pair<std::string, std::string>> applications)
 {
 	VdConfig cfg{.encrypt_local = o.encrypt, .pairing = pair, .bitrate_bps = bitrate, .width = w, .height = h,
-	             .spacewarp = o.spacewarp, .log = log_line};
+	             .spacewarp = o.spacewarp, .applications = std::move(applications), .log = log_line};
 	if (o.render_scale > 0)
 		cfg.render_scale = o.render_scale;
 	if (o.discovery_key_fd >= 0)
@@ -864,7 +865,8 @@ int main(int argc, char ** argv)
 				if (mode == link and not accept_link(link_fd, link_socket))
 					return 0;
 				{
-					Adapter adapter = adapter_name == "vd" ? make_vd(vd_opts, w, h, bitrate_given ? cfg.bitrate_bps : VdConfig{}.bitrate_bps, pair)
+					Adapter adapter = adapter_name == "vd" ? make_vd(vd_opts, w, h, bitrate_given ? cfg.bitrate_bps : VdConfig{}.bitrate_bps, pair,
+					                                               cfg.applications)
 					                                       : make_wivrn(cfg, mode == link);
 					return mode == link ? serve_link(adapter, link_fd, mach_name, g_audio_fd) : testpattern(adapter);
 				}

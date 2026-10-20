@@ -203,6 +203,17 @@ std::optional<uint32_t> get_varint(std::span<const uint8_t> b, size_t & used);
 std::vector<uint8_t> control_message(Msg, std::span<const uint8_t> payload);
 std::vector<uint8_t> control_message(Msg, const std::string & payload);
 // A settings change: {"name":json_value}.
+// VD-FACT(games-list): Games payload from (platform, id, running); parse of a LaunchGame/ExitGame payload.
+struct GameEntry
+{
+	GamePlatform platform = GamePlatform::steam;
+	uint64_t id = 0;
+	bool running = false;
+};
+std::vector<uint8_t> games_payload(std::span<const GameEntry>);
+std::optional<std::vector<GameEntry>> parse_games(std::span<const uint8_t>); // test peer
+std::optional<GameEntry> parse_game_id(std::span<const uint8_t>);
+std::vector<uint8_t> game_id_payload(GamePlatform, uint64_t); // test peer
 std::string setting_changed_payload(const std::string & name, const std::string & json_value);
 // Video channel messages.
 std::vector<uint8_t> video_format_message(const VideoFormat &); // tag 2 + 88 bytes

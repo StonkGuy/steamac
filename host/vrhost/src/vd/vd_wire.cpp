@@ -273,4 +273,53 @@ std::vector<uint8_t> encode_tracking(const TrackingSample & s, size_t size)
 	}
 	return b;
 }
+
+std::vector<uint8_t> games_payload(std::span<const GameEntry> games)
+{
+	size_t n = std::min<size_t>(games.size(), 0x7fff);
+	std::vector<uint8_t> out{uint8_t(n >> 8), uint8_t(n)};
+	for (size_t i = 0; i < n; ++i)
+	{
+		out.push_back(uint8_t(games[i].platform));
+		for (int b = 7; b >= 0; --b)
+			out.push_back(uint8_t(games[i].id >> (8 * b)));
+		out.push_back(games[i].running ? 1 : 0);
+	}
+	return out;
+}
+
+std::optional<GameEntry> parse_game_id(std::span<const uint8_t> b)
+{
+	if (b.size() < 9)
+		return std::nullopt;
+	GameEntry e{.platform = GamePlatform(b[0])};
+	for (int i = 1; i < 9; ++i)
+		e.id = e.id << 8 | b[i];
+	return e;
+}
+
+std::vector<uint8_t> game_id_payload(GamePlatform p, uint64_t id)
+{
+	std::vector<uint8_t> out{uint8_t(p)};
+	for (int b = 7; b >= 0; --b)
+		out.push_back(uint8_t(id >> (8 * b)));
+	return out;
+}
+
+std::optional<std::vector<GameEntry>> parse_games(std::span<const uint8_t> b)
+{
+	if (b.size() < 2)
+		return std::nullopt;
+	size_t n = size_t(b[0]) << 8 | b[1];
+	if (b.size() != 2 + n * games_entry_size)
+		return std::nullopt;
+	std::vector<GameEntry> out;
+	for (size_t i = 0; i < n; ++i)
+	{
+		auto e = parse_game_id(b.subspan(2 + i * games_entry_size));
+		e->running = b[2 + i * games_entry_size + 9] != 0;
+		out.push_back(*e);
+	}
+	return out;
+}
 } // namespace vrhost::vd

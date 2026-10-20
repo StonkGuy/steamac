@@ -23,6 +23,7 @@ static_assert(XXH_VERSION_NUMBER >= 800, "XXH3 needs xxHash >= 0.8 (lz4's bundle
 #include <arpa/inet.h>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <fstream>
 #include <ifaddrs.h>
@@ -199,6 +200,7 @@ struct VdSession::impl
 	std::vector<std::thread> readers;
 
 	mutable std::mutex m; // channels, settings, headset state
+	SessionControl::AppRequest app_request; // under m
 	std::array<std::shared_ptr<Channel>, channel_count> ch;
 	Settings user, mobile, streamer;
 	std::optional<HeadsetInfo> info;
@@ -712,11 +714,58 @@ struct VdSession::impl
 			case Msg::exit:
 				drop_session("headset disconnected");
 				return;
-			default: // games list, SteamVR, boundary/skeleton data, desktop features: accepted and ignored
+			case Msg::request_games:
+				send_games();
+				return;
+			case Msg::launch_game:
+				launch_game(payload);
+				return;
+			default: // thumbnails, ExitGame, SteamVR, boundary/skeleton data, desktop features: accepted and ignored
 				return;
 		}
 		if (type != Msg::reload_streamer_settings and type != Msg::streamer_setting_changed)
 			apply_headset();
+	}
+
+	// VD-FACT(games-list): the offered apps whose id is a Steam app id. running stays 0: the guest decides that
+	// (launch-vr does not start a game twice).
+	std::vector<GameEntry> offered_games() const
+	{
+		std::vector<GameEntry> out;
+		for (auto & [id, name]: cfg.applications)
+		{
+			char * end = nullptr;
+			unsigned long long v = std::strtoull(id.c_str(), &end, 10);
+			if (not id.empty() and *end == 0 and v > 0)
+				out.push_back({GamePlatform::steam, uint64_t(v), false});
+		}
+		return out;
+	}
+
+	void send_games()
+	{
+		auto games = offered_games();
+		auto bytes = games_payload(games);
+		send_control(Msg::games, std::string(bytes.begin(), bytes.end()));
+		log("vd: games list sent (" + std::to_string(games.size()) + " offered)");
+	}
+
+	void launch_game(std::span<const uint8_t> payload)
+	{
+		auto g = parse_game_id(payload);
+		if (not g)
+		{
+			stats.bad_messages++;
+			return;
+		}
+		std::string id = std::to_string(g->id);
+		bool known = g->platform == GamePlatform::steam and std::ranges::any_of(offered_games(), [&](auto & e) { return e.id == g->id; });
+		if (known)
+		{
+			std::lock_guard lock(m);
+			app_request = {id, app_request.seq + 1};
+		}
+		log("vd: headset asks to start game " + id + (known ? "" : " (not offered, ignored)"));
 	}
 
 	// Headset description from its mobile + user settings (VD-FACT(settings-keys, preset-sizes, fov, ipd, bitrate)).
@@ -1378,6 +1427,12 @@ bool VdSession::send_command(Msg m)
 		return false;
 	p->stats.commands_sent++;
 	return true;
+}
+
+SessionControl::AppRequest VdSession::app_request() const
+{
+	std::lock_guard lock(p->m);
+	return p->app_request;
 }
 
 SessionControl::PairingState VdControl::pairing_state() const
