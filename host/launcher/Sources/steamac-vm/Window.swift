@@ -73,6 +73,16 @@ final class WindowController: NSObject, NSWindowDelegate {
     /// Auto mode: where the guest cursor is (guest pixels); nil = unknown, re-anchor first.
     private var guestCursor: (Int, Int)?
     private var lastPointerMotion = Date.distantPast
+    /// Auto mode, game focused, right button held: the Mac pointer stays at the press point and
+    /// raw motion goes to the guest (mouse-look), as while captured. Games that hide the cursor for
+    /// right-drag camera put it back at the press point on release, where the pointer still is.
+    private var lookHold = false
+    /// Motion was sent during the hold. The game hides its cursor only after a short drag and puts it
+    /// back there, not at the press point: the first pointer motion after `reanchorAt` re-anchors.
+    private var lookMoved = false
+    private var reanchorAt: Date?
+    /// Delay after a mouse-look release before re-anchoring (the game has left mouse-look by then).
+    static let lookReanchorDelay: TimeInterval = 0.15
     /// What the guest says has focus (progress agent `focus …`); Steam until told otherwise.
     private(set) var guestFocus: GuestFocus = .steam
     private var wheelHiRemainder = (0.0, 0.0)   // (vertical, horizontal) in 1/120 notch units
@@ -769,6 +779,7 @@ final class WindowController: NSObject, NSWindowDelegate {
             noPicture?.heartbeatsEnded()
         }
         guard f != guestFocus else { return }
+        endLookHold()
         guestFocus = f
         // The agent sends the new game's `game-size` right after `focus game`; until then none is known.
         focusedGameSize = nil
@@ -894,10 +905,38 @@ extension WindowController {
     }
 
     private func releaseButtons() {
+        endLookHold()
         for b in tabletButtons { inputs?.tablet.send([(EV.KEY, b, 0)]) }
         for b in mouseButtons { inputs?.mouse.send([(EV.KEY, b, 0)]) }
         tabletButtons.removeAll()
         mouseButtons.removeAll()
+    }
+
+    /// Right-drag mouse-look (auto mode, game focused). Off with
+    /// `defaults write es.fxgam.steamac rightDragMouseLook -bool false`.
+    private var rightDragMouseLook: Bool {
+        mouseMode == .auto && focusedGame != nil
+            && (UserDefaults.standard.object(forKey: "rightDragMouseLook") as? Bool ?? true)
+    }
+
+    private func startLookHold() {
+        guard !lookHold else { return }
+        lookHold = true
+        lookMoved = false
+        relRemainder = (0, 0)
+        CGAssociateMouseAndMouseCursorPosition(0)
+        NSCursor.hide()
+    }
+
+    /// The game put its cursor back near the press point (where the Mac pointer still is); after a
+    /// drag, re-anchor on the next motion to remove what moved before the game hid its cursor.
+    private func endLookHold() {
+        guard lookHold else { return }
+        lookHold = false
+        CGAssociateMouseAndMouseCursorPosition(1)
+        NSCursor.unhide()
+        lastPointerMotion = Date()
+        if lookMoved || reanchorAt != nil { reanchorAt = Date().addingTimeInterval(WindowController.lookReanchorDelay) }
     }
 
     func releaseAll() {
@@ -947,11 +986,20 @@ extension WindowController {
     }
 
     /// Auto mode: steer the guest cursor onto the host pointer with relative motion.
-    private func moveEmulated(_ e: NSEvent) {
+    /// `reanchor: false` (a right press that starts mouse-look): never the far jump, which the game would read as
+    /// camera motion in the same frame as the press; the re-anchor waits until after the hold.
+    private func moveEmulated(_ e: NSEvent, reanchor: Bool = true) {
         guard let inputs else { return }
         let target = guestPoint(e)
         let now = Date()
-        if guestCursor == nil || now.timeIntervalSince(lastPointerMotion) > WindowController.reanchorAfterIdle {
+        let afterLook = reanchorAt.map { now >= $0 } ?? false
+        if guestCursor == nil || afterLook || now.timeIntervalSince(lastPointerMotion) > WindowController.reanchorAfterIdle {
+            if !reanchor {
+                reanchorAt = now
+                lastPointerMotion = now
+                return
+            }
+            reanchorAt = nil
             let far = -Int32(4 * (scanoutSize.0 + scanoutSize.1))
             inputs.mouse.send([(EV.REL, REL.X, far), (EV.REL, REL.Y, far)])
             guestCursor = (0, 0)
@@ -983,7 +1031,12 @@ extension WindowController {
 
     func pointerMoved(_ e: NSEvent) {
         if pauseView.shown || guestAsleep { return }   // nothing reaches a frozen game / sleeping guest
-        if captured {
+        if captured || lookHold {
+            if lookHold {
+                // The hold is pointer activity: no idle re-anchor (its far jump would be mouse-look) when it ends.
+                lastPointerMotion = Date()
+                if e.deltaX != 0 || e.deltaY != 0 { lookMoved = true }
+            }
             moveRelative(dx: Double(e.deltaX), dy: Double(e.deltaY))
         } else if inPicture(e) || NSEvent.pressedMouseButtons != 0 {
             if usesTablet { moveTablet(e) } else { moveEmulated(e) }
@@ -1035,16 +1088,20 @@ extension WindowController {
             return
         }
         if down {
-            if !usesTablet { moveEmulated(e) }
+            // During mouse-look the Mac pointer is held and the game reads raw motion: another button must not move
+            // (or re-anchor) the guest cursor, or the camera takes the motion (left+right to run, abilities).
+            if !usesTablet && !lookHold { moveEmulated(e, reanchor: !(b == BTN.RIGHT && rightDragMouseLook)) }
             if mouseButtons.insert(b).inserted { inputs.mouse.send([(EV.KEY, b, 1)]) }
+            if b == BTN.RIGHT && !usesTablet && rightDragMouseLook { startLookHold() }
         } else if mouseButtons.remove(b) != nil {
             inputs.mouse.send([(EV.KEY, b, 0)])
+            if b == BTN.RIGHT { endLookHold() }
         }
     }
 
     func scroll(_ e: NSEvent) {
         guard inputs != nil, !pauseView.shown, !guestAsleep else { return }
-        if !captured {
+        if !captured && !lookHold {   // mouse-look: the wheel must not move (or re-anchor) the guest cursor
             guard inPicture(e) else { return }
             if usesTablet { moveTablet(e) } else { moveEmulated(e) }
         }
