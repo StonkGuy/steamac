@@ -78,6 +78,16 @@ final class WindowController: NSObject, NSWindowDelegate {
     /// The surface gamescope moves the cursor on, in its pixels, as the agent reports it with
     /// each focus line (nil = not reported: the display).
     private var guestSurface: (Int, Int)?
+    /// Auto mode, game focused, right button held: the Mac pointer stays at the press point and
+    /// raw motion goes to the guest (mouse-look), as while captured. Games that hide the cursor for
+    /// right-drag camera put it back at the press point on release, where the pointer still is.
+    private var lookHold = false
+    /// Motion was sent during the hold. The game hides its cursor only after a short drag and puts it
+    /// back there, not at the press point: the first pointer motion after `reanchorAt` re-anchors.
+    private var lookMoved = false
+    private var reanchorAt: Date?
+    /// Delay after a mouse-look release before re-anchoring (the game has left mouse-look by then).
+    static let lookReanchorDelay: TimeInterval = 0.15
     /// What the guest says has focus (progress agent `focus …`); Steam until told otherwise.
     private(set) var guestFocus: GuestFocus = .steam
     private var wheelHiRemainder = (0.0, 0.0)   // (vertical, horizontal) in 1/120 notch units
@@ -780,6 +790,7 @@ final class WindowController: NSObject, NSWindowDelegate {
             noPicture?.heartbeatsEnded()
         }
         guard f != guestFocus else { return }
+        endLookHold()
         guestFocus = f
         // The agent sends the new game's `game-size` right after `focus game`; until then none is known.
         focusedGameSize = nil
@@ -906,10 +917,38 @@ extension WindowController {
     }
 
     private func releaseButtons() {
+        endLookHold()
         for b in tabletButtons { inputs?.tablet.send([(EV.KEY, b, 0)]) }
         for b in mouseButtons { inputs?.mouse.send([(EV.KEY, b, 0)]) }
         tabletButtons.removeAll()
         mouseButtons.removeAll()
+    }
+
+    /// Right-drag mouse-look (auto mode, game focused). Off with
+    /// `defaults write es.fxgam.steamac rightDragMouseLook -bool false`.
+    private var rightDragMouseLook: Bool {
+        mouseMode == .auto && focusedGame != nil
+            && (UserDefaults.standard.object(forKey: "rightDragMouseLook") as? Bool ?? true)
+    }
+
+    private func startLookHold() {
+        guard !lookHold else { return }
+        lookHold = true
+        lookMoved = false
+        relRemainder = (0, 0)
+        CGAssociateMouseAndMouseCursorPosition(0)
+        NSCursor.hide()
+    }
+
+    /// The game put its cursor back near the press point (where the Mac pointer still is); after a
+    /// drag, re-anchor on the next motion to remove what moved before the game hid its cursor.
+    private func endLookHold() {
+        guard lookHold else { return }
+        lookHold = false
+        CGAssociateMouseAndMouseCursorPosition(1)
+        NSCursor.unhide()
+        lastPointerMotion = Date()
+        if lookMoved { reanchorAt = Date().addingTimeInterval(WindowController.lookReanchorDelay) }
     }
 
     func releaseAll() {
@@ -1005,7 +1044,9 @@ extension WindowController {
         guard let inputs else { return }
         let target = guestPoint(e)
         let now = Date()
-        if guestCursor == nil || now.timeIntervalSince(lastPointerMotion) > WindowController.reanchorAfterIdle {
+        let afterLook = reanchorAt.map { now >= $0 } ?? false
+        if guestCursor == nil || afterLook || now.timeIntervalSince(lastPointerMotion) > WindowController.reanchorAfterIdle {
+            reanchorAt = nil
             let (sw, sh) = pointerMap.surface
             let far = -Int32(4 * (max(sw, scanoutSize.0) + max(sh, scanoutSize.1)))
             inputs.mouse.send([(EV.REL, REL.X, far), (EV.REL, REL.Y, far)])
@@ -1039,7 +1080,8 @@ extension WindowController {
     func pointerMoved(_ e: NSEvent) {
         updateHostCursor(e)
         if pauseView.shown || guestAsleep { return }   // nothing reaches a frozen game / sleeping guest
-        if captured {
+        if captured || lookHold {
+            if lookHold && (e.deltaX != 0 || e.deltaY != 0) { lookMoved = true }
             moveRelative(dx: Double(e.deltaX), dy: Double(e.deltaY))
         } else if inPicture(e) || NSEvent.pressedMouseButtons != 0 {
             if usesTablet { moveTablet(e) } else { moveEmulated(e) }
@@ -1093,8 +1135,10 @@ extension WindowController {
         if down {
             if !usesTablet { moveEmulated(e) }
             if mouseButtons.insert(b).inserted { inputs.mouse.send([(EV.KEY, b, 1)]) }
+            if b == BTN.RIGHT && !usesTablet && rightDragMouseLook { startLookHold() }
         } else if mouseButtons.remove(b) != nil {
             inputs.mouse.send([(EV.KEY, b, 0)])
+            if b == BTN.RIGHT { endLookHold() }
         }
     }
 
