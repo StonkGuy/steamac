@@ -20,4 +20,12 @@ run; [ $? = 0 ] && is x FEX-patched; ok $? "install swaps the stage in"
 run; [ $? = 0 ] && grep -q "already installed" "$d/out"; ok $? "second install is a no-op"
 run restore; [ $? = 0 ] && is x FEX-valve; ok $? "restore puts Valve's build back"
 rm "$N/usr/bin/FEXpidof"; run; r=$?; [ $r != 0 ] && is x FEX-valve; ok $? "incomplete stage is refused, tool untouched"
+mk "$N" FEX-patched; run; [ $? = 0 ] && is x FEX-patched; ok $? "install again"
+echo '{"new":1}' > "$N/ConfigTemplate.json"; run; [ $? = 0 ] && cmp -s "$N/ConfigTemplate.json" "$V/ConfigTemplate.json"; ok $? "stage differing only in ConfigTemplate.json is installed"
+mkdir -p "$d/bin"; printf '#!/bin/sh\nexit 0\n' > "$d/bin/pgrep"; chmod +x "$d/bin/pgrep"
+PATH="$d/bin:$PATH" run restore; r=$?; [ $r != 0 ] && is x FEX-patched; ok $? "restore while FEXServer runs is refused, tool untouched"
+rm "$d/home/fex-eac-work/valve-backup/FEX-valve/usr/bin/FEXpidof"; run restore; r=$?; [ $r != 0 ] && is x FEX-patched; ok $? "restore from an incomplete backup is refused, tool untouched"
+mk "$d/home/fex-eac-work/valve-backup/FEX-valve" FEX-patched; run restore; r=$?; [ $r != 0 ] && is x FEX-patched; ok $? "restore from a mismatched backup is refused, tool untouched"
+rm -rf "$d/home/fex-eac-work/valve-backup" "$V"; mk "$V" FEX-valve; mk "$N" FEX-patched; rm "$V/ConfigTemplate.json"; run; r=$?
+[ $r != 0 ] && is x FEX-valve && [ ! -e "$d/home/fex-eac-work/valve-backup" ]; ok $? "incomplete tool is refused before any backup or swap"
 rm -rf "$d"; [ $fail = 0 ] && echo "install-fex-tool: all PASS" || { echo "install-fex-tool: FAILED"; exit 1; }
