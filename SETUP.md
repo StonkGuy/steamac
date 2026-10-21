@@ -66,8 +66,8 @@ Switching between Steam client builds downloads up to about 1 GB; progress shows
    its Android build by default, which cannot run here; Proton Experimental selects the Windows build. This is the only
    compatibility tool you pick; the graphics path does not change it.
 3. Install **Proton EasyAntiCheat Runtime** (Steam tool 1826330) from Steam. It supplies the stock EAC launcher and client.
-4. Install the patched FEX and set VRChat's launch options, as described under Easy Anti-Cheat below. Both are still
-   required today.
+4. Enable **Settings > Advanced > Experimental game support** to prepare FEX and add VRChat launch options where none exist,
+   or use the manual steps under Easy Anti-Cheat below. The automatic setup has not had a live game test yet.
 
 ## Choosing the graphics path
 

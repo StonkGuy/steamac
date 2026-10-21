@@ -67,8 +67,7 @@ jobs:
           sh scripts/test/install-fex-tool.sh
           ONLINE=1 sh scripts/test/build-fex-pin.sh
           sh scripts/test/launch-options.sh
-          bash -n guest/layer/usr/lib/steamac/eac-launch scripts/steps/30-layer.sh
-          sh -n fex-eac/build-fex.sh fex-eac/install-fex-tool.sh
+          bash -n scripts/steps/30-layer.sh
 
   dxmt:
     name: DXMT host library and PE dlls
@@ -388,11 +387,12 @@ jobs:
           fi
           ./build.sh host
       - name: Launcher self-tests (no VM)
+        timeout-minutes: 10
         run: |
           app="work/out/FX Steam Launcher.app/Contents/MacOS/steamac-vm"
           for t in settings graphics-path metal-cache game-layers remote-play vr; do
             echo "=== --selftest-$t"
-            "$app" "--selftest-$t"
+            "$app" "--selftest-$t" --selftest-out "$RUNNER_TEMP/selftest"
           done
       - name: DMG (ad hoc signature)
         env:

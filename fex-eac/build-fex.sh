@@ -16,12 +16,15 @@ if [ ! -d "$SRC/.git" ]; then
   git clone --recurse-submodules --shallow-submodules --branch "$FEX_EAC_TAG" "$REPO" "$SRC"
 fi
 cd "$SRC"
+git diff --quiet --ignore-submodules=none HEAD -- ||
+  { echo "$SRC has local changes; leaving the source and staged runtime untouched." >&2; exit 1; }
 
 # The tree must be the pinned commit. A tree from an older build-fex.sh (upstream FEX-2610 with the patch files
 # applied by git am) or from another tag is not updated in place.
 HEADSHA=$(git rev-parse HEAD)
 if [ "$HEADSHA" != "$FEX_EAC_SHA" ]; then
-  if git cat-file -e "$FEX_EAC_TAG^{commit}" 2>/dev/null &&
+  if { git cat-file -e "$FEX_EAC_TAG^{commit}" 2>/dev/null ||
+       git fetch -q origin "refs/tags/$FEX_EAC_TAG:refs/tags/$FEX_EAC_TAG"; } &&
      [ "$(git rev-parse "$FEX_EAC_TAG^{commit}")" = "$FEX_EAC_SHA" ] && git diff --quiet HEAD; then
     git checkout -q "$FEX_EAC_TAG" && git submodule update --init --recursive --depth 1
   else

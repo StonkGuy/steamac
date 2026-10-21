@@ -59,7 +59,7 @@ def report(message):
 
 
 def install(action, backup):
-    env = dict(os.environ, WORK=str(WORK), STAGE=str(STAGE), BACKUP=str(backup))
+    env = dict(os.environ, STAGE=str(STAGE), BACKUP=str(backup))
     subprocess.run(["sh", str(PAYLOAD / "install-fex-tool.sh"), action], env=env, check=True)
 
 
