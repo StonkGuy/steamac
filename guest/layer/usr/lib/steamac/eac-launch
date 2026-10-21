@@ -1,0 +1,25 @@
+#!/bin/bash
+set -euo pipefail
+[[ ${1:-} == 438100 && $# -gt 1 ]] || { echo 'usage: eac-launch 438100 COMMAND [ARGS...]' >&2; exit 64; }
+app=$1
+shift
+enabled=0
+cmdline=$(cat "${STEAMAC_CMDLINE:-/proc/cmdline}")
+read -ra args <<< "$cmdline"
+for arg in "${args[@]}"; do
+    case "$arg" in steamac.fex_eac=*) enabled=${arg#*=} ;; esac
+done
+if [[ $enabled == 1 ]]; then
+    runtime="$HOME/.local/share/Steam/steamapps/common/Proton EasyAntiCheat Runtime"
+    [[ -d $runtime ]] || { echo 'Install Proton EasyAntiCheat Runtime in Steam first.' >&2; exit 1; }
+    export EAC_LAUNCHERDIR="${EAC_LAUNCHERDIR:-$HOME/.local/share/Steam/steamapps/compatdata/$app/pfx/drive_c/users/steamuser/AppData/Roaming/EasyAntiCheat}"
+    export PROTON_EAC_RUNTIME="${PROTON_EAC_RUNTIME:-$runtime}"
+    export PROTON_USE_XALIA="${PROTON_USE_XALIA:-0}"
+    if [[ -z ${WINE_CPU_TOPOLOGY:-} ]]; then
+        cpus=$(getconf _NPROCESSORS_ONLN)
+        topology=16:
+        for ((i=0; i<16; i++)); do topology+="$((i % cpus)),"; done
+        export WINE_CPU_TOPOLOGY=${topology%,}
+    fi
+fi
+exec "$@"

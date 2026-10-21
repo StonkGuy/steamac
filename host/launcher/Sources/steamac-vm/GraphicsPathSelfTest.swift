@@ -42,6 +42,27 @@ enum GraphicsPathSelfTest {
         check(Options.frameLatencyArg(false) == nil, "frame latency off must add no kernel key")
         check(Options().frameLatency == false, "frame latency must default off")
         log("selftest-graphics-path: frame latency \(Options.frameLatencyArg(true)?.key ?? "-")=\(Options.frameLatencyArg(true)?.value ?? "off")")
+        check(Options().experimentalGameSupport == false, "experimental game support must default off")
+        for on in [true, false] {
+            let a = Options.experimentalGameSupportArg(on)
+            check(a.key == "steamac.fex_eac" && a.value == (on ? "1" : "0"), "experimental game support \(on) must map to steamac.fex_eac=\(on ? 1 : 0)")
+        }
+        check(Options.kernelArg("steamac.fex_eac", "1", unlessSetIn: "console=hvc0") == " steamac.fex_eac=1",
+              "steamac.fex_eac must be added when --cmdline lacks it")
+        check(Options.kernelArg("steamac.fex_eac", "1", unlessSetIn: "console=hvc0 steamac.fex_eac=0").isEmpty,
+              "an explicit --cmdline steamac.fex_eac= must win")
+        let fexWords = resolved.cmdline.split(separator: " ").filter { $0.hasPrefix("steamac.fex_eac=") }
+        check(fexWords.count == 1, "kernel command line must carry steamac.fex_eac= once, has \(fexWords)")
+        if !resolved.explicit.contains("--cmdline") {
+            check(fexWords.map(String.init) == ["steamac.fex_eac=\(resolved.experimentalGameSupport ? 1 : 0)"],
+                  "kernel command line \(fexWords) does not match experimental game support \(resolved.experimentalGameSupport)")
+        }
+        for (argv, want) in [(["--experimental-game-support"], true), (["--no-experimental-game-support"], false),
+                             (["--no-experimental-game-support", "--experimental-game-support"], true),
+                             (["--experimental-game-support", "--no-experimental-game-support"], false)] {
+            check((try? Options.parse(["steamac-vm"] + argv))?.experimentalGameSupport == want, "\(argv) must give experimental game support \(want)")
+        }
+        log("selftest-graphics-path: experimental game support \(fexWords.joined(separator: " "))")
         log(failures == 0 ? "selftest-graphics-path: PASS" : "selftest-graphics-path: \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

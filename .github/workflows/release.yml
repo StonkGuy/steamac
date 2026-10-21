@@ -53,8 +53,26 @@ env:
     host/moltenvk/build.sh
 
 jobs:
+  compatibility-checks:
+    name: Experimental runtime checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - run: |
+          python3 scripts/test/steam-fex-eac.py
+          python3 scripts/test/mac-clock-format.py
+          sh scripts/test/install-fex-tool.sh
+          ONLINE=1 sh scripts/test/build-fex-pin.sh
+          sh scripts/test/launch-options.sh
+          bash -n guest/layer/usr/lib/steamac/eac-launch scripts/steps/30-layer.sh
+          sh -n fex-eac/build-fex.sh fex-eac/install-fex-tool.sh
+
   dxmt:
     name: DXMT host library and PE dlls
+    needs: compatibility-checks
     runs-on: macos-26
     timeout-minutes: 120
     steps:
@@ -113,6 +131,7 @@ jobs:
 
   guest:
     name: Guest kernel, Mesa, initramfs
+    needs: compatibility-checks
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 300
     steps:
@@ -371,7 +390,7 @@ jobs:
       - name: Launcher self-tests (no VM)
         run: |
           app="work/out/FX Steam Launcher.app/Contents/MacOS/steamac-vm"
-          for t in graphics-path metal-cache game-layers remote-play vr; do
+          for t in settings graphics-path metal-cache game-layers remote-play vr; do
             echo "=== --selftest-$t"
             "$app" "--selftest-$t"
           done

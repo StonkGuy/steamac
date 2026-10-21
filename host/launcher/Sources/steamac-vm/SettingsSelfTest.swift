@@ -38,6 +38,7 @@ enum SettingsSelfTest {
         var failures = CrashReporting.scrubSelfCheck() + CrashReporting.scannerSelfCheck() + CrashReporting.exitSelfCheck()
             + VMSizing.selfCheck()
             + UpdateChecker.selfCheck() + MacTime.selfCheck() + KeyboardLayoutSync.selfCheck() + ClipboardSync.selfCheck() + GameProfile.selfCheck()
+            + experimentalGameSupportCheck()
         var tabs = SettingsWindowController.Tab.allCases[...]
 
         func capture(_ name: String, _ rep: NSBitmapImageRep?) {
@@ -300,5 +301,43 @@ enum SettingsSelfTest {
         DispatchQueue.main.async { app.activate(); next() }
         app.run()
         exit(0)
+    }
+
+    private static func experimentalGameSupportCheck() -> [String] {
+        var failures: [String] = []
+        func check(_ ok: Bool, _ what: String) { if !ok { failures.append("experimental game support: \(what)") } }
+        let domain = "\(LauncherSettings.defaultDomain).selftest-\(getpid())"
+        let previous = ProcessInfo.processInfo.environment["STEAMAC_DEFAULTS_DOMAIN"]
+        setenv("STEAMAC_DEFAULTS_DOMAIN", domain, 1)
+        defer {
+            if let previous { setenv("STEAMAC_DEFAULTS_DOMAIN", previous, 1) } else { unsetenv("STEAMAC_DEFAULTS_DOMAIN") }
+            UserDefaults.standard.removePersistentDomain(forName: domain)
+        }
+        let s = LauncherSettings()
+        check(!s.experimentalGameSupport, "default on")
+        check(LauncherSettings.Key.experimentalGameSupport.nextStart, "not a next-start key")
+        s.noteBoot(overrides: [:], autoCapture: nil)
+        s.experimentalGameSupport = true
+        check(s.restartPending, "change does not ask for a restart")
+        check(LauncherSettings().experimentalGameSupport, "on not persisted")
+        check(s.set("experimentalGameSupport", "off") && !s.experimentalGameSupport, "set off failed")
+        check(!LauncherSettings().experimentalGameSupport, "off not persisted")
+        check(!s.set("experimentalGameSupport", "maybe"), "accepted a non-boolean value")
+        s.experimentalGameSupport = true
+        do {
+            var o = try Options.parse(["steamac-vm", "--no-experimental-game-support"])
+            let ov = o.applySettings(s)
+            check(!o.experimentalGameSupport && ov[.experimentalGameSupport] == "--no-experimental-game-support",
+                  "--no-experimental-game-support does not override the saved setting")
+            var d = try Options.parse(["steamac-vm"])
+            let dov = d.applySettings(s)
+            check(d.experimentalGameSupport && dov[.experimentalGameSupport] == nil, "the saved setting does not apply without a flag")
+        } catch {
+            check(false, "\(error)")
+        }
+        s.resetAll()
+        check(!s.experimentalGameSupport && !LauncherSettings().experimentalGameSupport, "reset does not turn it off")
+        log("selftest-settings: experimental game support: \(failures.isEmpty ? "ok" : failures.joined(separator: ", "))")
+        return failures
     }
 }

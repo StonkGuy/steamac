@@ -1099,6 +1099,11 @@ private struct AdvancedTab: View {
                            detail: String(localized: "Vulkan path only: let the CPU run at most one frame ahead of the GPU (DXVK's dxgi.maxFrameLatency = 1) for lower input latency at some cost in throughput. Writes into the guest's DXVK config before Steam starts. Off leaves it unchanged."),
                            now: false, key: .frameLatency)
                 }
+                Toggle(isOn: $settings.experimentalGameSupport) {
+                    Label2(title: "Experimental game support",
+                           detail: String(localized: "Downloads and builds a Linux game runtime on first use. Restart Steam when setup finishes. Game support varies."),
+                           now: false, key: .experimentalGameSupport)
+                }
             }
             Section {
                 Toggle(isOn: $settings.wmtr) {

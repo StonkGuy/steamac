@@ -1,0 +1,172 @@
+#!/usr/bin/python3
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import shutil
+import subprocess
+import sys
+
+
+HOME = Path.home()
+STEAM = HOME / ".local/share/Steam"
+WORK = Path(os.environ.get("WORK", HOME / "fex-eac-work"))
+STAGE = WORK / "stage"
+TOOL = STEAM / "steamapps/common/FEX-Emu"
+PAYLOAD = Path(os.environ.get("STEAMAC_FEX_DIR", "/usr/lib/steamac/fex-eac"))
+STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "steamac/fex-eac"
+FILES = [Path("usr/bin") / name for name in
+         ("FEX", "FEXBash", "FEXGetConfig", "FEXOfflineCompiler", "FEXServer", "FEXServerManager", "FEXpidof")]
+FILES += [Path(name) for name in ("FEXCompatTool", "VERSIONS.txt", "ConfigTemplate.json")]
+OPTIONS = "/usr/lib/steamac/eac-launch 438100 %command%"
+
+
+def enabled():
+    words = Path(os.environ.get("STEAMAC_CMDLINE", "/proc/cmdline")).read_text().split()
+    return next((word.split("=", 1)[1] for word in reversed(words) if word.startswith("steamac.fex_eac=")), "0") == "1"
+
+
+def source():
+    return next(line.split("=", 1)[1] for line in (PAYLOAD / "build-fex.sh").read_text().splitlines()
+                if line.startswith("FEX_EAC_SHA="))
+
+
+def complete(root):
+    return all((root / name).is_file() and (root / name).stat().st_size for name in FILES)
+
+
+def fingerprint(root):
+    if not complete(root):
+        return None
+    digest = hashlib.sha256()
+    for name in FILES:
+        digest.update(str(name).encode() + b"\0")
+        with (root / name).open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def report(message):
+    STATE.mkdir(parents=True, exist_ok=True)
+    temporary = STATE / "status.new"
+    temporary.write_text(message + "\n")
+    temporary.replace(STATE / "status")
+    print("steam-fex-eac: " + message)
+
+
+def install(action, backup):
+    env = dict(os.environ, WORK=str(WORK), STAGE=str(STAGE), BACKUP=str(backup))
+    subprocess.run(["sh", str(PAYLOAD / "install-fex-tool.sh"), action], env=env, check=True)
+
+
+def configure_vrchat():
+    if not (STEAM / "steamapps/appmanifest_438100.acf").is_file():
+        return
+    if not all((STEAM / "steamapps/common" / name).is_dir() for name in
+               ("Proton - Experimental", "Proton EasyAntiCheat Runtime")):
+        print("steam-fex-eac: Install Proton Experimental and Proton EasyAntiCheat Runtime in Steam first.")
+        return
+    vdf = runpy.run_path(str(Path(__file__).with_name("mac-clock-format")))
+
+    def set_missing(path, key, value):
+        text = path.read_bytes().decode("utf-8")
+        values, _ = vdf["vdf_entries"](text)
+        current = values.get(tuple(part.lower() for part in key))
+        if current and current[0]:
+            return current[0] == value
+        changed = vdf["vdf_set"](text, key, value)
+        if changed != text:
+            backup = Path(str(path) + ".steamac-fex-backup")
+            if not backup.exists():
+                shutil.copy2(path, backup)
+            vdf["atomic_write"](path, changed)
+        return True
+
+    config = STEAM / "config/config.vdf"
+    if not config.is_file():
+        return
+    key = ("InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping", "438100")
+    if not set_missing(config, (*key, "name"), "proton_experimental"):
+        print("steam-fex-eac: Keeping the user's VRChat compatibility tool.")
+        return
+    set_missing(config, (*key, "config"), "")
+    set_missing(config, (*key, "priority"), "250")
+    for account in sorted((STEAM / "userdata").glob("*/config/localconfig.vdf")):
+        set_missing(account, ("UserLocalConfigStore", "Software", "Valve", "Steam", "apps", "438100", "LaunchOptions"), OPTIONS)
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) == 2 else "prepare" if len(sys.argv) == 1 else "invalid"
+    if action not in ("prepare", "build", "status"):
+        raise ValueError("usage: steam-fex-eac [prepare|build|status]")
+    marker = STATE / "installed.json"
+    if action == "status":
+        if marker.exists() and json.loads(marker.read_text()).get("installed") != fingerprint(TOOL):
+            print("The installed runtime changed. Restart Steam to prepare it again.")
+            return
+        print((STATE / "status").read_text().strip() if (STATE / "status").exists() else "Experimental game support has not been prepared.")
+        return
+    active = enabled()
+    if not active and not marker.exists():
+        return
+    STATE.mkdir(parents=True, exist_ok=True)
+    with (STATE / "lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("steam-fex-eac: Preparing the runtime. Restart Steam when setup finishes.")
+            return
+        if action == "build":
+            if not active:
+                return
+            report("Preparing the Linux game runtime. See steamac-fex-build.service in the user journal for progress.")
+            subprocess.run(["sh", str(PAYLOAD / "build-fex.sh")], env=dict(os.environ, WORK=str(WORK)), check=True)
+            report("Runtime built. Restart Steam to finish setup. Game support is not verified.")
+            return
+        if subprocess.run(["pgrep", "-x", "steam"], stdout=subprocess.DEVNULL, check=False).returncode == 0:
+            raise ValueError("Close Steam before preparing or restoring its runtime.")
+        if not active:
+            installed = json.loads(marker.read_text())
+            if installed.get("installed") != fingerprint(TOOL):
+                marker.unlink()
+                report("Experimental game support is off. The runtime changed; leaving it intact with nothing to restore.")
+                return
+            install("restore", installed["backup"])
+            marker.unlink()
+            report("Experimental game support is off. The previous runtime is restored.")
+            return
+        configure_vrchat()
+        receipt = STAGE / ".steamac-fex-source"
+        if not complete(STAGE) or not receipt.is_file() or receipt.read_text().strip() != source():
+            report("Preparing the Linux game runtime. Restart Steam when setup finishes.")
+            subprocess.run(["systemctl", "--user", "start", "--no-block", "steamac-fex-build.service"], check=True)
+            return
+        if not complete(TOOL):
+            report("Runtime built. Install Steam's FEX-Emu tool, then restart Steam. Game support is not verified.")
+            return
+        previous = json.loads(marker.read_text()) if marker.exists() else {}
+        current = fingerprint(TOOL)
+        if previous.get("installed") == current:
+            backup = previous["backup"]
+        elif current == fingerprint(STAGE):
+            report("Matching runtime already present. Keeping the existing manual installation; automatic restore is unavailable.")
+            return
+        else:
+            backup = str(STATE / "backups" / current)
+        install("install", backup)
+        temporary = marker.with_suffix(".new")
+        temporary.write_text(json.dumps({"source": source(), "backup": backup, "installed": fingerprint(TOOL)}) + "\n")
+        temporary.replace(marker)
+        report("Runtime installed. VRChat setup was checked; online play and other games remain unverified.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, StopIteration, subprocess.CalledProcessError) as error:
+        report("Setup failed: " + str(error))
+        sys.exit(1)

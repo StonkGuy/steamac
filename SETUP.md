@@ -118,11 +118,16 @@ on an external APFS, Mac OS Extended or exFAT volume (FAT32 is rejected). exFAT 
 
 ## Easy Anti-Cheat
 
+- This development version can prepare the runtime automatically: enable **Settings > Advanced > Experimental game
+  support**, install Proton Experimental and Proton EasyAntiCheat Runtime in guest Steam, and let the first background
+  build finish. Restart Steam to install it. Check `/usr/lib/steamac/steam-fex-eac status` in the guest; build output is
+  in `journalctl --user -u steamac-fex-build.service`. VRChat is configured only where no user choice exists. Existing
+  manual tool and launch options remain unchanged. This setup has not yet passed a Mac build or a real game test.
 - Games with Linux Easy Anti-Cheat run its stock client from Valve's Proton EasyAntiCheat Runtime. Nothing fakes, replays,
   short-circuits or modifies EAC or its result.
 - Valve's FEX build in Steam's FEX tool fails EAC's `ptrace` injection and signal semantics. This project replaces it with a
   patched FEX-2610 that emulates those parts of Linux more faithfully.
-- **Installing the patched FEX (required today).** Enable SSH in the guest (Settings > Advanced > Enable SSH), copy the
+- **Installing the patched FEX manually.** Enable SSH in the guest (Settings > Advanced > Enable SSH), copy the
   `fex-eac/` folder of this repository into the guest, and run there:
 
   ```sh
@@ -133,8 +138,8 @@ on an external APFS, Mac OS Extended or exFAT volume (FAT32 is rejected). exFAT 
   ```
 
   A Steam update of the FEX tool overwrites the patched build with Valve's; run `sh install-fex-tool.sh` again.
-  Providing this step automatically is planned. It is not yet.
-- **VRChat launch options (required today).** In Steam, VRChat > Properties > Launch Options:
+  The experimental setting can reapply the prepared runtime at Steam startup.
+- **VRChat launch options for manual setup.** In Steam, VRChat > Properties > Launch Options:
 
   ```
   env EAC_LAUNCHERDIR=$HOME/.local/share/Steam/steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/Roaming/EasyAntiCheat PROTON_EAC_RUNTIME="$HOME/.local/share/Steam/steamapps/common/Proton EasyAntiCheat Runtime" WINEDEBUG=-all PROTON_USE_XALIA=0 WINE_CPU_TOPOLOGY=16:0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3 %command%
@@ -142,8 +147,8 @@ on an external APFS, Mac OS Extended or exFAT volume (FAT32 is rejected). exFAT 
 
   `EAC_LAUNCHERDIR` and `PROTON_EAC_RUNTIME` load the EAC runtime. `WINE_CPU_TOPOLOGY` reports 16 CPUs mapped onto the
   guest's 4 vCPUs and removes a stall of about a minute before joining (4-6 s region lookup with it). Keep the count at
-  16 and list the guest's actual vCPU ids (see `nproc`) in place of the repeated `0,1,2,3`. Setting these options
-  automatically is planned. It is not yet.
+  16 and list the guest's actual vCPU ids (see `nproc`) in place of the repeated `0,1,2,3`. The experimental setting
+  supplies these through a launch helper when no user options exist.
 - **A successful start:** the EAC launcher log (`anticheatlauncher.log`) ends with
   `Launcher finished with: 301, 'Easy Anti-Cheat successfully loaded in-game'` (about 5 s), and VRChat's log shows
   `AntiCheat Session Begin: Success` and `Finished entering world`, with no `null client`.
