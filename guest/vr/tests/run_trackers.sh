@@ -3,7 +3,7 @@
 # End-to-end test of the tracked-device table (include/steamac_vr_trackers.h) without a headset: vr-fakehost serves
 # the headset, the game side is vr-trackerapp (loads the runtime like Proton). Sources:
 #   1. svr-tracker-feed, 3 devices, stops cleanly (slots released -> Deactivated at once)
-#   2. svr-tracker-feed, 8 devices, killed with SIGKILL (slots left behind -> Deactivated when stale, 1 s)
+#   2. svr-tracker-feed, 8 devices, killed with SIGKILL (slots left behind -> Deactivated when stale, 2 s)
 #   3. svr-driverhost hosting tests/sample_driver (an unmodified-style SteamVR tracker driver)
 #   4. a background app without a host link reads the headset and the feed's trackers through the mirror
 #   tests/run_trackers.sh BUILD_DIR

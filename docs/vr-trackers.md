@@ -85,7 +85,7 @@ Helpers in C++: `guest/vr/runtime/trackers.{h,cpp}`. They need only the C librar
   extrapolate to the game's frame time. Flags: `SVR_POSE_VALID`, `SVR_POSE_TRACKED` (clear = inferred or out of range).
 * **Remove:** store `SVR_TRK_FREE`. The game gets `TrackedDeviceDeactivated` on its next frame.
 * **No shared clock:** readers time a device by when they see its `seq` change. A device whose `seq` has not moved for
-  1 s reads as disconnected, so a crashed source's devices drop out by themselves (`svr-tracker-feed --clear` frees
+  2 s reads as disconnected, so a crashed source's devices drop out by themselves (`svr-tracker-feed --clear` frees
   their slots). A device seen for the first time connects on its next update. `updated` is informational only.
 * **Mirror:** the game's runtime writes the headset and controller poses, refresh rate, FOV and IPD into
   `svr_trk_mirror` (seqlocked) each time it fetches poses. A source that derives body points from the headset reads
@@ -157,21 +157,41 @@ headset and controllers. It has two parts:
 * a desktop **application** that reads the headset and controller poses through OpenVR, runs the estimation and
   calibration, and hands the results to its driver.
 
-Its store page and community threads describe that split (calibration in the app, the trackers then listed in
-SteamVR's tracker management). The channel between the app and its driver is private to the product and not
-documented. steamac does not need to know it, as long as both halves run in one Wine environment:
+The install directory is the driver root (`driver.vrdrivermanifest`, `bin/win64/driver_standable.dll`, driver name
+`standable`). The application and the driver talk over Windows named pipes, so both have to run under the same
+wineserver, which means the same Proton build and the same prefix.
+
+Steps (checked in the VM with VRChat; see "Live result" below for what works so far):
 
 1. Install Standable in the guest Steam library (it is a regular Steam app).
-2. Start the game in VR.
-3. Start the driver: `svr-driverhost.exe "<Standable install dir>/<its driver directory>"` under the game's Proton
-   prefix. The driver directory is the one with `driver.vrdrivermanifest`. On SteamVR the installer registers it in
-   `openvrpaths.vrpath` `external_drivers`, which shows where it is.
-4. Start the Standable application with Proton in the same prefix. As a companion program it gets the headset and
-   controller poses from the mirror. It calibrates and drives its driver, and the estimated points appear in the game as
-   devices 3 and up.
-5. Calibrate in the title (VRChat: "Calibrate FBT", T-pose, triggers).
+2. Set its compatibility tool to Proton Experimental, like VRChat (Steam > Standable > Properties > Compatibility).
+   The VR path (patched `vrclient_x64`) is installed into Proton Experimental only. Under another Proton build, its
+   OpenVR calls cannot reach the steamac runtime.
+3. Start the game in VR.
+4. Start Standable from Steam. It initialises OpenVR as a background application and gets the headset through the
+   steamac runtime.
+5. Start the driver in Standable's prefix (`compatdata/2370570`), with that prefix's Wine:
+   `svr-driverhost.exe "Z:\...\Standable Full Body Estimation"`.
+   - The driver imports `steam_api64.dll`, which SteamVR ships next to `vrserver.exe` and Standable does not. Put a
+     `steam_api64.dll` that exports `SteamInternal_SteamAPI_Init` (Steamworks SDK 1.59 or later) next to
+     `svr-driverhost.exe`, and set `SteamAppId=2370570`.
+6. Calibrate in Standable, then in the title (VRChat: "Calibrate FBT", T-pose, triggers).
 
-Steps 3 and 4 are manual for now. A launcher entry is future work, see Limits.
+### Live result (VRChat, synthetic Quest 3)
+
+* `svr-tracker-feed`, 8 devices: all 8 connected in VRChat's process. VRChat polled each tracker's class every frame
+  (8 class queries per frame). No freeze, EAC session and world join as usual.
+* Standable's driver, unmodified, loaded in `svr-driverhost.exe`:
+  - It read its settings, created its 8 devices (Hips, Chest, both elbows, knees and feet) with their roles, and
+    passed its Steam licence check.
+  - VRChat saw all 8 as generic trackers and read their properties.
+* The Standable application ran, but no estimated poses reached the driver. The driver's pipe client could not reach
+  the application ("Failed to send message"), so the trackers stayed at the origin.
+  - Open question: Steam starts the application inside the Steam Linux Runtime container, and the driver host ran
+    outside it. Whether the two share pipes across that boundary, or whether the application waits for user input in
+    its window first, is not yet known.
+  - Next step: start `svr-driverhost.exe` from inside the same container (a Steam launch of its own, or the
+    container's launcher service).
 
 ## Prior art and why this shape
 
@@ -193,7 +213,7 @@ Steps 3 and 4 are manual for now. A launcher entry is future work, see Limits.
 1. `svr-tracker-feed` with 3 devices and `vr-trackerapp` as the game (loads `vrclient.so` like Proton). Checks: 3
    generic trackers with the right classes, role hints and controller types, valid poses every frame in the
    head-relative layout (within 1 cm in practice, 5 cm allowed), activated and deactivated once each.
-2. 8 devices and a source killed with `SIGKILL`: the stale devices disconnect within the 1 s limit.
+2. 8 devices and a source killed with `SIGKILL`: the stale devices disconnect within the 2 s limit.
 3. `svr-driverhost` with `tests/sample_driver` (a tracker driver written only against `openvr_driver.h`, with a
    non-identity world-from-driver transform, a role from its `trackers` setting, and a refused HMD).
 4. A background app without a host link gets the headset pose and the feed's trackers through the mirror.
@@ -206,11 +226,13 @@ first-sight rules, the mirror, and refusal of an incompatible file.
 
 ## Limits
 
-* **Not yet run with a real title or Standable.** The offline tests stand in for both.
+* **Standable estimates do not reach the game yet** (see Live result). Its driver and devices work.
+* **Drivers that import `steam_api64.dll`** need one beside `svr-driverhost.exe` (SteamVR ships it). steamac does not
+  redistribute Valve's Steamworks DLL.
 * **Pose timing:** a pose counts as current when the game's runtime first sees it, at most one source period late
   (about 11 ms at 90 Hz), then extrapolated with the source's velocities (at most 100 ms). Sources without
   velocities are not extrapolated.
-* **A stale device keeps its last pose** until the 1 s timeout. SteamVR does the same while a driver reports a
+* **A stale device keeps its last pose** until the 2 s timeout. SteamVR does the same while a driver reports a
   device as connected.
 * **No tracker input or haptics** reach the game (`IVRDriverInput` updates are ignored). No IVRInput pose actions
   for `/user/waist` style paths: titles that bind tracker poses through SteamVR Input instead of reading device poses

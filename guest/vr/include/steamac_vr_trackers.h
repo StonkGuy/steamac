@@ -30,7 +30,7 @@
 #define SVR_TRK_VERSION 1u
 #define SVR_TRK_MAX 16 /* OpenVR device indices 3 .. 3 + SVR_TRK_MAX - 1 */
 #define SVR_TRK_DEFAULT_PATH "/dev/shm/steamac-vr-trackers"
-#define SVR_TRK_STALE_NS 1000000000LL /* no sequence change for 1 s: disconnected */
+#define SVR_TRK_STALE_NS 2000000000LL /* no sequence change for 2 s: disconnected (tolerates source stalls under emulation load) */
 
 enum svr_trk_state { SVR_TRK_FREE = 0, SVR_TRK_CLAIMED = 1, SVR_TRK_PRESENT = 2 };
 
