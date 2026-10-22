@@ -229,6 +229,12 @@ PROGRAM's directory when that directory holds a `driver.vrdrivermanifest`.
 5. `svr-driverhost --then`: the driver is taken from the program's directory, the program starts, and the host exits
    with it. The Windows build was checked the same way under Wine, with a Unix path for the program.
 
+`make check-wine` (needs `wine64`, `tests/run_trackers_wine.sh`) runs the Windows build the way a body estimator runs:
+* `svr-driverhost.exe --then companion.exe` loads the test driver, which serves a named pipe like Standable's driver;
+* the companion starts in the same wineserver and sends moving waist positions over that pipe;
+* the waist's pose in the table follows them (checked: x 0.2 to 2.5 m over 2.5 s), and the host exits with the
+  companion.
+
 `scripts/test/steam-vr-companion.sh` covers the guest side against a fake Steam tree:
 * launch option, compatibility tool and tools are set up, and a second run changes nothing;
 * the user's own launch options are kept;

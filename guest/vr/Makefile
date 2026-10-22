@@ -73,7 +73,7 @@ $(OUT)/svrtest/bin/linux64/driver_svrtest.so: tests/sample_driver/driver_svrtest
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -fvisibility=hidden -shared -o $@ $< -lm
 
 MINGW ?= x86_64-w64-mingw32-
-driverhost-win: $(OUT)/win/svr-driverhost.exe $(OUT)/win/svrtest/bin/win64/driver_svrtest.dll
+driverhost-win: $(OUT)/win/svr-driverhost.exe $(OUT)/win/svrtest/bin/win64/driver_svrtest.dll $(OUT)/win/svrtest/companion.exe
 $(OUT)/win/svr-driverhost.exe: driverhost/svr_driverhost.cpp runtime/trackers.cpp runtime/json.cpp $(HDRS)
 	mkdir -p $(dir $@)
 	$(MINGW)g++ $(CPPFLAGS) -O2 -std=c++17 -o $@ driverhost/svr_driverhost.cpp runtime/trackers.cpp runtime/json.cpp \
@@ -82,6 +82,12 @@ $(OUT)/win/svrtest/bin/win64/driver_svrtest.dll: tests/sample_driver/driver_svrt
 	mkdir -p $(dir $@)
 	cp -r tests/sample_driver/svrtest/. $(OUT)/win/svrtest/
 	$(MINGW)g++ $(CPPFLAGS) -O2 -std=c++17 -shared -o $@ $< -static -static-libgcc -static-libstdc++
+$(OUT)/win/svrtest/companion.exe: tests/sample_driver/companion.c
+	mkdir -p $(dir $@)
+	$(MINGW)gcc -O2 -o $@ $< -static
+# under Wine (wine64 in PATH): the driver host starts the companion, which talks to its driver over a named pipe
+check-wine: driverhost-win $(OUT)/svr-tracker-feed
+	tests/run_trackers_wine.sh $(OUT)
 
 check: all
 	$(OUT)/unit_tests
@@ -103,4 +109,4 @@ legacy:
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all check driverhost-win check-legacy stubs legacy clean
+.PHONY: all check driverhost-win check-wine check-legacy stubs legacy clean
