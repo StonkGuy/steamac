@@ -1282,3 +1282,10 @@ wmtr_layout(uint64_t *ring_bytes, uint64_t *data_offset, uint64_t *slots_offset,
   *slots_offset = WMTR_SLOTS_OFFSET;
   *slot_size = sizeof(struct wmtr_slot);
 }
+
+/* host ABI reported to embedders (libkrun's wmtr context): 1 = blob_ptr + wake ops, wmtr_layout;
+ * 2 = ABI 1 + optional create_view/release_view/map_path ops (NULL -> the call fails / path kept) */
+__attribute__((visibility("default"))) uint32_t
+wmtr_host_abi_version(void) {
+  return 2;
+}
