@@ -436,10 +436,11 @@ struct VRTab: View {
                     Text("Medium").tag(LauncherSettings.VRPreset?.some(.medium))
                     Text("High").tag(LauncherSettings.VRPreset?.some(.high))
                     Text("Ultra").tag(LauncherSettings.VRPreset?.some(.ultra))
+                    Text("Sharp").tag(LauncherSettings.VRPreset?.some(.sharp))
                     Text("Custom").tag(LauncherSettings.VRPreset?.none)
                 } label: {
                     Label2(title: "Preset",
-                           detail: String(localized: "Sets bitrate and sharpening together: Low for a weak Wi-Fi link, Ultra for a strong one. Refresh rate and stream size stay with the headset."),
+                           detail: String(localized: "Sets bitrate and sharpening together: Low for a weak Wi-Fi link, Ultra for a strong one; these keep the headset's stream size. Sharp also streams a larger image per eye (1248 × 1344) for a sharper periphery, from the next start; it needs a strong link. The refresh rate stays with the headset."),
                            now: false)
                 }
                 VStack(alignment: .leading) {

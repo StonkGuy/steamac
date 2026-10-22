@@ -437,28 +437,36 @@ final class LauncherSettings: ObservableObject {
         case metalfx, bilinear
         var id: String { rawValue }
     }
-    /// Settings > VR quality presets: machine-side values only (the headset keeps its own refresh rate and size).
+    /// Settings > VR quality presets: machine-side values (the headset keeps its refresh rate). Low-Ultra keep the
+    /// headset's stream size; Sharp encodes a larger one (vrSharpEyeSize).
     enum VRPreset: String, CaseIterable, Identifiable {
-        case low, medium, high, ultra
+        case low, medium, high, ultra, sharp
         var id: String { rawValue }
         // Render scale stays 100 %: below it the game (VRChat, M2) did not get faster in the candidate6 smoke and
         // MetalFX under game load cost 12-15 ms GPU per frame; it is a manual option for GPU-bound games.
         var renderScale: Double { 1.0 }
-        var sharpness: Double { [0.3, 0.2, 0.0, 0.0][index] }
-        var bitrateMbps: Int { [30, 40, 50, 80][index] } // High = the defaults
+        var sharpness: Double { [0.3, 0.2, 0.0, 0.0, 0.0][index] }
+        var bitrateMbps: Int { [30, 40, 50, 80, 80][index] } // High = the defaults
+        /// "" = the headset's stream size. The Quest 3 asks WiVRn for half its render size per axis (918x962 of
+        /// 1836x1924); WiVRn's foveation keeps the centre 1:1 but squeezes the edge 6.4:1 per axis, which reads as a
+        /// soft periphery. Sharp: ~0.7 per axis, edge 2.7:1. M2 VideoToolbox HEVC, two eyes: 6.9 ms p50 per frame
+        /// at 918x962, 9.9 ms at 1280x1344, 20 ms at full size (72 Hz budget 13.9 ms); the media engine, not the GPU.
+        var eyeSize: String { self == .sharp ? LauncherSettings.vrSharpEyeSize : "" }
+
         private var index: Int { VRPreset.allCases.firstIndex(of: self)! }
     }
     /// The preset the current values match, nil = custom.
     var vrPreset: VRPreset? {
         VRPreset.allCases.first {
             abs($0.renderScale - vrRenderScale) < 0.001 && abs($0.sharpness - vrSharpness) < 0.001
-                && $0.bitrateMbps == vrBitrateMbps && vrUpscaler == .metalfx
+                && $0.bitrateMbps == vrBitrateMbps && vrUpscaler == .metalfx && $0.eyeSize == vrEyeSize
         }
     }
     func applyVRPreset(_ p: VRPreset) {
         vrRenderScale = p.renderScale
         vrSharpness = p.sharpness
         vrBitrateMbps = p.bitrateMbps
+        vrEyeSize = p.eyeSize
         vrUpscaler = .metalfx
     }
     enum VRCodec: String, CaseIterable, Identifiable {
@@ -468,6 +476,7 @@ final class LauncherSettings: ObservableObject {
     static let vrDefaultBitrateMbps = 50
     static let vrBitrateRange = 5...200
     /// Per-eye sizes offered in Settings > VR (the headset's own size is the default).
+    static let vrSharpEyeSize = "1248x1344"
     static let vrEyeSizes = ["1248x1344", "1440x1584", "1632x1792", "1832x1920"]
     /// "WxH" with even sides in 256...4096, as steamac-vrhost --size takes it.
     static func vrEyeSizeValid(_ s: String) -> Bool {

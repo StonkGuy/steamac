@@ -50,7 +50,14 @@ on the headset in the WiVRn app, as in WiVRn; the panel shows them read-only.
 
 | option | what it does | default |
 |---|---|---|
-| Preset | Low / Medium / High / Ultra set bitrate (30 / 40 / 50 / 80 Mbit/s) and sharpening; editing either makes it Custom | High |
+| Preset | Low / Medium / High / Ultra set bitrate (30 / 40 / 50 / 80 Mbit/s) and sharpening and keep the headset's stream size; Sharp is Ultra plus a 1248x1344 stream per eye (next start). Editing any of them makes it Custom | High |
+
+Stream size and sharpness: the Quest 3 asks WiVRn for half its render size per axis (918x962 of 1836x1924).
+WiVRn's foveation keeps the centre of the view at full resolution and compresses towards the edges, at that size
+up to 6.4 source pixels per streamed pixel per axis at the edge, which reads as a soft periphery. Sharp streams
+about 0.7 per axis (edge 2.7:1). On an M2, VideoToolbox HEVC needs (both eyes, p50 per frame, test pattern): 6.9 ms
+at 918x962, 9.9 ms at 1280x1344, 12-15 ms at 1376x1442, 20 ms at the full 1836x1924; the 72 Hz budget is 13.9 ms.
+Encoding runs on the media engine, not the GPU the game uses.
 | Render resolution | 50-150 % of the headset's render size; below 100 % the Mac upscales before encoding (Upscaler: MetalFX spatial or bilinear) | 100 % |
 | Sharpening | sharpening applied before encoding | off (Low and Medium add some) |
 | Treat game images as sRGB | for games whose 8-bit images hold sRGB data without the sRGB format (colours look washed out) | off |
