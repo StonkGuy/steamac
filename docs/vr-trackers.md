@@ -109,7 +109,7 @@ the headset in a standing layout, which is enough to see trackers in a title's c
 ### Hosting a SteamVR driver: `svr-driverhost`
 
 ```
-svr-driverhost [--table PATH] [--hz 90] [--seconds N] [--verbose] DRIVER_DIR...
+svr-driverhost [--table PATH] [--hz 90] [--seconds N] [--verbose] [DRIVER_DIR...] [--then PROGRAM ARGS...]
 ```
 
 `DRIVER_DIR` is the driver's root, the directory with `driver.vrdrivermanifest` (`"name": "<name>"`). The Linux build
@@ -161,21 +161,30 @@ The install directory is the driver root (`driver.vrdrivermanifest`, `bin/win64/
 `standable`). The application and the driver talk over Windows named pipes, so both have to run under the same
 wineserver, which means the same Proton build and the same prefix.
 
-Steps (checked in the VM with VRChat; see "Live result" below for what works so far):
+Setup:
 
 1. Install Standable in the guest Steam library (it is a regular Steam app).
-2. Set its compatibility tool to Proton Experimental, like VRChat (Steam > Standable > Properties > Compatibility).
-   The VR path (patched `vrclient_x64`) is installed into Proton Experimental only. Under another Proton build, its
-   OpenVR calls cannot reach the steamac runtime.
-3. Start the game in VR.
-4. Start Standable from Steam. It initialises OpenVR as a background application and gets the headset through the
-   steamac runtime.
-5. Start the driver in Standable's prefix (`compatdata/2370570`), with that prefix's Wine:
-   `svr-driverhost.exe "Z:\...\Standable Full Body Estimation"`.
-   - The driver imports `steam_api64.dll`, which SteamVR ships next to `vrserver.exe` and Standable does not. Put a
-     `steam_api64.dll` that exports `SteamInternal_SteamAPI_Init` (Steamworks SDK 1.59 or later) next to
-     `svr-driverhost.exe`, and set `SteamAppId=2370570`.
-6. Calibrate in Standable, then in the title (VRChat: "Calibrate FBT", T-pose, triggers).
+2. Copy `steam_api64.dll` from the Steamworks SDK (`redistributable_bin/win64/`, SDK 1.59 or later) to
+   `~/.local/share/steamac/vr/steam_api64.dll` in the VM. Standable's driver imports it. SteamVR ships it next to
+   `vrserver.exe`; steamac does not redistribute it.
+3. Launcher: Settings > VR > "Tracker app" = `2370570`, then restart the VM.
+
+With VR on, the guest then takes care of the rest (`steam-vr-companion`, at Steam start):
+
+* It copies `svr-driverhost.exe` and the launch wrapper `steamac-vr-companion` under `~/.local/share/steamac`.
+* It sets Standable's Steam launch option to `steamac-vr-companion %command%`, unless you set your own.
+* It sets Standable's compatibility tool to Proton Experimental, unless you set another one. The VR path is
+  installed there only.
+* When a VR game starts, it starts Standable through Steam.
+* The wrapper runs `svr-driverhost.exe --then Standable.exe` in Standable's Proton session. The driver loads first, then
+  the application starts as its child under the same wineserver, so their pipes connect.
+* Setting the field back to 0, or turning VR off, puts the launch option and the compatibility tool back.
+
+Then calibrate in Standable, and in the title (VRChat: "Calibrate FBT", T-pose, triggers).
+
+Without the launcher option, the same works by hand. Set the launch option and compatibility tool yourself, with
+`svr-driverhost.exe` and `steam_api64.dll` in one directory. `svr-driverhost --then PROGRAM` takes the driver from
+PROGRAM's directory when that directory holds a `driver.vrdrivermanifest`.
 
 ### Live result (VRChat, synthetic Quest 3)
 
@@ -217,6 +226,15 @@ Steps (checked in the VM with VRChat; see "Live result" below for what works so 
 3. `svr-driverhost` with `tests/sample_driver` (a tracker driver written only against `openvr_driver.h`, with a
    non-identity world-from-driver transform, a role from its `trackers` setting, and a refused HMD).
 4. A background app without a host link gets the headset pose and the feed's trackers through the mirror.
+5. `svr-driverhost --then`: the driver is taken from the program's directory, the program starts, and the host exits
+   with it. The Windows build was checked the same way under Wine, with a Unix path for the program.
+
+`scripts/test/steam-vr-companion.sh` covers the guest side against a fake Steam tree:
+* launch option, compatibility tool and tools are set up, and a second run changes nothing;
+* the user's own launch options are kept;
+* the wrapper swaps in the driver host, and runs the command unchanged without it;
+* the watcher starts the app once per VR session;
+* "off" restores both files.
 
 The Windows build (`make driverhost-win`) was checked under Wine 5.0 (Ubuntu 20.04 x86-64) with the sample driver
 built as a DLL. The devices it published were read by the native `svr-tracker-feed --list` from the same table file.
@@ -241,4 +259,6 @@ first-sight rules, the mirror, and refusal of an incompatible file.
 * **Driver features out of scope:** headset or display drivers, camera, compositor plugins, watchdog-driven startup,
   driver `PollNextEvent` (no events are delivered), `RequestRestart` (logged only).
 * **16 slots** in total for all sources.
-* **Manual start** of `svr-driverhost` and companion programs. The launcher does not manage them yet.
+* **One tracker app** in the launcher option. The guest script takes a comma-separated list.
+* **Drivers that are not beside their application** (most hardware tracker drivers) need `svr-driverhost` started by
+  hand with their driver directory.

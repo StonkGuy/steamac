@@ -1,0 +1,128 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# steamac: the launcher's Settings > VR "Tracker app" (kernel command line steamac.vr_companion=APPID[,APPID]) for
+# Steam tracker products that ship a SteamVR driver beside their application (docs/vr-trackers.md), e.g. Standable
+# (2370570). Needs VR on (steamac.vr=1) and the tracker tools in the VR payload.
+#   (ExecStartPre, Steam not running)
+#     on   copies svr-driverhost.exe and the steamac-vr-companion launch wrapper to $STATE/tools under $HOME (the Steam
+#          Linux Runtime container sees home, not the guest's /usr), plus the user's steam_api64.dll if there is one
+#          ($USER_DLL; drivers built for vrserver import it and SteamVR ships it, steamac does not), and for each
+#          APPID sets the Steam launch option "$STATE/tools/steamac-vr-companion %command%" and the compatibility
+#          tool Proton Experimental (the Proton the VR path is installed in), unless the user set their own.
+#     off  (or no key) puts back the launch options and compatibility tools it set; removes $STATE.
+#   --watch STEAM_PID  (ExecStartPost) while Steam runs: when a VR game starts (the steamac tracked-device table's
+#          mirror starts moving), starts each APPID through Steam once for that VR session.
+# Test overrides: STEAMAC_CMDLINE, STEAMAC_STEAM_ROOT, STEAMAC_VR_DIR, STEAMAC_VRC_STATE, STEAMAC_VRC_DLL,
+# STEAMAC_VR_TRACKERS, STEAMAC_STEAM_CMD, STEAMAC_VRC_POLL.
+set -uo pipefail
+
+CMDLINE=${STEAMAC_CMDLINE:-/proc/cmdline}
+STEAM=${STEAMAC_STEAM_ROOT:-$HOME/.local/share/Steam}
+PAYLOAD=${STEAMAC_VR_DIR:-/usr/lib/steamac/vr}
+STATE=${STEAMAC_VRC_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/steamac/vr-companion}
+USER_DLL=${STEAMAC_VRC_DLL:-${XDG_DATA_HOME:-$HOME/.local/share}/steamac/vr/steam_api64.dll}
+HERE=$(cd "$(dirname "$0")" && pwd)
+VDF="$HERE/steamac-vdf"
+log() { echo "steam-vr-companion: $*" >&2; }
+
+vr=0 apps=""
+for w in $(cat "$CMDLINE" 2>/dev/null); do
+    case $w in
+        steamac.vr=1) vr=1 ;;
+        steamac.vr_companion=*) apps=${w#steamac.vr_companion=} ;;
+    esac
+done
+apps=${apps//,/ }
+for a in $apps; do [[ $a =~ ^[0-9]+$ ]] || { log "ignoring app id '$a'"; apps=${apps//$a/}; }; done
+
+LAUNCH_KEY=UserLocalConfigStore/Software/Valve/Steam/apps
+COMPAT_KEY=InstallConfigStore/Software/Valve/Steam/CompatToolMapping
+CONFIG=$STEAM/config/config.vdf
+
+if [[ ${1:-} == --watch ]]; then
+    # a VR session = the mirror's sequence moving; start the companions on its rising edge only
+    [[ $vr == 1 && -n $apps ]] || exit 0
+    pid=${2:-}
+    table=${STEAMAC_VR_TRACKERS:-/dev/shm/steamac-vr-trackers}
+    poll=${STEAMAC_VRC_POLL:-2}
+    steam_cmd=${STEAMAC_STEAM_CMD:-steam}
+    last="" live=0 idle=0
+    watch() {
+    while [[ -z $pid ]] || kill -0 "$pid" 2>/dev/null; do
+        # struct svr_trk_table: magic, version, size, max, then the mirror's seq (little-endian u32 at byte 16)
+        seq=$(od -An -tu4 -j16 -N4 "$table" 2>/dev/null | tr -d ' ')
+        if [[ -n $seq && -n $last && $seq != "$last" ]]; then
+            if (( !live )); then
+                live=1
+                for a in $apps; do log "VR game running: starting app $a"; $steam_cmd -ifrunning "steam://rungameid/$a" >/dev/null 2>&1 & done
+            fi
+            idle=0
+        else
+            idle=$((idle + poll))
+            (( idle >= 10 )) && live=0
+        fi
+        last=$seq
+        sleep "$poll"
+    done
+    }
+    # ExecStartPost must return: watch in the background unless a test wants it in the foreground
+    if [[ -n ${STEAMAC_VRC_FOREGROUND:-} ]]; then watch; else watch & fi
+    exit 0
+fi
+
+ours() { echo "$STATE/tools/steamac-vr-companion %command%"; }
+
+apply() {
+    [[ -f $PAYLOAD/tools/svr-driverhost.exe ]] || { log "no svr-driverhost.exe in $PAYLOAD/tools; tracker apps stay as they are"; return 0; }
+    mkdir -p "$STATE/tools" "$STATE/kept" || return 1
+    cp -f "$PAYLOAD/tools/svr-driverhost.exe" "$STATE/tools/" && cp -f "$HERE/steamac-vr-companion" "$STATE/tools/" \
+        && chmod +x "$STATE/tools/steamac-vr-companion" || return 1
+    if [[ -f $USER_DLL ]]; then cp -f "$USER_DLL" "$STATE/tools/steam_api64.dll"
+    else rm -f "$STATE/tools/steam_api64.dll"; log "no $USER_DLL: drivers that import steam_api64.dll will not load (docs/vr-trackers.md)"; fi
+    local a f u v
+    for a in $apps; do
+        for f in "$STEAM"/userdata/*/config/localconfig.vdf; do
+            [[ -f $f ]] || continue
+            u=$(basename "$(dirname "$(dirname "$f")")")
+            v=$(python3 "$VDF" get "$f" "$LAUNCH_KEY/$a/LaunchOptions") || v=""
+            [[ $v == "$(ours)" ]] && continue
+            if [[ -n $v ]]; then log "app $a has the user's own launch options; left as they are"; continue; fi
+            touch "$STATE/kept/launch.$a.$u"
+            python3 "$VDF" set "$f" "$LAUNCH_KEY/$a/LaunchOptions" "$(ours)" && log "app $a: launch option set (user $u)"
+        done
+        if [[ -f $CONFIG ]] && ! python3 "$VDF" get "$CONFIG" "$COMPAT_KEY/$a/name" >/dev/null; then
+            python3 "$VDF" set "$CONFIG" "$COMPAT_KEY/$a/name" proton_experimental && python3 "$VDF" set "$CONFIG" "$COMPAT_KEY/$a/config" "" \
+                && python3 "$VDF" set "$CONFIG" "$COMPAT_KEY/$a/priority" 250 && touch "$STATE/kept/compat.$a" \
+                && log "app $a: Proton Experimental"
+        fi
+    done
+    # apps no longer configured go back
+    restore_except "$apps"
+}
+
+# puts back what this script set, for every app not in $1
+restore_except() {
+    local keep=" $1 " k a u f
+    [[ -d $STATE/kept ]] || return 0
+    for k in "$STATE"/kept/*; do
+        [[ -e $k ]] || continue
+        k=${k##*/}
+        case $k in
+            launch.*) a=${k#launch.}; u=${a#*.}; a=${a%%.*}
+                [[ $keep == *" $a "* ]] && continue
+                f=$STEAM/userdata/$u/config/localconfig.vdf
+                [[ -f $f && $(python3 "$VDF" get "$f" "$LAUNCH_KEY/$a/LaunchOptions") == "$(ours)" ]] \
+                    && python3 "$VDF" del "$f" "$LAUNCH_KEY/$a/LaunchOptions" && log "app $a: launch option removed"
+                rm -f "$STATE/kept/$k" ;;
+            compat.*) a=${k#compat.}
+                [[ $keep == *" $a "* ]] && continue
+                [[ -f $CONFIG && $(python3 "$VDF" get "$CONFIG" "$COMPAT_KEY/$a/name") == proton_experimental ]] \
+                    && python3 "$VDF" del "$CONFIG" "$COMPAT_KEY/$a" && log "app $a: compatibility tool back to Steam's default"
+                rm -f "$STATE/kept/$k" ;;
+        esac
+    done
+}
+
+if [[ $vr == 1 && -n $apps ]]; then apply || log "cannot set up the tracker apps"
+else restore_except ""; rm -rf "$STATE"; fi
+exit 0

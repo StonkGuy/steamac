@@ -5,7 +5,12 @@
 // (bin/linux64/driver_<name>.so) and a Windows program run under Wine/Proton for Windows drivers
 // (bin/win64/driver_<name>.dll), which maps the same table through Wine's Z: drive.
 //
-//   svr-driverhost [--table PATH] [--hz N] [--seconds N] [--verbose] DRIVER_DIR...
+//   svr-driverhost [--table PATH] [--hz N] [--seconds N] [--verbose] [DRIVER_DIR...] [--then PROGRAM [ARGS...]]
+//
+// --then starts PROGRAM (a tracker product's companion application) once the drivers are loaded and exits when it
+// exits. Run that way, the driver and its application share one process tree (and under Wine one wineserver, which
+// their pipes and shared memory need). Without a DRIVER_DIR, PROGRAM's directory is used when it holds a
+// driver.vrdrivermanifest (products that install their driver beside the application, such as Standable).
 //
 // DRIVER_DIR is a driver's root (the directory with driver.vrdrivermanifest). Only what a tracker driver needs from
 // vrserver is provided: device registration and properties, poses, settings (the driver's default.vrsettings plus
@@ -31,6 +36,7 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -715,6 +721,59 @@ bool load_driver(Host &h, const std::string &dir, Loaded *out) {
   return true;
 }
 
+// the companion application started with --then
+struct Child {
+#ifdef _WIN32
+  HANDLE process = nullptr;
+#else
+  pid_t pid = 0;
+#endif
+  bool start(const std::vector<std::string> &argv) {
+    if (argv.empty()) return false;
+#ifdef _WIN32
+    std::string cmd;
+    for (auto &a : argv) cmd += (cmd.empty() ? "" : " ") + ("\"" + a + "\"");
+    std::string dir = argv[0].substr(0, argv[0].find_last_of("\\/"));
+    STARTUPINFOA si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    std::vector<char> buf(cmd.begin(), cmd.end());
+    buf.push_back(0);
+    if (!CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.empty() ? nullptr : dir.c_str(),
+                        &si, &pi)) {
+      logf("cannot start %s (%lu)", argv[0].c_str(), (unsigned long)GetLastError());
+      return false;
+    }
+    CloseHandle(pi.hThread);
+    process = pi.hProcess;
+#else
+    pid = fork();
+    if (pid == 0) {
+      std::vector<char *> a;
+      for (auto &s : argv) a.push_back(const_cast<char *>(s.c_str()));
+      a.push_back(nullptr);
+      execv(a[0], a.data());
+      _exit(127);
+    }
+    if (pid < 0) return false;
+#endif
+    logf("started %s", argv[0].c_str());
+    return true;
+  }
+  bool running() {
+#ifdef _WIN32
+    return process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+#else
+    return pid > 0 && waitpid(pid, nullptr, WNOHANG) == 0;
+#endif
+  }
+};
+
+std::string dir_of(const std::string &path) {
+  size_t e = path.find_last_of("\\/");
+  return e == std::string::npos ? "." : path.substr(0, e);
+}
+
 #ifdef _WIN32
 BOOL WINAPI on_ctrl(DWORD) {
   g_exit = true;
@@ -727,20 +786,37 @@ void on_signal(int) { g_exit = true; }
 int run(int argc, char **argv) {
   std::string table_path;
   double hz = 90, seconds = 0;
-  std::vector<std::string> dirs;
+  std::vector<std::string> dirs, then;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
+    if (a == "--then") {
+      for (i++; i < argc; i++) then.push_back(argv[i]);
+      break;
+    }
     if (a == "--table" && i + 1 < argc) table_path = argv[++i];
     else if (a == "--hz" && i + 1 < argc) hz = atof(argv[++i]);
     else if (a == "--seconds" && i + 1 < argc) seconds = atof(argv[++i]);
     else if (a == "--verbose") g_verbose = true;
     else if (a == "-h" || a == "--help") {
-      fprintf(stderr, "usage: svr-driverhost [--table PATH] [--hz N] [--seconds N] [--verbose] DRIVER_DIR...\n");
+      fprintf(stderr, "usage: svr-driverhost [--table PATH] [--hz N] [--seconds N] [--verbose] [DRIVER_DIR...] [--then PROGRAM ARGS...]\n");
       return 0;
     } else dirs.push_back(a);
   }
+#ifdef _WIN32
+  // Steam hands Proton a Unix path for the application; Wine sees the same file through Z:
+  if (!then.empty() && !then[0].empty() && then[0][0] == '/') {
+    std::string w = "Z:" + then[0];
+    for (char &c : w)
+      if (c == '/') c = '\\';
+    then[0] = w;
+  }
+#endif
+  if (dirs.empty() && !then.empty()) {
+    std::string text, d = dir_of(then[0]);
+    if (svr::read_file(d + "/driver.vrdrivermanifest", &text)) dirs.push_back(d);
+  }
   if (dirs.empty()) {
-    fprintf(stderr, "usage: svr-driverhost [--table PATH] [--hz N] [--seconds N] [--verbose] DRIVER_DIR...\n");
+    fprintf(stderr, "usage: svr-driverhost [--table PATH] [--hz N] [--seconds N] [--verbose] [DRIVER_DIR...] [--then PROGRAM ARGS...]\n");
     return 2;
   }
   static Host h;
@@ -761,10 +837,17 @@ int run(int argc, char **argv) {
     Loaded l;
     if (load_driver(h, d, &l)) drivers.push_back(l);
   }
-  if (drivers.empty()) return 1;
+  Child child;
+  if (drivers.empty()) {
+    // the application still starts (it is the product the user asked for); it only lacks its trackers
+    if (!then.empty() && child.start(then))
+      while (child.running()) sleep_ms(500);
+    return 1;
+  }
+  if (!then.empty() && !child.start(then)) g_exit = true;
   int period_ms = hz > 0 ? (int)(1000.0 / hz) : 11;
   int64_t end = seconds > 0 ? now_ns() + (int64_t)(seconds * 1e9) : 0;
-  while (!g_exit && (!end || now_ns() < end)) {
+  while (!g_exit && (!end || now_ns() < end) && (then.empty() || child.running())) {
     h.service();
     for (auto &l : drivers) {
       h.current_driver = l.name;

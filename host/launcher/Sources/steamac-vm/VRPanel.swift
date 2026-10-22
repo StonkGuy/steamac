@@ -539,6 +539,14 @@ struct VRTab: View {
                     TextField("ID", value: $settings.vrGameAppID, format: .number.grouping(.never))
                         .frame(width: 90).multilineTextAlignment(.trailing)
                 }
+                HStack(alignment: .firstTextBaseline) {
+                    Label2(title: "Tracker app",
+                           detail: String(localized: "Steam app ID of a full-body tracker app that brings its own SteamVR driver, for example Standable: Full Body Estimation (2370570). The VM starts it with each VR game and runs its driver, so its trackers reach the game. Drivers that need steam_api64.dll from the Steamworks SDK load only when that file is in ~/.local/share/steamac/vr in the VM. 0 = none."),
+                           now: false, key: .vrTrackerAppID)
+                    Spacer()
+                    TextField("ID", value: $settings.vrTrackerAppID, format: .number.grouping(.never))
+                        .frame(width: 90).multilineTextAlignment(.trailing)
+                }
                 HStack {
                     Button("Start in VR") { VRHost.launchInVR(settings.vrGameAppID) }
                         .disabled(VRHost.guestSend == nil || !model.hostRunning || settings.vrGameAppID <= 0)

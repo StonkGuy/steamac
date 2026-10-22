@@ -252,6 +252,9 @@ enum VRSelfTest {
         // command line, the headset's own size by default.
         check(Options.vrArg(true)?.key == "steamac.vr" && Options.vrArg(true)?.value == "1", "VR on must map to steamac.vr=1")
         check(Options.vrArg(false) == nil, "VR off must add no kernel key")
+        check(Options.vrTrackerArg(vr: true, appID: 2370570).map { "\($0.key)=\($0.value)" } == "steamac.vr_companion=2370570"
+              && Options.vrTrackerArg(vr: false, appID: 2370570) == nil && Options.vrTrackerArg(vr: true, appID: 0) == nil,
+              "tracker app maps to steamac.vr_companion=<id> only with VR on")
         var enc = Options()
         check(VRHost.hostArgs(enc, controlSocket: "/s") == ["--control-socket", "/s", "--bitrate", "50000000",
                                                             "--pair-on-request", "--app", "438100=VRChat"],

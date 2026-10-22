@@ -35,7 +35,7 @@ final class LauncherSettings: ObservableObject {
         case cpus, memMiB, sshEnabled, sshPort, network, lanRemotePlay, diskImage, steamosBranch, steamClient, vulkanDriver,
              graphicsPath, frameLatency
         // VR
-        case vrEnabled, vrBitrateMbps, vrEyeSize, vrCodec, vrPairOnRequest, vrHeadsetAudio, vrGameAppID
+        case vrEnabled, vrBitrateMbps, vrEyeSize, vrCodec, vrPairOnRequest, vrHeadsetAudio, vrGameAppID, vrTrackerAppID
         case vrRenderScale, vrUpscaler, vrSharpness, vrForceSRGB, vrKeyframeInterval, vrTCPOnly, vrShowStats
 
         var nextStart: Bool {
@@ -45,7 +45,7 @@ final class LauncherSettings: ObservableObject {
                  .sshPort, .network, .lanRemotePlay,
                  .diskImage, .steamClient, .followMacTime, .vulkanDriver, .graphicsPath, .frameLatency, .vrEnabled,
                  .vrEyeSize, .vrCodec, .vrPairOnRequest, .vrHeadsetAudio, .vrRenderScale, .vrUpscaler, .vrSharpness,
-                 .vrForceSRGB, .vrKeyframeInterval, .vrTCPOnly:
+                 .vrForceSRGB, .vrKeyframeInterval, .vrTCPOnly, .vrTrackerAppID:
                 return true
             default:
                 return false
@@ -419,6 +419,11 @@ final class LauncherSettings: ObservableObject {
     /// Steam app id that "Start in VR" and the headset's app list start (steam://launch/<id>/vr); 0 = none.
     @Published var vrGameAppID = LauncherSettings.vrDefaultGameAppID { didSet { save(.vrGameAppID, vrGameAppID) } }
     static let vrDefaultGameAppID = 438100 // VRChat
+    /// Settings > VR "Tracker app" (next start): Steam app id of a tracker product whose SteamVR driver ships beside its
+    /// application (docs/vr-trackers.md); the guest starts it with each VR game (kernel cmdline steamac.vr_companion=).
+    /// 0 = none.
+    @Published var vrTrackerAppID = 0 { didSet { save(.vrTrackerAppID, vrTrackerAppID) } }
+    static let vrStandableAppID = 2370570 // Standable: Full Body Estimation
     /// Settings > VR "Quality" (machine-side, next start): game render size relative to the headset's (steamac-vrhost
     /// --render-scale; below 1 upscaled on the Mac), the upscaler, sharpening and the sRGB override.
     @Published var vrRenderScale = 1.0 { didSet { save(.vrRenderScale, vrRenderScale) } }
@@ -571,6 +576,8 @@ final class LauncherSettings: ObservableObject {
         bool(.vrHeadsetAudio, &vrHeadsetAudio)
         int(.vrGameAppID, &vrGameAppID)
         if vrGameAppID < 0 { vrGameAppID = 0 }
+        int(.vrTrackerAppID, &vrTrackerAppID)
+        if vrTrackerAppID < 0 { vrTrackerAppID = 0 }
         if let v = d.object(forKey: Key.vrRenderScale.rawValue) as? Double, LauncherSettings.vrRenderScaleRange.contains(v) { vrRenderScale = v }
         if let v = d.string(forKey: Key.vrUpscaler.rawValue).flatMap(VRUpscaler.init(rawValue:)) { vrUpscaler = v }
         if let v = d.object(forKey: Key.vrSharpness.rawValue) as? Double, (0...1).contains(v) { vrSharpness = v }
@@ -663,6 +670,7 @@ final class LauncherSettings: ObservableObject {
         case .vrPairOnRequest: guard let b else { return false }; vrPairOnRequest = b
         case .vrHeadsetAudio: guard let b else { return false }; vrHeadsetAudio = b
         case .vrGameAppID: guard let i, i >= 0 else { return false }; vrGameAppID = i
+        case .vrTrackerAppID: guard let i, i >= 0 else { return false }; vrTrackerAppID = i
         case .vrRenderScale: guard let d, LauncherSettings.vrRenderScaleRange.contains(d) else { return false }; vrRenderScale = d
         case .vrUpscaler: guard let v = VRUpscaler(rawValue: text) else { return false }; vrUpscaler = v
         case .vrSharpness: guard let d, (0...1).contains(d) else { return false }; vrSharpness = d
@@ -706,7 +714,7 @@ final class LauncherSettings: ObservableObject {
         frameLatency = fresh.frameLatency
         vrEnabled = fresh.vrEnabled; vrBitrateMbps = fresh.vrBitrateMbps; vrEyeSize = fresh.vrEyeSize
         vrCodec = fresh.vrCodec; vrPairOnRequest = fresh.vrPairOnRequest; vrHeadsetAudio = fresh.vrHeadsetAudio
-        vrGameAppID = fresh.vrGameAppID
+        vrGameAppID = fresh.vrGameAppID; vrTrackerAppID = fresh.vrTrackerAppID
         vrRenderScale = fresh.vrRenderScale; vrUpscaler = fresh.vrUpscaler; vrSharpness = fresh.vrSharpness
         vrForceSRGB = fresh.vrForceSRGB; vrKeyframeInterval = fresh.vrKeyframeInterval
         vrTCPOnly = fresh.vrTCPOnly; vrShowStats = fresh.vrShowStats
@@ -747,7 +755,7 @@ final class LauncherSettings: ObservableObject {
             .vrEnabled: vrEnabled, .vrEyeSize: vrEyeSize, .vrCodec: vrCodec.rawValue,
             .vrPairOnRequest: vrPairOnRequest, .vrHeadsetAudio: vrHeadsetAudio, .vrRenderScale: vrRenderScale,
             .vrUpscaler: vrUpscaler.rawValue, .vrSharpness: vrSharpness, .vrForceSRGB: vrForceSRGB,
-            .vrKeyframeInterval: vrKeyframeInterval, .vrTCPOnly: vrTCPOnly,
+            .vrKeyframeInterval: vrKeyframeInterval, .vrTCPOnly: vrTCPOnly, .vrTrackerAppID: vrTrackerAppID,
         ]
         var s: [Key: String] = [:]
         for (k, v) in values where k.nextStart && overrides[k] == nil { s[k] = "\(v)" }

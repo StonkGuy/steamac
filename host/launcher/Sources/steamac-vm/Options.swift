@@ -94,6 +94,8 @@ struct Options {
     var vrHeadsetAudio = true
     /// Settings > VR "Game": Steam app id offered in the headset's app list (0 = none).
     var vrGameAppID = LauncherSettings.vrDefaultGameAppID
+    /// Settings > VR "Tracker app": Steam app id the guest starts with VR games, its SteamVR driver hosted (0 = none).
+    var vrTrackerAppID = 0
     /// Settings > VR quality / codec / stream options (machine-side; see LauncherSettings).
     var vrRenderScale = 1.0
     var vrUpscaler = LauncherSettings.VRUpscaler.metalfx
@@ -555,6 +557,12 @@ struct Options {
         on ? ("steamac.vr", "1") : nil
     }
 
+    /// Settings > VR "Tracker app" -> kernel cmdline key `steamac.vr_companion=<app id>` while VR is on (the guest's
+    /// steam-vr-companion); nothing for none, so the guest puts back what it set.
+    static func vrTrackerArg(vr: Bool, appID: Int) -> (key: String, value: String)? {
+        vr && appID > 0 ? ("steamac.vr_companion", String(appID)) : nil
+    }
+
     var isSelftest: Bool {
         selftestDisplay || selftestOverlay || selftestStall || selftestPill || selftestSettings || selftestProvision || selftestRemotePlay
             || selftestMetalCache || selftestGameLayers || selftestVR || selftestL10n || createDisk != nil || growDisk != nil
@@ -597,6 +605,9 @@ struct Options {
             // only written when on; absent is the default (off), so an explicit =0 needs no key
             if let a = Options.frameLatencyArg(o.frameLatency) { add(a.key, a.value) }
             if let a = Options.vrArg(o.vr && VRHost.unavailableReason(o) == nil) { add(a.key, a.value) }
+            if let a = Options.vrTrackerArg(vr: o.vr && VRHost.unavailableReason(o) == nil, appID: o.vrTrackerAppID) {
+                add(a.key, a.value)
+            }
             if o.macTime {
                 add("steamac.tz", MacTime.zone)
                 add("steamac.clock24", MacTime.clock24.map { $0 ? "1" : "0" })
@@ -664,6 +675,7 @@ struct Options {
         if given("--no-vr-audio") { ov[.vrHeadsetAudio] = "--no-vr-audio" } else { vrHeadsetAudio = s.vrHeadsetAudio }
         vrGameAppID = s.vrGameAppID
         vrGameName = s.gameName(vrGameAppID)
+        vrTrackerAppID = s.vrTrackerAppID
         vrRenderScale = s.vrRenderScale; vrUpscaler = s.vrUpscaler; vrSharpness = s.vrSharpness; vrForceSRGB = s.vrForceSRGB
         vrKeyframeInterval = s.vrKeyframeInterval; vrTCPOnly = s.vrTCPOnly
         if given("--no-sound") { ov[.soundEnabled] = "--no-sound" } else { sound = s.soundEnabled }

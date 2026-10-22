@@ -6,6 +6,7 @@
 #   2. svr-tracker-feed, 8 devices, killed with SIGKILL (slots left behind -> Deactivated when stale, 2 s)
 #   3. svr-driverhost hosting tests/sample_driver (an unmodified-style SteamVR tracker driver)
 #   4. a background app without a host link reads the headset and the feed's trackers through the mirror
+#   5. svr-driverhost --then: the driver beside a companion program loads, the program starts, the host exits with it
 #   tests/run_trackers.sh BUILD_DIR
 set -eu
 out=${1:?build dir}
@@ -67,4 +68,15 @@ env -u STEAMAC_VR_SOCKET STEAMAC_VR_LOG=1 "$out/vr-trackerapp" "$out/runtime" se
 grep -q 'init without a host link' "$tmp/app4.err" || fail "secondary log"
 wait $app || fail "secondary's scene app"
 wait $fh
+# 5. companion mode: driver directory taken from the program's own directory, host lives as long as the program
+cp -r "$out/svrtest" "$tmp/product"
+printf '#!/bin/sh\necho companion-ran > "$1"\nsleep 2\n' > "$tmp/product/app.sh"
+chmod +x "$tmp/product/app.sh"
+t0=$(date +%s)
+"$out/svr-driverhost" --then "$tmp/product/app.sh" "$tmp/companion.out" 2>"$tmp/companion.err" || fail "companion mode exit"
+t1=$(date +%s)
+grep -q companion-ran "$tmp/companion.out" || fail "companion did not run"
+grep -q "svrtest: loaded from $tmp/product" "$tmp/companion.err" || fail "driver not taken from the companion's directory"
+[ $((t1 - t0)) -le 6 ] || fail "host outlived its companion ($((t1 - t0)) s)"
+"$out/svr-tracker-feed" --list | grep -q svrtest && fail "companion mode left devices in the table"
 echo "PASS trackers"
