@@ -325,6 +325,7 @@ fn serve_host(port: &mut Port, collector: &mut collect::Collector, freezer: &mut
                 Some(id) => launchvr::launch(id),
                 None => eprintln!("fx-progress: launch-vr: bad app id {arg:?}"),
             },
+            "list-vr-apps" => port.send(&appname::vr_apps_line()),
             "still-background" => freezer.keepalive(),
             "" => {}
             _ => eprintln!("fx-progress: ignoring unknown host request {cmd:?}"),
