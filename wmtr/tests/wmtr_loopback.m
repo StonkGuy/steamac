@@ -18,6 +18,8 @@
 #include "winemetal_thunks.h"
 #include "airconv_thunks.h"
 #include "wmtr_wire.h"
+#include "wmtr_handles.h"
+#import <QuartzCore/QuartzCore.h>
 #include "wmtr_transport.h"
 #include "wmtr_host.h"
 #include "wmtr_vr.h"
@@ -115,9 +117,12 @@ static NTSTATUS f_sm50compile(void *a) {
 }
 static NTSTATUS f_pixelformat(void *a) { ((struct unixcall_generic_obj_uint64_ret *)a)->ret = 70; return 0; } /* RGBA8 */
 static NTSTATUS f_release(void *a) { [(id)*(obj_handle_t *)a release]; return 0; }
+static NSObject *fn_objs[64]; /* the "functions": one object per (name length, library) */
 static NTSTATUS f_newfunction(void *a) {
   struct unixcall_generic_obj_uint64_obj_ret *p = a;
-  p->ret = strlen((const char *)(uintptr_t)p->arg) * 1000 + p->handle;
+  uint64_t i = (strlen((const char *)(uintptr_t)p->arg) * 1000 + p->handle) % 64;
+  if (!fn_objs[i]) fn_objs[i] = [[NSObject alloc] init];
+  p->ret = (obj_handle_t)[fn_objs[i] retain];
   return 0;
 }
 static NTSTATUS f_signal(void *p) { /* encodeSignalEvent, as DXMT's unix side */
@@ -153,7 +158,7 @@ static void *blob_base[WMTR_MAX_BLOBS]; static uint64_t blob_size[WMTR_MAX_BLOBS
 static void *t_blob_ptr(void *c, uint32_t b, uint64_t *s) { if (b >= WMTR_MAX_BLOBS) return NULL; *s = blob_size[b]; return blob_base[b]; }
 static void t_wake(void *c, uint32_t s) {}
 static uint64_t next_view = 0x1000, released[8]; static int n_released;
-static uint64_t t_create_view(void *c, uint64_t hwnd, void *dev, uint64_t *layer) { *layer = 0x77; return next_view++; }
+static uint64_t t_create_view(void *c, uint64_t hwnd, void *dev, uint64_t *layer) { *layer = (uint64_t)[[CAMetalLayer layer] retain]; return next_view++; }
 static void t_release_view(void *c, uint64_t v) { if (n_released < 8) released[n_released] = v; n_released++; }
 static const struct wmtr_host_ops host_ops = {t_blob_ptr, t_wake, t_create_view, t_release_view, NULL};
 static void *pages(uint64_t n) { void *p; posix_memalign(&p, WMTR_PAGE, n); memset(p, 0, n); return p; }
@@ -186,6 +191,15 @@ struct wmtr_transport *wmtr_transport_create(void) {
 }
 static NTSTATUS remote(int call, void *p) { return ((fn_t)__wine_unix_call_funcs[call])(p); }
 static NTSTATUS native(int call, void *p) { return ((fn_t)wmtr_impl_funcs[call])(p); }
+/* the guest refers to host objects by handles (wmtr_handles.h): these put a test's host object (or a fake one,
+ * with its kind) into the executor's table, and map a handle back to the object */
+extern uint64_t wmtr_host_debug_handle(struct wmtr_host *h, uint64_t obj, int kind, int plus1);
+extern uint64_t wmtr_host_debug_object(struct wmtr_host *h, uint64_t handle);
+extern int wmtr_host_debug_kind(struct wmtr_host *h, uint64_t handle);
+extern uint64_t wmtr_host_refused(struct wmtr_host *h);
+#define HK(obj, kind) wmtr_host_debug_handle(H, (uint64_t)(uintptr_t)(obj), WMTR_K_##kind, 0)
+#define HO(obj) wmtr_host_debug_handle(H, (uint64_t)(uintptr_t)(obj), 0, 0)
+#define OBJ(h) wmtr_host_debug_object(H, (h))
 
 
 /* ---------------- VR export (call 146) ---------------- */
@@ -312,14 +326,14 @@ static void test_vr(id<MTLDevice> dev) {
   /* the guest's rendering is ordered through a shared event: the export must wait for it */
   id<MTLSharedEvent> ev = [dev newSharedEvent];
   sub.info.frame_id = 7; sub.info.display_time = 123456789;
-  sub.info.eye[0] = (struct WMTVREye){(obj_handle_t)tex[0], 16, 8, 256, 128, WMTVR_EYE_FLIP_Y, 0};
-  sub.info.eye[1] = (struct WMTVREye){(obj_handle_t)tex[1], 0, 0, 0, 0, 0, 0};
+  sub.info.eye[0] = (struct WMTVREye){HO(tex[0]), 16, 8, 256, 128, WMTVR_EYE_FLIP_Y, 0};
+  sub.info.eye[1] = (struct WMTVREye){HO(tex[1]), 0, 0, 0, 0, 0, 0};
   for (int e = 0; e < 2; e++) {
     float pose[7] = {0, 0, 0, 1, e ? 0.032f : -0.032f, 1.6f, 0};
     float fov[4] = {-0.9f, 0.8f, 0.85f, -0.95f};
     memcpy(sub.info.pose[e], pose, sizeof pose); memcpy(sub.info.fov[e], fov, sizeof fov);
   }
-  sub.info.wait_event = (obj_handle_t)ev; sub.info.wait_value = 1;
+  sub.info.wait_event = HO(ev); sub.info.wait_value = 1;
   remote(146, &sub);
   struct unixcall_generic_obj_uint64_ret sync = {0}; remote(39, &sync);
   /* not signalled yet: nothing may arrive */
@@ -360,7 +374,7 @@ static void test_vr(id<MTLDevice> dev) {
     sub.info.frame_id = 30; sub.info.wait_value = 2;
     remote(146, &sub); remote(39, &sync);
     usleep(60000);
-    struct unixcall_generic_obj_obj_uint64_noret se = {(obj_handle_t)gcb, (obj_handle_t)ev, 2};
+    struct unixcall_generic_obj_obj_uint64_noret se = {HO(gcb), HO(ev), 2};
     remote(17, &se); remote(39, &sync);
     [gcb commit];
     usleep(60000);
@@ -418,6 +432,7 @@ static void test_vr(id<MTLDevice> dev) {
   CHECK(st.swapchains == 3, "resize: %llu swapchains", st.swapchains);
   /* a bad handle (MSAA / missing) is rejected without touching the link */
   sub.info.eye[1].texture = 0; uint64_t errs = st.errors;
+  sub.info.eye[0].texture = OBJ(sub.info.eye[0].texture); /* called directly: host objects */
   CHECK(wmtr_vr_submit(vr, &sub.info) == (int)0xC000000D, "null eye texture accepted");
   wmtr_vr_get_stats(vr, &st);
   CHECK(st.errors == errs + 1, "error not counted");
@@ -582,6 +597,7 @@ raw_request(uint16_t call, uint32_t params_size, uint32_t payload_size, const ui
  * host memory outside the request (32-bit wrap-around, or sizes larger than the reply slot / the arena blob). */
 static void
 test_hostile_requests(id<MTLDevice> dev) {
+  obj_handle_t devh = HO(dev);
   { /* a ring blob smaller than the ring layout: the executor would read and write past it */
     uint64_t sz = WMTR_RING_BLOB_BYTES;
     void *small = pages(sz);
@@ -623,7 +639,7 @@ test_hostile_requests(id<MTLDevice> dev) {
   if (blob) {
     struct { struct unixcall_mtldevice_newbuffer p; struct WMTBufferInfo info; } nb;
     memset(&nb, 0, sizeof nb);
-    nb.p.device = (obj_handle_t)dev;
+    nb.p.device = devh;
     nb.p.info.ptr = (void *)(uintptr_t)(WMTR_REF_EXTRA | sizeof nb.p);
     nb.info.length = blob_size[blob] + WMTR_PAGE;
     nb.info.options = WMTResourceStorageModeShared;
@@ -636,6 +652,141 @@ test_hostile_requests(id<MTLDevice> dev) {
     CHECK(st == 0, "newBuffer inside its arena blob: status %x", st);
     /* kept alive: its deallocator would hand the client a free range the client never allocated */
   }
+}
+
+/* ---------------- hostile handles: every host object goes through the context's handle table ---------------- */
+/* A guest that names objects itself: random and forged values, raw host pointers, stale handles of freed objects,
+ * handles of the wrong kind, extra releases, handle fields disguised as relocations, pointer fields that were not
+ * relocated, and cyclic command lists are refused (STATUS_INVALID_HANDLE) without executing anything and without
+ * hurting the process; legitimate handles keep working. */
+static uint32_t
+raw_call(uint16_t call, void *params, uint32_t size, const uint32_t *relocs, uint16_t n_reloc, uint32_t extra_bytes) {
+  return raw_request(call, size, size + extra_bytes, relocs, n_reloc, NULL, 0, params, size + extra_bytes, NULL);
+}
+
+static void
+test_hostile_handles(id<MTLDevice> dev, obj_handle_t devh) {
+  const uint32_t inval_handle = 0xC0000008;
+  uint64_t refused0 = wmtr_host_refused(H);
+  /* call 39 (MTLTexture_pixelFormat) takes a texture: f_pixelformat answers 70 for anything it gets */
+  obj_handle_t texh = HK(0x9100, TEXTURE);
+  struct unixcall_generic_obj_uint64_ret q = {texh, 0};
+  CHECK(raw_call(39, &q, sizeof q, NULL, 0, 0) == 0, "a valid texture handle was refused");
+  /* random values, forged tags, raw host pointers, other indices / generations of a valid handle */
+  srandom(7);
+  int accepted = 0;
+  for (int i = 0; i < 20000; i++) {
+    uint64_t v;
+    switch (i % 6) {
+    case 0: v = ((uint64_t)random() << 33) ^ ((uint64_t)random() << 2) ^ random(); break;
+    case 1: v = WMTR_OBJ_TAG | ((uint64_t)random() & 0xffffffffffffull); break;
+    case 2: v = texh ^ (1ull << (random() % 48)); break;                         /* one bit of index or generation */
+    case 3: v = (uint64_t)(uintptr_t)dev + (random() % 64) * 8; break;          /* host pointers */
+    case 4: v = WMTR_HANDLE_TAG | ((uint64_t)random() & 0xffffffffffffull); break; /* client-assigned tag */
+    default: v = devh; break;                                                    /* a device is not a texture */
+    }
+    if (v == texh) continue;
+    struct unixcall_generic_obj_uint64_ret f = {v, 0};
+    if (raw_call(39, &f, sizeof f, NULL, 0, 0) != inval_handle) accepted++;
+  }
+  CHECK(accepted == 0, "%d forged texture handles accepted", accepted);
+  /* every call, every forged receiver: refused or harmless, never a fault */
+  for (uint16_t c = 2; c < WMTR_NCALLS; c++) {
+    if (c == 5) continue; /* the fault test's implementation */
+    uint64_t params[64] = {0};
+    for (int k = 0; k < 64; k++) params[k] = WMTR_OBJ_TAG | ((uint64_t)random() & 0xffffffffffull);
+    raw_call(c, params, sizeof params, NULL, 0, 0);
+  }
+  struct unixcall_generic_obj_uint64_ret alive = {texh, 0};
+  CHECK(raw_call(39, &alive, sizeof alive, NULL, 0, 0) == 0, "executor refuses valid calls after forged ones (faulted)");
+  /* stale: a released buffer's handle names nothing, also after its slot is reused under a new generation */
+  struct WMTBufferInfo bi = {4096, WMTResourceStorageModeShared, {NULL}, 0};
+  struct unixcall_mtldevice_newbuffer nb = {devh, {&bi}, 0};
+  CHECK(remote(18, &nb) == 0 && nb.ret && wmtr_host_debug_kind(H, nb.ret) == WMTR_K_BUFFER, "newBuffer for the stale test");
+  obj_handle_t bh = nb.ret;
+  CHECK(remote(0, &bh) == 0, "retain"); /* the guest now owns two references */
+  remote(1, &bh); remote(1, &bh);
+  struct unixcall_generic_obj_uint64_ret sync = {texh, 0}; remote(39, &sync);
+  CHECK(OBJ(bh) == 0, "buffer handle still names an object after its last release");
+  CHECK(raw_call(1, &bh, 8, NULL, 0, 0) == inval_handle, "third release of a two-reference buffer accepted");
+  struct unixcall_mtlbuffer_updatecontents uc = {bh, 0, {NULL}, 0};
+  CHECK(raw_call(107, &uc, sizeof uc, NULL, 0, 0) == inval_handle, "stale buffer handle accepted");
+  {
+    obj_handle_t first = 0, reused = 0;
+    for (int i = 0; i < 6000 && !reused; i++) {
+      NSObject *o = [[NSObject alloc] init];
+      obj_handle_t hh = HO(o);
+      [o release]; /* deallocated: the entry is freed */
+      if (!first) first = hh;
+      else if (((hh ^ first) & (WMTR_OBJ_MAX - 1)) == 0) reused = hh;
+    }
+    CHECK(reused && reused != first && OBJ(first) == 0, "slot reuse: first %llx reused %llx", first, reused);
+  }
+  /* over-release of an object the guest got +0 (not owned): refused, object alive */
+  {
+    NSObject *o = [[NSObject alloc] init];
+    obj_handle_t oh = HO(o);
+    CHECK(raw_call(1, &oh, 8, NULL, 0, 0) == inval_handle && [o retainCount] == 1, "release of an unowned object accepted");
+    [o release];
+  }
+  /* wrong kind through every handle field of a struct: a texture where newBuffer wants a device */
+  struct WMTBufferInfo bi2 = {4096, WMTResourceStorageModeShared, {NULL}, 0};
+  struct unixcall_mtldevice_newbuffer nb2 = {texh, {&bi2}, 0};
+  CHECK(remote(18, &nb2) == inval_handle && !nb2.ret, "newBuffer on a texture handle: ret %llx", nb2.ret);
+  /* a handle field disguised as a relocation (it would become a pointer into the request) */
+  {
+    struct { struct unixcall_generic_obj_uint64_ret p; uint64_t fake[4]; } r = {{WMTR_REF_EXTRA | 16, 0}, {0}};
+    uint32_t rel = 0;
+    CHECK(raw_call(39, &r, sizeof r.p, &rel, 1, sizeof r.fake) == inval_handle, "relocated handle field accepted");
+  }
+  /* a pointer field the request did not relocate: a host address the implementation would write */
+  {
+    static char target[32] = "untouched";
+    struct unixcall_nsstring_getcstring g = {HK("metal string", STRING), (uint64_t)(uintptr_t)target, sizeof target, 4, 0};
+    CHECK(raw_call(8, &g, sizeof g, NULL, 0, 0) == inval_handle && !strcmp(target, "untouched"),
+          "unrelocated pointer accepted (target '%s')", target);
+  }
+  /* command lists: a forged buffer in a node, a cycle, a node pointer that was not relocated */
+  {
+    obj_handle_t ench = HK(0x1235, ENC_RENDER), bufh = HK(0x9200, BUFFER);
+    struct { struct unixcall_generic_obj_cmd_noret p; struct wmtcmd_render_setbuffer a, b; } l;
+    memset(&l, 0, sizeof l);
+    uint32_t oa = sizeof l.p, ob = oa + sizeof l.a;
+    l.p.encoder = ench; l.p.cmd_head.ptr = (void *)(uintptr_t)(WMTR_REF_EXTRA | (oa - 0));
+    l.a.type = WMTRenderCommandSetVertexBuffer; l.a.buffer = bufh; l.a.next.ptr = (void *)(uintptr_t)(WMTR_REF_EXTRA | ob);
+    l.b.type = WMTRenderCommandSetFragmentBuffer; l.b.buffer = bufh;
+    uint32_t rel[2] = {offsetof(struct unixcall_generic_obj_cmd_noret, cmd_head), oa + offsetof(struct wmtcmd_render_setbuffer, next)};
+    uint32_t extra = sizeof l - sizeof l.p;
+    encode_cmds = 0;
+    CHECK(raw_call(38, &l, sizeof l.p, rel, 2, extra) == 0 && encode_cmds == 2, "valid two-node list: %u commands", encode_cmds);
+    l.b.buffer = WMTR_OBJ_TAG | 0xfffff1; encode_cmds = 0;
+    CHECK(raw_call(38, &l, sizeof l.p, rel, 2, extra) == inval_handle && encode_cmds == 0, "forged buffer in a command accepted");
+    l.b.buffer = texh; /* a texture where a buffer belongs */
+    CHECK(raw_call(38, &l, sizeof l.p, rel, 2, extra) == inval_handle && encode_cmds == 0, "texture as a buffer accepted");
+    l.b.buffer = bufh;
+    uint32_t rel3[3] = {rel[0], rel[1], ob + offsetof(struct wmtcmd_render_setbuffer, next)};
+    l.b.next.ptr = (void *)(uintptr_t)(WMTR_REF_EXTRA | oa); /* b -> a: a cycle the implementation would loop on */
+    CHECK(raw_call(38, &l, sizeof l.p, rel3, 3, extra) == inval_handle && encode_cmds == 0, "cyclic command list accepted");
+    l.b.next.ptr = (void *)(uintptr_t)&l.a; /* a raw host pointer as the next node */
+    CHECK(raw_call(38, &l, sizeof l.p, rel, 2, extra) == inval_handle && encode_cmds == 0, "unrelocated next pointer accepted");
+  }
+  /* the reply never carries a host pointer: the caller's handles and references come back */
+  {
+    struct WMTBufferInfo bi3 = {4096, WMTResourceStorageModeShared, {NULL}, 0};
+    struct unixcall_mtldevice_newbuffer nb3 = {devh, {&bi3}, 0};
+    remote(18, &nb3);
+    struct wmtr_slot *sl = (struct wmtr_slot *)((uint8_t *)blob_base[0] + WMTR_SLOTS_OFFSET);
+    int leak = 0;
+    for (int s = 0; s < WMTR_SLOTS; s++)
+      for (int w = 0; w < 64; w++) {
+        uint64_t v; memcpy(&v, sl[s].data + 8 * w, 8);
+        if (v && (v == (uint64_t)(uintptr_t)dev || v == OBJ(nb3.ret) ||
+                  (v >= (uint64_t)(uintptr_t)blob_base[0] && v < (uint64_t)(uintptr_t)blob_base[0] + blob_size[0]))) leak++;
+      }
+    CHECK(!leak && nb3.device == devh, "%d host pointers in reply slots", leak);
+    obj_handle_t h3 = nb3.ret; remote(1, &h3);
+  }
+  printf("hostile handles: %llu requests refused\n", (unsigned long long)(wmtr_host_refused(H) - refused0));
 }
 
 int main(void) {
@@ -663,16 +814,21 @@ int main(void) {
     }
     /* 1. output buffer through a uint64 pointer field */
     char a[32] = {0}, b[32] = {0};
+    { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); } /* connects: the executor exists */
     struct unixcall_nsstring_getcstring pa = {(obj_handle_t)"metal string", (uint64_t)(uintptr_t)a, sizeof a, 4, 0}, pb = pa;
     pb.buffer_ptr = (uint64_t)(uintptr_t)b;
+    pb.str = HK("metal string", STRING);
     native(8, &pa); remote(8, &pb);
-    CHECK(!strcmp(a, b) && pb.ret == 1 && pb.buffer_ptr == (uint64_t)(uintptr_t)b, "getCString: '%s' vs '%s'", a, b);
+    CHECK(!strcmp(a, b) && pb.ret == 1 && pb.buffer_ptr == (uint64_t)(uintptr_t)b && pb.str == HK("metal string", STRING),
+          "getCString: '%s' vs '%s'", a, b);
     if (trigger_mode) usleep(200000); /* the first call started the statistics thread; it sees the trigger */
 
     /* 2. C-string input in a uint64 arg, value result */
     struct unixcall_generic_obj_uint64_obj_ret fa = {5, (uint64_t)(uintptr_t)"vertex_main", 0}, fb = fa;
+    fb.handle = HK(5, LIBRARY);
     native(26, &fa); remote(26, &fb);
-    CHECK(fa.ret == fb.ret, "newFunction ret %llu vs %llu", fa.ret, fb.ret);
+    CHECK(fa.ret == OBJ(fb.ret) && (fb.ret & WMTR_REF_MASK) == WMTR_OBJ_TAG && wmtr_host_debug_kind(H, fb.ret) == WMTR_K_FUNCTION,
+          "newFunction ret %llx vs %llx", fa.ret, fb.ret);
 
     /* 3. command list with embedded pointers (async call, then a sync call orders it) */
     struct WMTViewport vps[3] = {{0, 0, 640, 480, 0, 1}, {0, 0, 320, 240, 0, 1}, {0, 0, 7, 7, 0, 1}};
@@ -683,6 +839,7 @@ int main(void) {
     cv.next.ptr = &cbytes; cbytes.next.ptr = &nop; nop.next.ptr = NULL;
     struct unixcall_generic_obj_cmd_noret ce = {0x1234, {&cv}};
     native(38, &ce);
+    ce.encoder = HK(0x1234, ENC_RENDER);
     uint64_t n_sum = encode_sum; uint32_t n_cmds = encode_cmds, n_vp = encode_vp;
     encode_sum = 0; encode_cmds = 0; encode_vp = 0;
     remote(38, &ce);
@@ -702,13 +859,14 @@ int main(void) {
       struct unixcall_generic_obj_cmd_noret cl = {0x1234, {&cmds[0]}};
       encode_sum = 0; encode_cmds = 0; native(38, &cl);
       uint64_t s1 = encode_sum; uint32_t c1 = encode_cmds;
+      cl.encoder = HK(0x1234, ENC_RENDER);
       encode_sum = 0; encode_cmds = 0; NTSTATUS st = remote(38, &cl); remote(26, &fb);
       CHECK(st == 0 && s1 == encode_sum && c1 == encode_cmds, "long list st=%x sum %llu/%llu cmds %u/%u", st, s1, encode_sum, c1, encode_cmds);
     }
     /* 3c. zero-length output array (SM50GetArgumentsInfo of a shader without constant buffers) */
     {
       struct MTL_SM50_SHADER_ARGUMENT none[1];
-      struct sm50_get_arguments_info_params ga = {(sm50_shader_t)0x77, none, none};
+      struct sm50_get_arguments_info_params ga = {(sm50_shader_t)HK(0x77, SM50_SHADER), none, none};
       NTSTATUS st = remote(88, &ga);
       CHECK(st == 0 && ga.constant_buffers == none, "zero-length output st=%x", st);
     }
@@ -719,20 +877,25 @@ int main(void) {
     struct unixcall_mtltexture_replaceregion rr = {0}; rr.texture = 0x9000; rr.size = (struct WMTSize){W, Hh, 1};
     rr.data.ptr = src; rr.bytes_per_row = W * 4; rr.level = 3;
     native(45, &rr); uint64_t n_rs = replace_sum; replace_sum = 0;
+    rr.texture = HK(0x9000, TEXTURE);
     remote(45, &rr); remote(26, &fb);
     CHECK(n_rs == replace_sum, "replaceRegion checksum %llu vs %llu", n_rs, replace_sum);
-    rr.data.ptr = o1; native(145, &rr); rr.data.ptr = o2; remote(145, &rr);
+    rr.texture = 0x9000; rr.data.ptr = o1; native(145, &rr);
+    rr.texture = HK(0x9000, TEXTURE); rr.data.ptr = o2; remote(145, &rr);
     CHECK(!memcmp(o1, o2, W * 4 * Hh) && rr.data.ptr == o2, "getBytes output differs");
 
     /* 5. newBuffer: client arena memory backs a real MTLBuffer; CPU writes are GPU-visible
           (blit to a private buffer and back); release returns the range through the free queue */
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+    obj_handle_t devh = HO(dev);
+    CHECK(wmtr_host_debug_kind(H, devh) == WMTR_K_DEVICE, "MTLDevice classified as kind %d", wmtr_host_debug_kind(H, devh));
     struct WMTBufferInfo bi = {100000, WMTResourceStorageModeShared, {NULL}, 0};
-    struct unixcall_mtldevice_newbuffer nb = {(obj_handle_t)dev, {&bi}, 0};
+    struct unixcall_mtldevice_newbuffer nb = {devh, {&bi}, 0};
     remote(18, &nb);
     CHECK(nb.ret && bi.memory.ptr && bi.gpu_address, "newBuffer ret %llx mem %p gpu %llx", nb.ret, bi.memory.ptr, bi.gpu_address);
     if (nb.ret && bi.memory.ptr) {
-      id<MTLBuffer> buf = (id<MTLBuffer>)nb.ret;
+      id<MTLBuffer> buf = (id<MTLBuffer>)OBJ(nb.ret);
+      CHECK(wmtr_host_debug_kind(H, nb.ret) == WMTR_K_BUFFER, "MTLBuffer classified as kind %d", wmtr_host_debug_kind(H, nb.ret));
       memset(bi.memory.ptr, 0x5a, 100000);
       id<MTLBuffer> tmp = [dev newBufferWithLength:100000 options:MTLResourceStorageModeShared];
       id<MTLCommandQueue> q = [dev newCommandQueue];
@@ -755,7 +918,7 @@ int main(void) {
     {
       uint8_t *own; posix_memalign((void **)&own, 16384, 65536); memset(own, 0x3c, 65536);
       struct WMTBufferInfo ci = {65536, WMTResourceStorageModeShared, {own}, 0};
-      struct unixcall_mtldevice_newbuffer cb2 = {(obj_handle_t)dev, {&ci}, 0};
+      struct unixcall_mtldevice_newbuffer cb2 = {devh, {&ci}, 0};
       remote(18, &cb2);
       CHECK(cb2.ret && ci.memory.ptr && ci.memory.ptr != own && ((uint8_t *)ci.memory.ptr)[65535] == 0x3c,
             "caller-placed buffer ret %llx mem %p", cb2.ret, ci.memory.ptr);
@@ -770,7 +933,7 @@ int main(void) {
       obj_handle_t bh[NB];
       for (int i = 0; i < NB; i++) {
         struct WMTBufferInfo pi = {60u << 20, WMTResourceStorageModeShared, {NULL}, 0};
-        struct unixcall_mtldevice_newbuffer pb = {(obj_handle_t)dev, {&pi}, 0};
+        struct unixcall_mtldevice_newbuffer pb = {devh, {&pi}, 0};
         remote(18, &pb);
         bh[i] = pb.ret;
         if (pi.memory.ptr) memset(pi.memory.ptr, i + 1, 60u << 20);
@@ -792,7 +955,7 @@ int main(void) {
       CHECK(fp_after + (256ull << 20) <= fp_peak, "footprint %llu -> %llu MiB", fp_peak >> 20, fp_after >> 20);
       /* the arena still works: a released blob number is reused */
       struct WMTBufferInfo ri = {100u << 20, WMTResourceStorageModeShared, {NULL}, 0};
-      struct unixcall_mtldevice_newbuffer rb = {(obj_handle_t)dev, {&ri}, 0};
+      struct unixcall_mtldevice_newbuffer rb = {devh, {&ri}, 0};
       remote(18, &rb);
       CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
       if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
@@ -812,8 +975,9 @@ int main(void) {
       struct unixcall_generic_obj_ret ar = {0};
       remote(53, &ar); /* autoreleased into the pool */
       struct WMTRenderPassInfo rpi; memset(&rpi, 0, sizeof rpi); rpi.render_target_width = 640;
-      struct unixcall_generic_obj_uint64_obj_ret re = {0x77, (uint64_t)(uintptr_t)&rpi, 0}, ce = {0x77, 1, 0}, bad = {0x77, 99, 0};
-      struct unixcall_generic_obj_obj_ret be = {0x77, 0};
+      obj_handle_t cbh = HK(0x7700, CMDBUF);
+      struct unixcall_generic_obj_uint64_obj_ret re = {cbh, (uint64_t)(uintptr_t)&rpi, 0}, ce = {cbh, 1, 0}, bad = {cbh, 99, 0};
+      struct unixcall_generic_obj_obj_ret be = {cbh, 0};
       remote(32, &re);
       struct unixcall_generic_obj_noret end = {re.ret}; remote(33, &end);
       remote(31, &ce);
@@ -862,7 +1026,7 @@ int main(void) {
       struct sm50_compile_params cp = {.shader = 0, .args = &cm, .func_name = "main", .bitcode = &bc, .error = &er};
       native(76, &cp); uint64_t n0 = sm50_rs_sum[0], n1 = sm50_rs_sum[1];
       bc = 0; NTSTATUS st = remote(76, &cp);
-      CHECK(st == 0 && bc == (sm50_bitcode_t)(uintptr_t)0x5150 && sm50_rs_len[0] == 300 && sm50_rs_len[1] == 77 &&
+      CHECK(st == 0 && OBJ((uint64_t)(uintptr_t)bc) == 0x5150 && wmtr_host_debug_kind(H, (uint64_t)(uintptr_t)bc) == WMTR_K_SM50_BITCODE && sm50_rs_len[0] == 300 && sm50_rs_len[1] == 77 &&
             sm50_rs_sum[0] == n0 && sm50_rs_sum[1] == n1, "root signature args: st=%x len %u/%u", st, sm50_rs_len[0], sm50_rs_len[1]);
     }
     { /* a +1 out-error lives exactly as long as the caller holds it: wmtr neither keeps nor drops it */
@@ -878,7 +1042,7 @@ int main(void) {
     { /* WMTR_FRAMES: a presenting command buffer adds one line when it completes */
       id<MTLCommandQueue> q = [MTLCreateSystemDefaultDevice() newCommandQueue];
       id<MTLCommandBuffer> cb = [q commandBuffer];
-      struct unixcall_generic_obj_obj_noret pd = {.handle = (obj_handle_t)cb, .arg = 0};
+      struct unixcall_generic_obj_obj_noret pd = {.handle = HO(cb), .arg = 0};
       remote(47, &pd);
       struct unixcall_generic_obj_uint64_ret pf2 = {0}; remote(39, &pf2); /* the async present is done */
       [cb commit]; [cb waitUntilCompleted];
@@ -890,14 +1054,17 @@ int main(void) {
       unlink(frames_path);
     }
     { /* views: ReleaseMetalView releases once; views the client never released go on destroy */
-      struct unixcall_create_metal_view_from_hwnd v1 = {.hwnd = 1, .device = 2}, v2 = {.hwnd = 3, .device = 2};
-      CHECK(remote(72, &v1) == 0 && remote(72, &v2) == 0 && v1.ret_view && v2.ret_view && v1.ret_layer == 0x77,
+      obj_handle_t fdev = HK(2, DEVICE);
+      struct unixcall_create_metal_view_from_hwnd v1 = {.hwnd = 1, .device = fdev}, v2 = {.hwnd = 3, .device = fdev};
+      CHECK(remote(72, &v1) == 0 && remote(72, &v2) == 0 && v1.ret_view && v2.ret_view &&
+            wmtr_host_debug_kind(H, v1.ret_layer) == WMTR_K_LAYER && wmtr_host_debug_kind(H, v1.ret_view) == WMTR_K_VIEW,
             "CreateMetalViewFromHWND %llx %llx", v1.ret_view, v2.ret_view);
+      uint64_t rv1 = OBJ(v1.ret_view), rv2 = OBJ(v2.ret_view);
       struct unixcall_generic_obj_noret r1 = {.handle = v1.ret_view};
       remote(73, &r1);
       remote(73, &r1); /* a second release of the same view is ignored */
       struct unixcall_generic_obj_uint64_ret pf = {0}; remote(39, &pf); /* sync call: the releases above are done */
-      CHECK(n_released == 1 && released[0] == v1.ret_view, "ReleaseMetalView: %d releases", n_released);
+      CHECK(n_released == 1 && released[0] == rv1 && !OBJ(v1.ret_view), "ReleaseMetalView: %d releases", n_released);
       /* render-pass profile (rows 220-239, with the statistics): a 4x MSAA pass that stores its samples and
        * resolves, and the GPU time of its committed command buffer */
       id<MTLDevice> pdev = MTLCreateSystemDefaultDevice();
@@ -910,16 +1077,17 @@ int main(void) {
       id<MTLCommandQueue> pq = [pdev newCommandQueue];
       id<MTLCommandBuffer> pcb = [pq commandBuffer];
       struct WMTRenderPassInfo pinfo; memset(&pinfo, 0, sizeof pinfo);
-      pinfo.colors[0].texture = (obj_handle_t)msaa; pinfo.colors[0].load_action = WMTLoadActionClear;
-      pinfo.colors[0].store_action = WMTStoreActionStoreAndMultisampleResolve; pinfo.colors[0].resolve_texture = (obj_handle_t)res;
-      struct unixcall_generic_obj_uint64_obj_ret rce = {.handle = (obj_handle_t)pcb, .arg = (uint64_t)(uintptr_t)&pinfo};
+      pinfo.colors[0].texture = HO(msaa); pinfo.colors[0].load_action = WMTLoadActionClear;
+      pinfo.colors[0].store_action = WMTStoreActionStoreAndMultisampleResolve; pinfo.colors[0].resolve_texture = HO(res);
+      struct unixcall_generic_obj_uint64_obj_ret rce = {.handle = HO(pcb), .arg = (uint64_t)(uintptr_t)&pinfo};
       remote(32, &rce);
-      struct unixcall_generic_obj_noret cm = {.handle = (obj_handle_t)pcb};
+      struct unixcall_generic_obj_noret cm = {.handle = HO(pcb)};
       remote(12, &cm);
       { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); }
       [pcb waitUntilCompleted];
       usleep(20000); /* the completion handler runs after waitUntilCompleted returns */
       test_hostile_requests(dev);
+      test_hostile_handles(dev, devh);
       /* a call that faults (bad handle) fails, the process lives, and the client is refused from then on */
       struct unixcall_generic_obj_uint64_ret fz = {0};
       NTSTATUS fs = remote(5, &fz);
@@ -952,7 +1120,7 @@ int main(void) {
         wmtr_host_set_spin(H, WMTR_HOST_SPIN_US_DEFAULT * 1000);
       }
       wmtr_host_destroy(H);
-      CHECK(n_released == 2 && released[1] == v2.ret_view, "destroy did not release the leftover view (%d releases)", n_released);
+      CHECK(n_released == 2 && released[1] == rv2, "destroy did not release the leftover view (%d releases)", n_released);
       /* WMTR_CALLSTATS: destroy wrote a snapshot; call 39 (sync, above) is in it with its sync count */
       FILE *sf = fopen(stats_path, "r");
       char sl[256]; int found = 0;

@@ -16,7 +16,7 @@
 #define WMTR_PROTO_H
 #include <stdint.h>
 
-#define WMTR_VERSION 2 /* 2: client-assigned handles (WMTR_F_CLIENT_HANDLE) */
+#define WMTR_VERSION 3 /* 2: client-assigned handles (WMTR_F_CLIENT_HANDLE); 3: object handles (wmtr_handles.h) */
 #define WMTR_PAGE 16384u                 /* host page size on Apple silicon */
 #define WMTR_RING_BYTES (8u << 20)       /* request ring */
 #define WMTR_SLOTS 64                    /* reply slots (one per client thread) */
