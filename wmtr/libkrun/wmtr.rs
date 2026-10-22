@@ -449,7 +449,7 @@ mod tests {
         // SAFETY: offsets come from the host library's own layout.
         unsafe {
             *(base as *mut u32) = 0x52544d57; // magic
-            *(base.add(4) as *mut u32) = 1; // version
+            *(base.add(4) as *mut u32) = 3; // version (WMTR_VERSION, wmtr_proto.h)
         }
         let cmd = |ty: u32, slot: u32, seq: u64| {
             let mut v = Vec::with_capacity(CMD_SIZE);
