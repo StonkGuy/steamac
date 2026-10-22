@@ -371,10 +371,11 @@ static void test_vr(id<MTLDevice> dev) {
     id<MTLCommandQueue> gq = [dev newCommandQueue];
     id<MTLCommandBuffer> gcb = [gq commandBuffer];
     [gcb encodeWaitForEvent:gate value:1];
+    obj_handle_t gcbh = HO(gcb), evh = HO(ev); /* outside the timed window */
     sub.info.frame_id = 30; sub.info.wait_value = 2;
     remote(146, &sub); remote(39, &sync);
     usleep(60000);
-    struct unixcall_generic_obj_obj_uint64_noret se = {HO(gcb), HO(ev), 2};
+    struct unixcall_generic_obj_obj_uint64_noret se = {gcbh, evh, 2};
     remote(17, &se); remote(39, &sync);
     [gcb commit];
     usleep(60000);
