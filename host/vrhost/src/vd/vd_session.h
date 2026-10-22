@@ -111,6 +111,8 @@ public:
 	bool send_command(vd::Msg);
 	// The last game the headset picked in its Games tab (seq counts the picks; 0 = none yet).
 	SessionControl::AppRequest app_request() const;
+	// Installed VR apps the guest reports, offered in the Games tab after VdConfig::applications (duplicates once).
+	void set_installed_apps(std::vector<uint64_t> steam_ids);
 
 private:
 	struct impl;
@@ -131,6 +133,11 @@ public:
 	uint32_t bitrate_bps() const override { return s.bitrate_bps(); }
 	Counters counters() const override;
 	AppRequest app_request() const override { return s.app_request(); }
+	bool set_installed_apps(const std::vector<uint64_t> & ids) override
+	{
+		s.set_installed_apps(ids);
+		return true;
+	}
 
 private:
 	VdSession & s;

@@ -306,7 +306,10 @@ do {
     let progressPort = try ProgressPort()
     // Log bundles requested by Report a Problem arrive on the same port.
     let guestLogs = GuestLogs(port: progressPort)
-    progressPort.start { line in if !guestLogs.handle(line) { progress.guestLine(line) } }
+    progressPort.start { line in
+        if MainActor.assumeIsolated({ VRRelay.current?.guestLine(line) }) == true { return }
+        if !guestLogs.handle(line) { progress.guestLine(line) }
+    }
     progress.onRebootIntent = {
         // Tell the supervisor to boot again once libkrun exits; remember where the window was
         // (unless Settings changed the default window size: then the next boot opens at that).

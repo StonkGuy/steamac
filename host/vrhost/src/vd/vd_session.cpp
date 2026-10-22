@@ -201,6 +201,7 @@ struct VdSession::impl
 
 	mutable std::mutex m; // channels, settings, headset state
 	SessionControl::AppRequest app_request; // under m
+	std::vector<uint64_t> installed_apps;   // under m (guest's installed VR apps)
 	std::array<std::shared_ptr<Channel>, channel_count> ch;
 	Settings user, mobile, streamer;
 	std::optional<HeadsetInfo> info;
@@ -727,18 +728,25 @@ struct VdSession::impl
 			apply_headset();
 	}
 
-	// VD-FACT(games-list): the offered apps whose id is a Steam app id. running stays 0: the guest decides that
-	// (launch-vr does not start a game twice).
+	// VD-FACT(games-list): the offered apps whose id is a Steam app id, then the guest's installed VR apps (each id
+	// once). running stays 0: the guest decides that (launch-vr does not start a game twice).
 	std::vector<GameEntry> offered_games() const
 	{
 		std::vector<GameEntry> out;
+		auto add = [&](uint64_t v) {
+			if (std::ranges::none_of(out, [&](auto & e) { return e.id == v; }))
+				out.push_back({GamePlatform::steam, v, false});
+		};
 		for (auto & [id, name]: cfg.applications)
 		{
 			char * end = nullptr;
 			unsigned long long v = std::strtoull(id.c_str(), &end, 10);
 			if (not id.empty() and *end == 0 and v > 0)
-				out.push_back({GamePlatform::steam, uint64_t(v), false});
+				add(v);
 		}
+		std::lock_guard lock(m);
+		for (auto v: installed_apps)
+			add(v);
 		return out;
 	}
 
@@ -1432,6 +1440,17 @@ bool VdSession::send_command(Msg m)
 		return false;
 	p->stats.commands_sent++;
 	return true;
+}
+
+void VdSession::set_installed_apps(std::vector<uint64_t> ids)
+{
+	std::erase(ids, uint64_t(0));
+	size_t n = ids.size();
+	{
+		std::lock_guard lock(p->m);
+		p->installed_apps = std::move(ids);
+	}
+	p->log("vd: " + std::to_string(n) + " installed VR apps from the guest");
 }
 
 SessionControl::AppRequest VdSession::app_request() const

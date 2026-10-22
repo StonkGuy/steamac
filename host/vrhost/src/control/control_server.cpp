@@ -141,6 +141,28 @@ std::string ControlServer::handle(const std::string & req)
 			return error("refresh: no headset connected, or it does not offer this rate");
 		return status();
 	}
+	if (req == "apps" or req.starts_with("apps "))
+	{
+		// installed VR apps from the guest (launcher relay): Steam app ids, space separated
+		std::vector<uint64_t> ids;
+		for (size_t i = 4; i < req.size();)
+		{
+			if (req[i] == ' ')
+			{
+				i++;
+				continue;
+			}
+			char * end = nullptr;
+			unsigned long long v = strtoull(req.c_str() + i, &end, 10);
+			if (end == req.c_str() + i or (*end and *end != ' ') or v == 0 or req[i] == '-' or req[i] == '+')
+				return error("apps: Steam app ids");
+			ids.push_back(v);
+			i = end - req.c_str();
+		}
+		if (not control.set_installed_apps(ids))
+			return error("apps: not supported by this adapter");
+		return status();
+	}
 	if (req == "unpair-all" or req.starts_with("unpair "))
 	{
 		std::string name = req == "unpair-all" ? "" : req.substr(7);

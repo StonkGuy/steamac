@@ -3,7 +3,8 @@
 // the games list (RequestGames) and gets the offered Steam apps (Games: platform, app id, running); it picks one
 // (LaunchGame) and the pick shows once in the control socket's app_request, which the launcher turns into exactly
 // one guest `launch-vr <id>` (the guest agent then skips a game that already runs). Picks of games that were not
-// offered, or of another platform, change nothing. Discovery key: random per run (never a real key).
+// offered, or of another platform, change nothing. The guest's installed VR apps (control socket "apps", sent by the
+// launcher's relay from the guest agent's list-vr-apps) follow the configured apps, each id once. Discovery key: random per run (never a real key).
 #include "check.h"
 #include "control/control_server.h"
 #include "fake_vd_client.h"
@@ -45,6 +46,10 @@ int main()
 	VdControl control(session);
 	ControlServer ctl(dir + "/control.sock", control);
 	CHECK(ctl.handle("status").find("\"app_request\":{\"id\":\"\",\"seq\":0}") != std::string::npos);
+	// installed VR apps from the guest: malformed lists are refused and change nothing
+	for (const char * bad: {"apps x", "apps 12a", "apps 0", "apps -5", "apps 1,2"})
+		CHECK(ctl.handle(bad).find("\"error\":\"apps: Steam app ids\"") != std::string::npos);
+	CHECK(ctl.handle("apps 620980 2370570").find("\"error\"") == std::string::npos); // 620980 is configured too
 
 	std::atomic<bool> stop{false};
 	std::thread producer([&] {
@@ -96,6 +101,7 @@ int main()
 	        {2, uint8_t(Msg::request_games), std::string()},
 	        {4, uint8_t(Msg::request_games), std::string(1, '\1')}, // rescan flag
 	        {6, uint8_t(Msg::launch_game), id(GamePlatform::steam, 438100)},
+	        {7, uint8_t(Msg::launch_game), id(GamePlatform::steam, 2370570)},      // installed VR app
 	        {8, uint8_t(Msg::launch_game), id(GamePlatform::steam, 999999)},       // not offered
 	        {8, uint8_t(Msg::launch_game), id(GamePlatform::oculus_rift, 620980)}, // other platform
 	        {8, uint8_t(Msg::launch_game), std::string("\1\0", 2)},                // truncated
@@ -106,7 +112,7 @@ int main()
 	CHECK(r.error.empty());
 	std::this_thread::sleep_for(std::chrono::milliseconds(200)); // the last control messages reach the host
 
-	// --- the games list: once per request, the two Steam apps, in order, not running -------------------------
+	// --- the games list: once per request, the two configured Steam apps then the installed one, not running -
 	int lists = 0;
 	for (auto & [type, payload]: r.control_messages)
 	{
@@ -118,11 +124,12 @@ int main()
 		if (not g)
 			continue;
 		printf("games list: %zu entries\n", g->size());
-		CHECK(g->size() == 2);
-		if (g->size() == 2)
+		CHECK(g->size() == 3);
+		if (g->size() == 3)
 		{
 			CHECK((*g)[0].platform == GamePlatform::steam and (*g)[0].id == 438100 and not(*g)[0].running);
 			CHECK((*g)[1].platform == GamePlatform::steam and (*g)[1].id == 620980 and not(*g)[1].running);
+			CHECK((*g)[2].platform == GamePlatform::steam and (*g)[2].id == 2370570 and not(*g)[2].running);
 		}
 	}
 	CHECK(lists == 2);
@@ -130,12 +137,12 @@ int main()
 	std::vector<GameEntry> one{{GamePlatform::steam, 438100, false}};
 	CHECK((games_payload(one) == std::vector<uint8_t>{0, 1, 1, 0, 0, 0, 0, 0, 0x06, 0xAF, 0x54, 0}));
 
-	// --- the pick: one launch request for VRChat, nothing for the rest ----------------------------------------
+	// --- the picks: VRChat, then the installed app; nothing for the rest ---------------------------------------
 	auto a = session.app_request();
 	printf("app_request: id=%s seq=%llu\n", a.id.c_str(), (unsigned long long)a.seq);
-	CHECK(a.id == "438100" and a.seq == 1);
+	CHECK(a.id == "2370570" and a.seq == 2);
 	auto st = ctl.handle("status");
-	CHECK(st.find("\"app_request\":{\"id\":\"438100\",\"seq\":1}") != std::string::npos);
+	CHECK(st.find("\"app_request\":{\"id\":\"2370570\",\"seq\":2}") != std::string::npos);
 	// the launcher's VRRelay decodes encryption + pin (required keys in the installed launcher)
 	CHECK(st.find("\"encryption\":\"") != std::string::npos and st.find("\"pin\":\"\"") != std::string::npos);
 	CHECK(session.stats().bad_messages >= 1); // the truncated LaunchGame
@@ -150,7 +157,10 @@ int main()
 			sent.push_back("launch-vr " + now.id);
 		last = now.seq;
 	}
-	CHECK(sent == std::vector<std::string>{"launch-vr 438100"});
+	CHECK(sent == std::vector<std::string>{"launch-vr 2370570"});
+
+	// an empty list (no installed VR apps) is accepted and clears them
+	CHECK(ctl.handle("apps").find("\"error\"") == std::string::npos);
 
 	stop = true;
 	producer.join();

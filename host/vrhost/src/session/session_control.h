@@ -78,5 +78,8 @@ public:
 		uint64_t seq = 0; // 0 = none yet
 	};
 	virtual AppRequest app_request() const { return {}; }
+	// Steam app ids the guest reports as installed VR apps (control socket "apps"), offered after the configured
+	// ones; an empty list clears them. False: the adapter has no app list it can extend.
+	virtual bool set_installed_apps(const std::vector<uint64_t> & steam_ids) { return false; }
 };
 } // namespace vrhost
