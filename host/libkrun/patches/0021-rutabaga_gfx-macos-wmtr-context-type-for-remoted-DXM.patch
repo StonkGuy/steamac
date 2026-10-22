@@ -226,7 +226,7 @@ new file mode 100644
 index 0000000..90b1ba1
 --- /dev/null
 +++ b/src/rutabaga_gfx/src/wmtr.rs
-@@ -0,0 +1,856 @@
+@@ -0,0 +1,874 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +//! wmtr: a virtio-gpu context type that carries DXMT's winemetal unix calls from a guest process
@@ -251,6 +251,7 @@ index 0000000..90b1ba1
 +use log::{error, info};
 +use std::collections::BTreeMap;
 +use std::collections::VecDeque;
++use std::ffi::c_char;
 +use std::ffi::c_void;
 +use std::ffi::CString;
 +use std::sync::Arc;
@@ -279,7 +280,9 @@ index 0000000..90b1ba1
 +/// below and the layout of `WmtrHostOps`. The library reports its own from
 +/// `wmtr_host_abi_version()`; any other value (or a library without it) is refused. Bump it on
 +/// every change to either.
-+const WMTR_HOST_ABI_VERSION: u32 = 1;
++const WMTR_HOST_ABI_VERSION: u32 = 2;
++/// Oldest library ABI accepted: ABI 2 only appends optional (nullable) ops to ABI 1.
++const WMTR_HOST_ABI_MIN: u32 = 1;
 +
 +/// Callbacks the context gives the executor (`struct wmtr_host_ops` in wmtr_host.h, ABI 1).
 +///
@@ -295,6 +298,12 @@ index 0000000..90b1ba1
 +    blob_ptr: extern "C" fn(*mut c_void, u32, *mut u64) -> *mut c_void,
 +    /// A reply or event is published: re-check pending fences.
 +    wake: extern "C" fn(*mut c_void, u32),
++    /// ABI 2, optional (None: the executor fails the call): view + CAMetalLayer for a window.
++    create_view: Option<extern "C" fn(*mut c_void, u64, *mut c_void, *mut u64) -> u64>,
++    /// ABI 2, optional: release a view from `create_view`.
++    release_view: Option<extern "C" fn(*mut c_void, u64)>,
++    /// ABI 2, optional (None: the client path is kept): map a client path to a host path.
++    map_path: Option<extern "C" fn(*mut c_void, *const c_char, *mut c_char, u64) -> *const c_char>,
 +}
 +
 +type HostAbiVersion = unsafe extern "C" fn() -> u32;
@@ -329,8 +338,8 @@ index 0000000..90b1ba1
 +        return None;
 +    }
 +    let version = std::mem::transmute::<*mut c_void, HostAbiVersion>(v)();
-+    if version != WMTR_HOST_ABI_VERSION {
-+        error!("wmtr: {name} has host ABI {version}, expected {WMTR_HOST_ABI_VERSION}");
++    if !(WMTR_HOST_ABI_MIN..=WMTR_HOST_ABI_VERSION).contains(&version) {
++        error!("wmtr: {name} has host ABI {version}, expected {WMTR_HOST_ABI_MIN}..={WMTR_HOST_ABI_VERSION}");
 +        return None;
 +    }
 +    let (c, k, d, p, l) = (
@@ -699,6 +708,10 @@ index 0000000..90b1ba1
 +        let ops = Box::new(WmtrHostOps {
 +            blob_ptr: cb_blob_ptr,
 +            wake: cb_wake,
++            // presentation and path mapping are the embedder's; none wired yet (calls fail cleanly)
++            create_view: None,
++            release_view: None,
++            map_path: None,
 +        });
 +        WmtrContext {
 +            shared: Arc::new(Shared {
@@ -890,6 +903,9 @@ index 0000000..90b1ba1
 +    unsafe extern "C" fn abi_current() -> u32 {
 +        WMTR_HOST_ABI_VERSION
 +    }
++    unsafe extern "C" fn abi_v1() -> u32 {
++        WMTR_HOST_ABI_MIN
++    }
 +    unsafe extern "C" fn abi_next() -> u32 {
 +        WMTR_HOST_ABI_VERSION + 1
 +    }
@@ -938,8 +954,10 @@ index 0000000..90b1ba1
 +            assert!(bind_host_lib("test", table(Some(abi_current), false, true)).is_none(), "partial API");
 +            assert!(bind_host_lib("test", table(Some(abi_current), true, false)).is_none(), "no ring layout");
 +        }
-+        // the ops struct carries exactly the two callbacks of ABI 1
-+        assert_eq!(std::mem::size_of::<WmtrHostOps>(), 2 * std::mem::size_of::<usize>());
++        // ABI 1 libraries stay accepted; ABI 2 appends three optional (nullable) callbacks
++        assert!(bind_host_lib("test", table(Some(abi_v1), true, true)).is_some(), "ABI 1");
++        assert_eq!(std::mem::size_of::<WmtrHostOps>(), 5 * std::mem::size_of::<usize>());
++        assert_eq!(std::mem::offset_of!(WmtrHostOps, create_view), 2 * std::mem::size_of::<usize>());
 +    }
 +
 +    /// Each blob id is created once and only below MAX_BLOBS: a reused id or one that truncates to
