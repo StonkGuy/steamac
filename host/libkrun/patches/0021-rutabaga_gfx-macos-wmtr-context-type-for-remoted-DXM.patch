@@ -9,9 +9,13 @@ process forwards DXMT's winemetal unix calls through a shared-memory
 ring to a host executor that runs them against Metal. The executor is a
 separate library (libwmtr_host.dylib, STEAMAC_WMTR_LIB or the default
 name) loaded with dlopen and used only if its wmtr_host_abi_version() is
-the one this patch implements (1: create, kick, progress, destroy and
-wmtr_layout, and two callbacks, blob_ptr and wake); this patch only
-carries the transport:
+one this patch implements (1: create, kick, progress, destroy and
+wmtr_layout, and two callbacks, blob_ptr and wake; 2: ABI 1 plus three
+optional callbacks appended to the ops, create_view, release_view and
+map_path, taken from the library's own wmtr_present_create_view,
+wmtr_present_release_view and wmtr_map_path when it exports them and
+left null otherwise, so the executor fails a present / keeps a path
+cleanly); this patch only carries the transport:
 
 - blobs (blob_id = ring/buffer number below 1024, checked before
   narrowing to u32; each id created once, as blobs live as long as the
@@ -63,8 +67,9 @@ complete with it, in order; reused blob ids, ids at or above 1024 (1 <<
 32, u64::MAX) and blobs over max_blob are rejected and leave the
 existing blob in place; RING on a blob 0 smaller than the ring layout
 is refused before the executor starts; a library without
-wmtr_host_abi_version, with another version, with part of the API or
-without wmtr_layout is refused; a wake delivered
+wmtr_host_abi_version, with a version outside 1..=2, with part of the
+API or without wmtr_layout is refused; an ABI 2 library gets the view
+callbacks it exports and an ABI 1 library none; a wake delivered
 while the executor is destroyed does not call into it; two WAITs of one
 EXECBUFFER (slots 0 and 62) both hold its fence; WAITs of an EXECBUFFER
 without a fence or of a refused one hold no later fence; a reply from
@@ -226,7 +231,7 @@ new file mode 100644
 index 0000000..90b1ba1
 --- /dev/null
 +++ b/src/rutabaga_gfx/src/wmtr.rs
-@@ -0,0 +1,874 @@
+@@ -0,0 +1,900 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +//! wmtr: a virtio-gpu context type that carries DXMT's winemetal unix calls from a guest process
@@ -299,12 +304,16 @@ index 0000000..90b1ba1
 +    /// A reply or event is published: re-check pending fences.
 +    wake: extern "C" fn(*mut c_void, u32),
 +    /// ABI 2, optional (None: the executor fails the call): view + CAMetalLayer for a window.
-+    create_view: Option<extern "C" fn(*mut c_void, u64, *mut c_void, *mut u64) -> u64>,
++    create_view: Option<ViewCreate>,
 +    /// ABI 2, optional: release a view from `create_view`.
-+    release_view: Option<extern "C" fn(*mut c_void, u64)>,
++    release_view: Option<ViewRelease>,
 +    /// ABI 2, optional (None: the client path is kept): map a client path to a host path.
-+    map_path: Option<extern "C" fn(*mut c_void, *const c_char, *mut c_char, u64) -> *const c_char>,
++    map_path: Option<MapPath>,
 +}
++
++type ViewCreate = extern "C" fn(*mut c_void, u64, *mut c_void, *mut u64) -> u64;
++type ViewRelease = extern "C" fn(*mut c_void, u64);
++type MapPath = extern "C" fn(*mut c_void, *const c_char, *mut c_char, u64) -> *const c_char;
 +
 +type HostAbiVersion = unsafe extern "C" fn() -> u32;
 +type HostCreate = unsafe extern "C" fn(*mut c_void, *const WmtrHostOps, *mut c_void) -> *mut c_void;
@@ -321,6 +330,11 @@ index 0000000..90b1ba1
 +    progress: HostProgress,
 +    /// Smallest blob 0 the executor accepts (its ring layout, from `wmtr_layout`).
 +    ring_bytes: u64,
++    /// ABI 2 extension, from the library's own `wmtr_present_create_view`,
++    /// `wmtr_present_release_view` and `wmtr_map_path`; None for an ABI 1 library or a missing one.
++    create_view: Option<ViewCreate>,
++    release_view: Option<ViewRelease>,
++    map_path: Option<MapPath>,
 +}
 +
 +unsafe impl Send for HostLib {}
@@ -355,8 +369,12 @@ index 0000000..90b1ba1
 +    }
 +    let (mut ring_bytes, mut data, mut slots, mut slot) = (0, 0, 0, 0);
 +    std::mem::transmute::<*mut c_void, HostLayout>(l)(&mut ring_bytes, &mut data, &mut slots, &mut slot);
++    let opt = |s: &str| if version >= 2 { Some(sym(s)).filter(|p| !p.is_null()) } else { None };
 +    Some(HostLib {
 +        ring_bytes,
++        create_view: opt("wmtr_present_create_view").map(|p| std::mem::transmute::<*mut c_void, ViewCreate>(p)),
++        release_view: opt("wmtr_present_release_view").map(|p| std::mem::transmute::<*mut c_void, ViewRelease>(p)),
++        map_path: opt("wmtr_map_path").map(|p| std::mem::transmute::<*mut c_void, MapPath>(p)),
 +        create: std::mem::transmute::<*mut c_void, HostCreate>(c),
 +        kick: std::mem::transmute::<*mut c_void, HostVoid>(k),
 +        destroy: std::mem::transmute::<*mut c_void, HostVoid>(d),
@@ -708,10 +726,9 @@ index 0000000..90b1ba1
 +        let ops = Box::new(WmtrHostOps {
 +            blob_ptr: cb_blob_ptr,
 +            wake: cb_wake,
-+            // presentation and path mapping are the embedder's; none wired yet (calls fail cleanly)
-+            create_view: None,
-+            release_view: None,
-+            map_path: None,
++            create_view: self.lib.create_view,
++            release_view: self.lib.release_view,
++            map_path: self.lib.map_path,
 +        });
 +        WmtrContext {
 +            shared: Arc::new(Shared {
@@ -807,6 +824,9 @@ index 0000000..90b1ba1
 +            destroy,
 +            progress,
 +            ring_bytes: 65536,
++            create_view: None,
++            release_view: None,
++            map_path: None,
 +        };
 +        (Wmtr { lib, fence_handler: handler.clone() }, handler)
 +    }
@@ -903,6 +923,10 @@ index 0000000..90b1ba1
 +    unsafe extern "C" fn abi_current() -> u32 {
 +        WMTR_HOST_ABI_VERSION
 +    }
++    extern "C" fn view_create(_c: *mut c_void, _hwnd: u64, _dev: *mut c_void, _layer: *mut u64) -> u64 {
++        1
++    }
++    extern "C" fn view_release(_c: *mut c_void, _view: u64) {}
 +    unsafe extern "C" fn abi_v1() -> u32 {
 +        WMTR_HOST_ABI_MIN
 +    }
@@ -941,6 +965,8 @@ index 0000000..90b1ba1
 +                    "wmtr_host_destroy" => destroy as *mut c_void,
 +                    "wmtr_host_progress" if with_progress => progress as *mut c_void,
 +                    "wmtr_layout" if with_layout => layout as *mut c_void,
++                    "wmtr_present_create_view" => view_create as *mut c_void,
++                    "wmtr_present_release_view" => view_release as *mut c_void,
 +                    _ => std::ptr::null_mut(),
 +                }
 +            }
@@ -953,9 +979,14 @@ index 0000000..90b1ba1
 +            assert!(bind_host_lib("test", table(Some(abi_next), true, true)).is_none(), "other ABI");
 +            assert!(bind_host_lib("test", table(Some(abi_current), false, true)).is_none(), "partial API");
 +            assert!(bind_host_lib("test", table(Some(abi_current), true, false)).is_none(), "no ring layout");
++            // ABI 2 binds the optional ops the library exports and leaves the missing one None
++            let l = lib.unwrap();
++            assert!(l.create_view.is_some() && l.release_view.is_some() && l.map_path.is_none());
++            // an ABI 1 library stays accepted and gets no ABI 2 ops, even if it has the symbols
++            let l = bind_host_lib("test", table(Some(abi_v1), true, true)).expect("ABI 1");
++            assert!(l.create_view.is_none() && l.release_view.is_none() && l.map_path.is_none());
 +        }
-+        // ABI 1 libraries stay accepted; ABI 2 appends three optional (nullable) callbacks
-+        assert!(bind_host_lib("test", table(Some(abi_v1), true, true)).is_some(), "ABI 1");
++        // ABI 2 appends three nullable callbacks to ABI 1's two (struct wmtr_host_ops order)
 +        assert_eq!(std::mem::size_of::<WmtrHostOps>(), 5 * std::mem::size_of::<usize>());
 +        assert_eq!(std::mem::offset_of!(WmtrHostOps, create_view), 2 * std::mem::size_of::<usize>());
 +    }
