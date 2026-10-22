@@ -22,6 +22,7 @@
 #include "winemetal_thunks.h"
 #include "airconv_thunks.h"
 #include "wmtr_wire.h"
+#include "wmtr_handles.h"
 #include "wmtr_host.h"
 #include "wmtr_vr.h"
 
@@ -32,6 +33,8 @@ extern const void *wmtr_impl_funcs[];
 #define STATUS_SUCCESS 0
 #define STATUS_UNSUCCESSFUL ((NTSTATUS)0xC0000001)
 #define STATUS_INVALID_PARAMETER ((NTSTATUS)0xC000000D)
+#define STATUS_INVALID_HANDLE ((NTSTATUS)0xC0000008)
+#define STATUS_NOT_SUPPORTED ((NTSTATUS)0xC00000BB)
 
 #define WMTR_CLASS_A 0
 #define WMTR_CLASS_S 1
@@ -74,8 +77,11 @@ struct wmtr_host {
   pthread_mutex_t view_lock;
   uint64_t *views;
   uint32_t n_views, cap_views;
-  _Atomic uint64_t n_req, n_sync, n_bytes, n_worker, n_sleep;
-  /* client-assigned encoder handles (WMTR_F_CLIENT_HANDLE): entry (handle % WMTR_HANDLE_SLOTS) */
+  _Atomic uint64_t n_req, n_sync, n_bytes, n_worker, n_sleep, n_refused;
+  /* object handles (wmtr_handles.h) */
+  struct wmtr_htab *htab;
+  /* client-assigned encoder handles (WMTR_F_CLIENT_HANDLE): entry (handle % WMTR_HANDLE_SLOTS) holds the object's
+   * table handle */
   struct wmtr_handle { _Atomic uint64_t id; _Atomic uint64_t obj; } *handles;
   /* how long the executor polls an empty ring before it sleeps, in mach ticks (WMTR_HOST_SPIN_US) */
   _Atomic uint64_t spin_ticks;
@@ -88,8 +94,287 @@ static int log_level = 1;
 #define LOG(lvl, ...) do { if (log_level >= (lvl)) fprintf(stderr, "wmtr-host: " __VA_ARGS__); } while (0)
 
 /* ------------------------------------------------------------------------------------------- *
- * fault containment: the executor runs inside the VMM, and every handle in a request is a raw host
- * pointer the guest sent. A bad one (a client or DXMT bug) must cost that game, not the whole VM: a
+ * object handles (include/wmtr_handles.h): the per-context table every host object the guest refers to goes
+ * through. Lookups are lock-free (an index into fixed chunks and one compare of the entry key); inserts, frees
+ * and reference counts take the table lock. */
+#define HCHUNK_BITS 12
+#define HCHUNK (1u << HCHUNK_BITS)
+#define HKEY_LIVE 0x100ull
+#define HGEN_MASK 0xffffffull
+
+struct hent {
+  _Atomic uint64_t key; /* gen << 32 | HKEY_LIVE | kind; 0 bits 8: free */
+  _Atomic uint64_t obj;
+  uint64_t aux;         /* BITCODE_DATA: size; SM50_BITCODE: its BITCODE_DATA handle */
+  uint32_t grefs;       /* references the guest owns (NSObject_release may drop that many) */
+  uint32_t next_free;
+};
+
+struct wmtr_htab {
+  _Atomic(struct hent *) chunks[WMTR_OBJ_MAX / HCHUNK];
+  pthread_mutex_t lock;
+  uint32_t n;                    /* entries ever used (index 0 is never a handle) */
+  uint32_t free_head, free_tail, n_free; /* FIFO of freed entries: a slot is reused as late as possible */
+  uint32_t *rev;                 /* object -> index (open addressing; 0 empty, UINT32_MAX deleted) */
+  uint32_t rev_cap, rev_used;
+  _Atomic uint32_t refs;         /* the context + one per live watcher */
+  char assoc_key;                /* key of this table's watcher objects */
+};
+
+static struct hent *
+hent_at(struct wmtr_htab *t, uint32_t i) {
+  struct hent *c = atomic_load_explicit(&t->chunks[i >> HCHUNK_BITS], memory_order_acquire);
+  return c ? &c[i & (HCHUNK - 1)] : NULL;
+}
+
+static struct wmtr_htab *
+htab_create(void) {
+  struct wmtr_htab *t = calloc(1, sizeof *t);
+  pthread_mutexattr_t a;
+  pthread_mutexattr_init(&a);
+  pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&t->lock, &a);
+  t->n = 1;
+  t->refs = 1;
+  return t;
+}
+
+static void
+htab_unref(struct wmtr_htab *t) {
+  if (atomic_fetch_sub(&t->refs, 1) != 1) return;
+  for (uint32_t c = 0; c < WMTR_OBJ_MAX / HCHUNK; c++) free(atomic_load(&t->chunks[c]));
+  free(t->rev);
+  pthread_mutex_destroy(&t->lock);
+  free(t);
+}
+
+static inline uint32_t
+rev_hash(uint64_t obj, uint32_t cap) {
+  obj ^= obj >> 33; obj *= 0xff51afd7ed558ccdull; obj ^= obj >> 33;
+  return (uint32_t)obj & (cap - 1);
+}
+
+/* lock held */
+static uint32_t
+rev_find(struct wmtr_htab *t, uint64_t obj, uint32_t **slot_out) {
+  if (!t->rev_cap) return 0;
+  for (uint32_t i = rev_hash(obj, t->rev_cap), n = 0; n < t->rev_cap; i = (i + 1) & (t->rev_cap - 1), n++) {
+    uint32_t v = t->rev[i];
+    if (!v) return 0;
+    if (v == UINT32_MAX) continue;
+    struct hent *e = hent_at(t, v);
+    if (atomic_load_explicit(&e->obj, memory_order_relaxed) == obj && (atomic_load_explicit(&e->key, memory_order_relaxed) & HKEY_LIVE)) {
+      if (slot_out) *slot_out = &t->rev[i];
+      return v;
+    }
+  }
+  return 0;
+}
+
+static void
+rev_add(struct wmtr_htab *t, uint64_t obj, uint32_t idx) {
+  if ((t->rev_used + 1) * 2 > t->rev_cap) { /* rebuild at twice the live size (drops deleted marks) */
+    uint32_t cap = t->rev_cap ? t->rev_cap : 1024;
+    while (cap < (t->rev_used + 1) * 4) cap *= 2;
+    uint32_t *old = t->rev, oc = t->rev_cap;
+    t->rev = calloc(cap, sizeof *t->rev);
+    t->rev_cap = cap;
+    t->rev_used = 0;
+    for (uint32_t i = 0; i < oc; i++)
+      if (old[i] && old[i] != UINT32_MAX) {
+        uint64_t o = atomic_load_explicit(&hent_at(t, old[i])->obj, memory_order_relaxed);
+        uint32_t j = rev_hash(o, cap);
+        while (t->rev[j]) j = (j + 1) & (cap - 1);
+        t->rev[j] = old[i];
+        t->rev_used++;
+      }
+    free(old);
+  }
+  uint32_t j = rev_hash(obj, t->rev_cap);
+  while (t->rev[j] && t->rev[j] != UINT32_MAX) j = (j + 1) & (t->rev_cap - 1);
+  if (!t->rev[j]) t->rev_used++;
+  t->rev[j] = idx;
+}
+
+static inline uint64_t
+hmake(uint32_t idx, uint64_t key) {
+  return WMTR_OBJ_TAG | ((key >> 32) & HGEN_MASK) << WMTR_OBJ_INDEX_BITS | idx;
+}
+
+/* the entry a handle names, if it is live, of its generation and of a kind in `mask` */
+static inline struct hent *
+hentry(struct wmtr_htab *t, uint64_t h, uint64_t mask) {
+  if ((h & WMTR_REF_MASK) != WMTR_OBJ_TAG) return NULL;
+  uint32_t idx = (uint32_t)h & (WMTR_OBJ_MAX - 1);
+  struct hent *e = hent_at(t, idx);
+  if (!e) return NULL;
+  uint64_t k = atomic_load_explicit(&e->key, memory_order_acquire);
+  if (!(k & HKEY_LIVE) || ((k >> 32) & HGEN_MASK) != ((h >> WMTR_OBJ_INDEX_BITS) & HGEN_MASK) || !((mask >> (k & 0xff)) & 1))
+    return NULL;
+  return e;
+}
+
+static void hfree_idx(struct wmtr_htab *t, uint32_t idx, uint32_t gen);
+
+/* frees its table entry when the object it is attached to is deallocated */
+@interface WMTRHandleWatch : NSObject {
+@public
+  struct wmtr_htab *t;
+  uint32_t idx, gen;
+}
+@end
+@implementation WMTRHandleWatch
+- (void)dealloc {
+  hfree_idx(t, idx, gen);
+  htab_unref(t);
+  [super dealloc];
+}
+@end
+
+static void
+hfree_idx(struct wmtr_htab *t, uint32_t idx, uint32_t gen) {
+  pthread_mutex_lock(&t->lock);
+  struct hent *e = hent_at(t, idx);
+  uint64_t k = e ? atomic_load_explicit(&e->key, memory_order_relaxed) : 0;
+  if (e && (k & HKEY_LIVE) && ((k >> 32) & HGEN_MASK) == gen) {
+    uint32_t *slot = NULL;
+    if (rev_find(t, atomic_load_explicit(&e->obj, memory_order_relaxed), &slot) == idx) *slot = UINT32_MAX;
+    atomic_store_explicit(&e->key, (uint64_t)((gen + 1) & HGEN_MASK) << 32, memory_order_release);
+    e->grefs = 0;
+    e->next_free = 0;
+    if (t->free_tail) hent_at(t, t->free_tail)->next_free = idx;
+    else t->free_head = idx;
+    t->free_tail = idx;
+    t->n_free++;
+  }
+  pthread_mutex_unlock(&t->lock);
+}
+
+/* the handle of an entry, freed */
+static void
+hfree(struct wmtr_htab *t, uint64_t h) {
+  hfree_idx(t, (uint32_t)h & (WMTR_OBJ_MAX - 1), (uint32_t)(h >> WMTR_OBJ_INDEX_BITS) & HGEN_MASK);
+}
+
+static inline int
+is_tagged_pointer(uint64_t p) {
+  return (int64_t)p < 0; /* arm64 / x86-64 Objective-C tagged pointers: immortal, never deallocated */
+}
+
+/* the handle for `obj` (an existing entry's, else a new one of `kind`); `plus1`: the caller passes the guest one
+ * reference it owns. 0 when the table is full. */
+static uint64_t hinsert_w(struct wmtr_htab *t, uint64_t obj, int kind, int plus1, uint64_t aux, int watch);
+static uint64_t
+hinsert(struct wmtr_htab *t, uint64_t obj, int kind, int plus1, uint64_t aux) {
+  return hinsert_w(t, obj, kind, plus1, aux, kind <= WMTR_K_LAST_OBJC);
+}
+static uint64_t
+hinsert_w(struct wmtr_htab *t, uint64_t obj, int kind, int plus1, uint64_t aux, int watch) {
+  if (!obj) return 0;
+  pthread_mutex_lock(&t->lock);
+  uint32_t idx = rev_find(t, obj, NULL);
+  struct hent *e;
+  if (idx) {
+    e = hent_at(t, idx);
+    e->grefs += plus1;
+  } else {
+    /* a freed entry is reused only behind 4096 others, so a stale handle meets a new generation late */
+    if (t->n_free >= 4096 || (t->n >= WMTR_OBJ_MAX && t->free_head)) {
+      idx = t->free_head;
+      t->free_head = hent_at(t, idx)->next_free;
+      if (!t->free_head) t->free_tail = 0;
+      t->n_free--;
+    } else if (t->n < WMTR_OBJ_MAX) {
+      idx = t->n;
+      if (!hent_at(t, idx)) atomic_store_explicit(&t->chunks[idx >> HCHUNK_BITS], calloc(HCHUNK, sizeof(struct hent)), memory_order_release);
+      if (!hent_at(t, idx)) { pthread_mutex_unlock(&t->lock); return 0; }
+      t->n++;
+    } else {
+      pthread_mutex_unlock(&t->lock);
+      LOG(0, "handle table full\n");
+      return 0;
+    }
+    e = hent_at(t, idx);
+    uint64_t gen = atomic_load_explicit(&e->key, memory_order_relaxed) >> 32;
+    atomic_store_explicit(&e->obj, obj, memory_order_relaxed);
+    e->aux = aux;
+    e->grefs = plus1;
+    atomic_store_explicit(&e->key, gen << 32 | HKEY_LIVE | (uint64_t)kind, memory_order_release);
+    rev_add(t, obj, idx);
+    if (watch && !is_tagged_pointer(obj)) {
+      WMTRHandleWatch *w = [WMTRHandleWatch alloc];
+      w->t = t; w->idx = idx; w->gen = (uint32_t)gen & HGEN_MASK;
+      atomic_fetch_add(&t->refs, 1);
+      objc_setAssociatedObject((id)obj, &t->assoc_key, w, OBJC_ASSOCIATION_RETAIN);
+      [w release];
+    }
+  }
+  uint64_t h = hmake(idx, atomic_load_explicit(&e->key, memory_order_relaxed));
+  pthread_mutex_unlock(&t->lock);
+  return h;
+}
+
+/* the live entry holding `obj` of a kind in `mask`, freed (a destroyed non-Objective-C object) */
+static void
+hfree_obj(struct wmtr_htab *t, uint64_t obj, uint64_t mask) {
+  pthread_mutex_lock(&t->lock);
+  uint32_t idx = rev_find(t, obj, NULL);
+  struct hent *e = idx ? hent_at(t, idx) : NULL;
+  uint64_t k = e ? atomic_load_explicit(&e->key, memory_order_relaxed) : 0;
+  if (e && ((mask >> (k & 0xff)) & 1)) hfree_idx(t, idx, (uint32_t)(k >> 32) & HGEN_MASK);
+  pthread_mutex_unlock(&t->lock);
+}
+
+/* kind of an Objective-C object a DXMT call returned (once per new entry; classes are cached) */
+static int
+classify(uint64_t obj) {
+  static struct { Class c; int k; } cache[512];
+  static pthread_mutex_t cl = PTHREAD_MUTEX_INITIALIZER;
+  Class c = object_getClass((id)obj);
+  uint32_t i0 = (uint32_t)(((uintptr_t)c >> 4) * 2654435761u) & 511;
+  pthread_mutex_lock(&cl);
+  for (uint32_t n = 0, i = i0; n < 512; n++, i = (i + 1) & 511) {
+    if (cache[i].c == c) { int k = cache[i].k; pthread_mutex_unlock(&cl); return k; }
+    if (!cache[i].c) break;
+  }
+  pthread_mutex_unlock(&cl);
+  static const struct { const char *proto; int kind; } protos[] = {
+      {"MTLDevice", WMTR_K_DEVICE}, {"MTLCommandQueue", WMTR_K_QUEUE}, {"MTLCommandBuffer", WMTR_K_CMDBUF},
+      {"MTLTexture", WMTR_K_TEXTURE}, {"MTLBuffer", WMTR_K_BUFFER}, {"MTLSamplerState", WMTR_K_SAMPLER},
+      {"MTLDepthStencilState", WMTR_K_DSSO}, {"MTLLibrary", WMTR_K_LIBRARY}, {"MTLFunction", WMTR_K_FUNCTION},
+      {"MTLComputePipelineState", WMTR_K_CPSO}, {"MTLRenderPipelineState", WMTR_K_RPSO},
+      {"MTLBlitCommandEncoder", WMTR_K_ENC_BLIT}, {"MTLComputeCommandEncoder", WMTR_K_ENC_COMPUTE},
+      {"MTLRenderCommandEncoder", WMTR_K_ENC_RENDER}, {"MTLSharedEvent", WMTR_K_SHARED_EVENT},
+      {"MTLEvent", WMTR_K_EVENT}, {"MTLFence", WMTR_K_FENCE}, {"MTLBinaryArchive", WMTR_K_ARCHIVE},
+      {"MTLHeap", WMTR_K_HEAP}, {"MTLIndirectCommandBuffer", WMTR_K_ICB}, {"MTLCounterSampleBuffer", WMTR_K_COUNTERBUF},
+      {"MTLResidencySet", WMTR_K_RESSET}, {"MTLFXTemporalScaler", WMTR_K_FXT}, {"MTLFXSpatialScaler", WMTR_K_FXS},
+      {"CAMetalDrawable", WMTR_K_DRAWABLE}, {"OS_dispatch_data", WMTR_K_DATA},
+  };
+  int k = WMTR_K_OBJC;
+  for (size_t i = 0; i < sizeof protos / sizeof *protos && k == WMTR_K_OBJC; i++) {
+    Protocol *p = objc_getProtocol(protos[i].proto);
+    if (p && class_conformsToProtocol(c, p)) k = protos[i].kind;
+    /* conformance is often declared on a superclass */
+    for (Class s = class_getSuperclass(c); p && s && k == WMTR_K_OBJC; s = class_getSuperclass(s))
+      if (class_conformsToProtocol(s, p)) k = protos[i].kind;
+  }
+  if (k == WMTR_K_OBJC) {
+    if ([(id)obj isKindOfClass:[NSString class]]) k = WMTR_K_STRING;
+    else if ([(id)obj isKindOfClass:[NSArray class]]) k = WMTR_K_ARRAY;
+    else if ([(id)obj isKindOfClass:[NSError class]]) k = WMTR_K_ERROR;
+    else if ([(id)obj isKindOfClass:[CAMetalLayer class]]) k = WMTR_K_LAYER;
+    else if ([(id)obj isKindOfClass:[MTLCaptureManager class]]) k = WMTR_K_CAPTURE;
+  }
+  pthread_mutex_lock(&cl);
+  for (uint32_t n = 0, i = i0; n < 512; n++, i = (i + 1) & 511)
+    if (!cache[i].c || cache[i].c == c) { cache[i].c = c; cache[i].k = k; break; }
+  pthread_mutex_unlock(&cl);
+  return k;
+}
+
+/* ------------------------------------------------------------------------------------------- *
+ * fault containment: the executor runs inside the VMM. Handles and pointers are checked (above), but a
+ * fault in DXMT's implementation or Metal (a client or DXMT bug) must cost that game, not the whole VM: a
  * SIGSEGV/SIGBUS raised while a call executes jumps back to execute(), which fails the call and every
  * later call of that client. Faults anywhere else go to the previously installed handler (or the
  * default action). Cost on the common path: one sigsetjmp per call. */
@@ -523,7 +808,9 @@ reply(struct wmtr_host *h, const struct wmtr_req_ext *r, const struct wmtr_out *
  * are retained into the slot's current virtual pool and released when DXMT releases that pool. */
 struct vpool {
   struct vpool *parent;
-  uint64_t cid; /* the client's handle for it (WMTR_HANDLE_POOL), 0 if the host's address is the handle */
+  uint64_t cid; /* the client's handle for it (WMTR_HANDLE_POOL), 0 if it has a table handle */
+  uint64_t hdl; /* its table handle (no client handle) */
+  struct wmtr_htab *htab;
   uint32_t slot, used;
   id *objs;
   uint32_t n, cap;
@@ -536,19 +823,13 @@ static struct vpool *vpool_top[WMTR_SLOTS];
 static id loose[WMTR_SLOTS][VPOOL_LOOSE];
 static uint32_t loose_next[WMTR_SLOTS];
 
-static int
-is_vpool(uint64_t h) {
-  return h >= (uint64_t)(uintptr_t)&vpools[0] && h < (uint64_t)(uintptr_t)&vpools[VPOOLS] &&
-         (h - (uint64_t)(uintptr_t)&vpools[0]) % sizeof(struct vpool) == 0;
-}
-
 static uint64_t
 vpool_push(uint32_t slot, uint64_t cid) {
   pthread_mutex_lock(&vpool_lock);
   struct vpool *p = NULL;
   for (int i = 0; i < VPOOLS; i++) if (!vpools[i].used) { p = &vpools[i]; break; }
   if (p) {
-    p->used = 1; p->slot = slot; p->n = 0; p->cid = cid;
+    p->used = 1; p->slot = slot; p->n = 0; p->cid = cid; p->hdl = 0; p->htab = NULL;
     p->parent = slot < WMTR_SLOTS ? vpool_top[slot] : NULL;
     if (slot < WMTR_SLOTS) vpool_top[slot] = p;
   }
@@ -566,6 +847,8 @@ vpool_pop(struct vpool *target) {
     struct vpool *parent = p->parent;
     for (uint32_t i = 0; i < p->n; i++) [p->objs[i] release];
     p->n = 0; p->used = 0;
+    if (p->hdl) { hfree(p->htab, p->hdl); htab_unref(p->htab); }
+    p->hdl = 0; p->htab = NULL;
     if (p == target) { p = parent; break; }
     p = parent;
   }
@@ -627,6 +910,250 @@ keep_autoreleased(uint32_t slot, uint16_t call, uint8_t *params) {
     break;
   }
   default: break;
+  }
+}
+
+/* ------------------------------------------------------------------------------------------- *
+ * request translation: every handle field (src/wmtr_handles.inc) through the table, every pointer field checked
+ * to be NULL or relocated, structs that carry handles checked to lie in the request's private copy. */
+#include "wmtr_handles.inc"
+
+static const struct wmtr_hfield cmd_nop_fields[] = {{offsetof(struct wmtcmd_base, next), WMTR_HF_PTR, 0, NULL}, {0, WMTR_HF_END, 0, NULL}};
+static const struct wmtr_hcmd *cmd_index[3][256];
+static uint8_t call_needs[WMTR_NCALLS]; /* 1: has pointer fields (needs the relocation map), 2: has results */
+#define NEED_PTR 1
+#define NEED_OUT 2
+
+static uint8_t
+fields_needs(const struct wmtr_hfield *f) {
+  uint8_t n = 0;
+  for (; f && f->flags != WMTR_HF_END; f++) {
+    if (f->flags == WMTR_HF_OUT0 || f->flags == WMTR_HF_OUT1) n |= NEED_OUT;
+    if (f->flags == WMTR_HF_PTR) {
+      n |= NEED_PTR;
+      if (f->sub) {
+        if (f->sub->type == WMTR_HP_HANDLES_OUT0 || f->sub->type == WMTR_HP_HANDLE_OUT1) n |= NEED_OUT;
+        n |= fields_needs(f->sub->fields);
+      }
+    }
+  }
+  return n;
+}
+
+static void
+xlate_init(void) {
+  for (size_t i = 0; i < sizeof wmtr_cmd_hfields / sizeof *wmtr_cmd_hfields; i++)
+    if (wmtr_cmd_hfields[i].type < 256) cmd_index[wmtr_cmd_hfields[i].kind][wmtr_cmd_hfields[i].type] = &wmtr_cmd_hfields[i];
+  for (int c = 0; c < WMTR_NCALLS; c++) call_needs[c] = fields_needs(wmtr_call_hfields[c]);
+  call_needs[77] |= NEED_OUT;
+}
+
+struct xreq {
+  struct wmtr_host *h;
+  uint8_t *payload;
+  uint32_t psize, params_size;
+  const uint64_t *relmap; /* bit per 8-byte payload word that a relocation rewrote */
+  uint16_t call;
+  int save; /* sync: params-level handles are put back before the reply */
+  uint32_t n_undo;
+  struct { uint32_t off; uint64_t v; } undo[32];
+  uint64_t bad; /* the refused value, for the log */
+};
+
+static inline int
+x_inside(const struct xreq *x, const uint8_t *p, uint64_t size) {
+  return p >= x->payload && size <= x->psize && (uint64_t)(p - x->payload) <= x->psize - size;
+}
+
+static inline int
+x_relocated(const struct xreq *x, const uint8_t *field) {
+  uint64_t off = (uint64_t)(field - x->payload);
+  return x->relmap && !(off & 7) && off < x->psize && ((x->relmap[off >> 9] >> ((off >> 3) & 63)) & 1);
+}
+
+/* client-assigned handles (WMTR_F_CLIENT_HANDLE): entry (handle % WMTR_HANDLE_SLOTS) holds the table handle */
+static uint64_t vpool_find(uint64_t cid);
+
+/* the object a guest handle names, if it is of a kind in `mask`; 0 otherwise */
+static inline uint64_t
+resolve_handle(struct wmtr_host *h, uint64_t v, uint64_t mask) {
+  if ((v & WMTR_REF_MASK) == WMTR_HANDLE_TAG) {
+    if (v & WMTR_HANDLE_POOL) return (mask & WMTR_M_POOL) ? vpool_find(v) : 0;
+    struct wmtr_handle *c = &h->handles[v % WMTR_HANDLE_SLOTS];
+    if (atomic_load_explicit(&c->id, memory_order_acquire) != v) return 0;
+    v = atomic_load_explicit(&c->obj, memory_order_relaxed);
+  }
+  struct hent *e = hentry(h->htab, v, mask);
+  return e ? atomic_load_explicit(&e->obj, memory_order_relaxed) : 0;
+}
+
+static int x_in(struct xreq *x, const struct wmtr_hfield *f, uint8_t *base);
+
+static uint64_t
+x_count(const struct wmtr_hptee *s, const uint8_t *container) {
+  uint64_t n = 0;
+  switch (s->count_bytes) {
+  case 0: return 1;
+  case 1: return container[s->count_off];
+  case 2: { uint16_t v; memcpy(&v, container + s->count_off, 2); return v; }
+  case 4: { uint32_t v; memcpy(&v, container + s->count_off, 4); return v; }
+  default: memcpy(&n, container + s->count_off, 8); return n;
+  }
+}
+
+static int
+x_cmdlist(struct xreq *x, uint8_t *node) {
+  int kind = x->call - 36;
+  if (kind < 0 || kind > 2) return 0;
+  uint8_t *prev = NULL;
+  while (node) {
+    /* nodes are in the request in list order: no cycles, no shared nodes */
+    if (node <= prev || !x_inside(x, node, sizeof(struct wmtcmd_base))) return 0;
+    uint16_t type;
+    memcpy(&type, node, 2);
+    const struct wmtr_hfield *fields;
+    uint32_t size;
+    if (type == 0) { fields = cmd_nop_fields; size = sizeof(struct wmtcmd_base); }
+    else {
+      const struct wmtr_hcmd *c = type < 256 ? cmd_index[kind][type] : NULL;
+      if (!c) return 0;
+      fields = c->fields; size = c->size;
+    }
+    if (!x_inside(x, node, size) || !x_in(x, fields, node)) return 0;
+    prev = node;
+    memcpy(&node, node + offsetof(struct wmtcmd_base, next), 8);
+  }
+  return 1;
+}
+
+static int
+x_sm50args(struct xreq *x, uint8_t *node) {
+  uint8_t *prev = NULL;
+  while (node) {
+    if (node <= prev || !x_inside(x, node, sizeof(struct SM50_SHADER_COMPILATION_ARGUMENT_DATA))) return 0;
+    struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *a = (void *)node;
+    uint32_t size, ptr_off = 0;
+    switch (a->type) {
+    case SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT: size = sizeof(struct SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA);
+      ptr_off = offsetof(struct SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA, elements); break;
+    case SM50_SHADER_COMMON: size = sizeof(struct SM50_SHADER_COMMON_DATA); break;
+    case SM50_SHADER_PSO_PIXEL_SHADER: size = sizeof(struct SM50_SHADER_PSO_PIXEL_SHADER_DATA); break;
+    case SM50_SHADER_IA_INPUT_LAYOUT: size = sizeof(struct SM50_SHADER_IA_INPUT_LAYOUT_DATA);
+      ptr_off = offsetof(struct SM50_SHADER_IA_INPUT_LAYOUT_DATA, elements); break;
+    case SM50_SHADER_GS_PASS_THROUGH: size = sizeof(struct SM50_SHADER_GS_PASS_THROUGH_DATA); break;
+    case SM50_SHADER_PSO_GEOMETRY_SHADER: size = sizeof(struct SM50_SHADER_PSO_GEOMETRY_SHADER_DATA); break;
+    case SM50_SHADER_PSO_TESSELLATOR: size = sizeof(struct SM50_SHADER_PSO_TESSELLATOR_DATA); break;
+    case SM50_SHADER_ROOT_SIGNATURE: case SM50_SHADER_ROOT_SIGNATURE2: size = sizeof(struct SM50_SHADER_ROOT_SIGNATURE_DATA);
+      ptr_off = offsetof(struct SM50_SHADER_ROOT_SIGNATURE_DATA, bytecode); break;
+    default: return 0;
+    }
+    if (!x_inside(x, node, size)) return 0;
+    uint64_t v;
+    if (ptr_off) { memcpy(&v, node + ptr_off, 8); if (v && !x_relocated(x, node + ptr_off)) return 0; }
+    memcpy(&v, node, 8);
+    if (v && !x_relocated(x, node)) return 0;
+    prev = node;
+    node = (uint8_t *)(uintptr_t)v;
+  }
+  return 1;
+}
+
+static int
+x_ptee_in(struct xreq *x, const struct wmtr_hptee *s, uint8_t *p, const uint8_t *container) {
+  uint64_t n = x_count(s, container);
+  switch (s->type) {
+  case WMTR_HP_STRUCT:
+    if (n > (1u << 20) || !x_inside(x, p, n * s->elem_size)) return 0;
+    for (uint64_t i = 0; i < n; i++) if (!x_in(x, s->fields, p + i * s->elem_size)) return 0;
+    return 1;
+  case WMTR_HP_HANDLES_IN:
+    if (n > (1u << 24) || !x_inside(x, p, n * 8)) return 0;
+    for (uint64_t i = 0; i < n; i++) {
+      uint64_t v;
+      memcpy(&v, p + i * 8, 8);
+      if (!v) continue;
+      uint64_t o = x_relocated(x, p + i * 8) ? 0 : resolve_handle(x->h, v, s->mask);
+      if (!o) { x->bad = v; return 0; }
+      memcpy(p + i * 8, &o, 8);
+    }
+    return 1;
+  case WMTR_HP_HANDLES_OUT0: case WMTR_HP_HANDLE_OUT1:
+    if (n > (1u << 24) || !x_inside(x, p, n * 8)) return 0;
+    memset(p, 0, n * 8);
+    return 1;
+  case WMTR_HP_CMDLIST: return x_cmdlist(x, p);
+  case WMTR_HP_SM50ARGS: return x_sm50args(x, p);
+  default: return 0;
+  }
+}
+
+static int
+x_in(struct xreq *x, const struct wmtr_hfield *f, uint8_t *base) {
+  for (; f->flags != WMTR_HF_END; f++) {
+    uint8_t *fp = base + f->off;
+    uint64_t v;
+    memcpy(&v, fp, 8);
+    switch (f->flags) {
+    case WMTR_HF_IN: {
+      if (!v) break;
+      uint64_t o = x_relocated(x, fp) ? 0 : resolve_handle(x->h, v, f->mask);
+      if (!o) { x->bad = v; return 0; }
+      if (x->save && (uint64_t)(fp - x->payload) < x->params_size && x->n_undo < 32)
+        x->undo[x->n_undo++] = (typeof(x->undo[0])){(uint32_t)(fp - x->payload), v};
+      memcpy(fp, &o, 8);
+      break;
+    }
+    case WMTR_HF_OUT0: case WMTR_HF_OUT1:
+      if (x_relocated(x, fp)) { x->bad = v; return 0; }
+      memset(fp, 0, 8); /* an implementation that fails leaves it: never the guest's value */
+      break;
+    case WMTR_HF_PTR:
+      if (!v) break;
+      if (!x_relocated(x, fp)) { x->bad = v; return 0; }
+      if (f->sub && !x_ptee_in(x, f->sub, (uint8_t *)(uintptr_t)v, base)) return 0;
+      break;
+    }
+  }
+  return 1;
+}
+
+/* a result object: its table handle (0 when the table is full; a +1 result is then released) */
+static uint64_t
+x_result(struct wmtr_host *h, uint64_t obj, int plus1, int kind, uint64_t hint) {
+  if (!obj) return 0;
+  if (!kind) {
+    kind = classify(obj);
+    /* a class that declares none of the protocols classify() knows: the kind the call returns */
+    if (kind == WMTR_K_OBJC && hint && !(hint & (hint - 1)) && (hint & WMTR_M_OBJC)) kind = __builtin_ctzll(hint);
+  }
+  uint64_t r = hinsert(h->htab, obj, kind, plus1, 0);
+  if (!r && plus1 && kind <= WMTR_K_LAST_OBJC) [(id)obj release];
+  return r;
+}
+
+static void
+x_out(struct xreq *x, const struct wmtr_hfield *f, uint8_t *base) {
+  for (; f->flags != WMTR_HF_END; f++) {
+    uint8_t *fp = base + f->off;
+    uint64_t v;
+    memcpy(&v, fp, 8);
+    if (f->flags == WMTR_HF_OUT0 || f->flags == WMTR_HF_OUT1) {
+      v = x_result(x->h, v, f->flags == WMTR_HF_OUT1, 0, f->mask);
+      memcpy(fp, &v, 8);
+    } else if (f->flags == WMTR_HF_PTR && v && f->sub) {
+      const struct wmtr_hptee *s = f->sub;
+      uint8_t *p = (uint8_t *)(uintptr_t)v;
+      uint64_t n = x_count(s, base);
+      if (s->type == WMTR_HP_STRUCT && s->fields && x_inside(x, p, n * s->elem_size))
+        for (uint64_t i = 0; i < n; i++) x_out(x, s->fields, p + i * s->elem_size);
+      else if ((s->type == WMTR_HP_HANDLES_OUT0 || s->type == WMTR_HP_HANDLE_OUT1) && x_inside(x, p, n * 8))
+        for (uint64_t i = 0; i < n; i++) {
+          uint64_t o;
+          memcpy(&o, p + i * 8, 8);
+          o = s->type == WMTR_HP_HANDLE_OUT1 ? x_result(x->h, o, 1, __builtin_ctzll(s->mask), 0) : x_result(x->h, o, 0, 0, 0);
+          memcpy(p + i * 8, &o, 8);
+        }
+    }
   }
 }
 
@@ -700,16 +1227,52 @@ static NTSTATUS
 host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr_req_ext *r, const uint32_t *relocs,
           const uint64_t *orig) {
   switch (call) {
-  case 0: /* NSObject_retain */
-    if (is_vpool(*(uint64_t *)params)) return STATUS_SUCCESS;
-    break;
-  case 1: /* NSObject_release: a virtual pool drains */
-    if (is_vpool(*(uint64_t *)params)) { vpool_pop((struct vpool *)(uintptr_t)*(uint64_t *)params); return STATUS_SUCCESS; }
-    break;
-  case 10: /* NSAutoreleasePool_alloc_init */
-    ((struct unixcall_generic_obj_ret *)params)->ret =
-        vpool_push(r->h.slot, r->h.flags & WMTR_F_CLIENT_HANDLE ? ((struct unixcall_generic_obj_ret *)params)->ret : 0);
-    return ((struct unixcall_generic_obj_ret *)params)->ret ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+  case 10: { /* NSAutoreleasePool_alloc_init: a virtual pool, named by the client's handle or a table handle */
+    struct unixcall_generic_obj_ret *p = (void *)params;
+    int client = r->h.flags & WMTR_F_CLIENT_HANDLE;
+    struct vpool *vp = (struct vpool *)(uintptr_t)vpool_push(r->h.slot, client ? p->ret : 0);
+    if (!vp) { p->ret = 0; return STATUS_UNSUCCESSFUL; }
+    if (!client) {
+      pthread_mutex_lock(&vpool_lock);
+      vp->hdl = p->ret = hinsert(h->htab, (uint64_t)(uintptr_t)vp, WMTR_K_POOL, 0, 0);
+      if (vp->hdl) { vp->htab = h->htab; atomic_fetch_add(&h->htab->refs, 1); } /* a pool may outlive its context */
+      pthread_mutex_unlock(&vpool_lock);
+      if (!p->ret) { vpool_pop(vp); return STATUS_UNSUCCESSFUL; }
+    }
+    return STATUS_SUCCESS;
+  }
+  case 109: case 121: case 122: case 123: case 124:
+    return STATUS_NOT_SUPPORTED; /* the client runs listeners itself; mach ports do not cross the VM */
+  case 75: case 80: { /* SM50Destroy / SM50FreeError: the handle goes with the object */
+    uint64_t o = *(uint64_t *)params;
+    NTSTATUS st = ((impl_fn)wmtr_impl_funcs[call])(params);
+    hfree_obj(h->htab, o, call == 75 ? WMTR_M_SM50_SHADER : WMTR_M_SM50_ERROR);
+    return st;
+  }
+  case 78: { /* SM50DestroyBitcode: and the token of its data (call 77) */
+    uint64_t o = *(uint64_t *)params;
+    pthread_mutex_lock(&h->htab->lock);
+    uint32_t idx = rev_find(h->htab, o, NULL);
+    uint64_t data_tok = idx ? hent_at(h->htab, idx)->aux : 0;
+    pthread_mutex_unlock(&h->htab->lock);
+    NTSTATUS st = ((impl_fn)wmtr_impl_funcs[call])(params);
+    if (data_tok) hfree(h->htab, data_tok);
+    hfree_obj(h->htab, o, WMTR_M_SM50_BITCODE);
+    return st;
+  }
+  case 77: { /* SM50GetCompiledBitcode: Data is host memory; the guest gets a token DispatchData_alloc_init accepts */
+    struct sm50_get_compiled_bitcode_params *p = (void *)params;
+    NTSTATUS st = ((impl_fn)wmtr_impl_funcs[call])(params);
+    if (p->data_out && p->data_out->Data) {
+      uint64_t tok = hinsert(h->htab, (uint64_t)(uintptr_t)p->data_out->Data, WMTR_K_BITCODE_DATA, 0, p->data_out->Size);
+      pthread_mutex_lock(&h->htab->lock);
+      uint32_t idx = rev_find(h->htab, (uint64_t)(uintptr_t)p->bitcode, NULL);
+      if (idx) hent_at(h->htab, idx)->aux = tok;
+      pthread_mutex_unlock(&h->htab->lock);
+      p->data_out->Data = (void *)(uintptr_t)tok;
+    }
+    return st;
+  }
   case 18: { /* newBuffer: memory field relocation carries the arena reference */
     uint64_t arena_ref = 0;
     struct unixcall_mtldevice_newbuffer *p = (void *)params;
@@ -723,14 +1286,17 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     struct unixcall_create_metal_view_from_hwnd *p = (void *)params;
     if (!h->ops->create_view) return STATUS_UNSUCCESSFUL;
     uint64_t layer = 0;
-    p->ret_view = h->ops->create_view(h->ctx, p->hwnd, (void *)p->device, &layer);
-    p->ret_layer = layer;
-    if (p->ret_view) view_track(h, p->ret_view);
-    return p->ret_view ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+    uint64_t view = h->ops->create_view(h->ctx, p->hwnd, (void *)p->device, &layer);
+    p->ret_view = view ? hinsert(h->htab, view, WMTR_K_VIEW, 0, 0) : 0;
+    p->ret_layer = x_result(h, layer, 1, 0, WMTR_M_LAYER);
+    if (view && !p->ret_view) { if (h->ops->release_view) h->ops->release_view(h->ctx, view); return STATUS_UNSUCCESSFUL; }
+    if (view) view_track(h, view);
+    return view ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
   }
   case 73: {
     uint64_t v = ((struct unixcall_generic_obj_noret *)params)->handle;
     if (view_untrack(h, v) && h->ops->release_view) h->ops->release_view(h->ctx, v);
+    hfree_obj(h->htab, v, WMTR_M_VIEW);
     return STATUS_SUCCESS;
   }
   case 104: { /* setWin32EventAtValue: queue (listener, handle) for the client to NtSetEvent */
@@ -748,8 +1314,8 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
   case 108: {
     struct host_listener *l = calloc(1, sizeof *l);
     l->listener = [[MTLSharedEventListener alloc] init];
-    ((struct unixcall_generic_obj_ret *)params)->ret = (obj_handle_t)l;
-    return STATUS_SUCCESS;
+    ((struct unixcall_generic_obj_ret *)params)->ret = hinsert(h->htab, (uint64_t)(uintptr_t)l, WMTR_K_LISTENER, 0, 0);
+    return ((struct unixcall_generic_obj_ret *)params)->ret ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
   }
   case 110: { /* destroy: tell the client's listener thread to return; the listener object is kept
                  (late notifications for it are harmless and are dropped by the client) */
@@ -806,9 +1372,6 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
 /* ------------------------------------------------------------------------------------------- *
  * client-assigned handles (WMTR_F_CLIENT_HANDLE, wmtr_proto.h). Cost for other calls: one compare of the
  * first params word. */
-#ifndef STATUS_INVALID_HANDLE
-#define STATUS_INVALID_HANDLE ((NTSTATUS)0xC0000008)
-#endif
 
 /* offset of `ret` in the params of a call that may carry a client handle */
 static int
@@ -821,52 +1384,84 @@ handle_ret_off(uint16_t call) {
   }
 }
 
-/* before the call: note the handle a creation carries (*cid), and give a call whose receiver is a client
- * handle the object (*w0 keeps the handle for the reply). 0: the handle names no object (logged); fail it. */
-static int
-handles_in(struct wmtr_host *h, const struct wmtr_req_ext *r, uint8_t *payload, uint64_t *w0, uint64_t *cid) {
-  if (r->h.flags & WMTR_F_CLIENT_HANDLE) {
-    int o = handle_ret_off(r->h.call);
-    if (o >= 0 && o + 8 <= (int)r->h.params_size) memcpy(cid, payload + o, 8);
-    if ((*cid & WMTR_REF_MASK) != WMTR_HANDLE_TAG) {
-      LOG(0, "call %u: bad client handle %llx\n", r->h.call, (unsigned long long)*cid);
-      *cid = 0;
-      return 0;
-    }
-    if (o == 0) return 1; /* NSAutoreleasePool_alloc_init: the first word is the new handle */
-  }
-  if (r->h.params_size < 8) return 1;
-  uint64_t v;
-  memcpy(&v, payload, 8);
-  if ((v & WMTR_REF_MASK) != WMTR_HANDLE_TAG) return 1;
-  uint64_t obj = 0;
-  if (v & WMTR_HANDLE_POOL) obj = vpool_find(v);
-  else {
-    struct wmtr_handle *e = &h->handles[v % WMTR_HANDLE_SLOTS];
-    if (atomic_load_explicit(&e->id, memory_order_acquire) == v) obj = atomic_load_explicit(&e->obj, memory_order_relaxed);
-  }
-  if (!obj) {
-    LOG(1, "call %u: client handle %llx names no object (its creation failed); call skipped\n", r->h.call,
-        (unsigned long long)v);
+/* the handle a creation carries (WMTR_F_CLIENT_HANDLE); 0: not a client handle (logged; the call fails) */
+static uint64_t
+client_handle_of(const struct wmtr_req_ext *r, uint8_t *payload) {
+  int o = handle_ret_off(r->h.call);
+  uint64_t cid = 0;
+  if (o >= 0 && o + 8 <= (int)r->h.params_size) memcpy(&cid, payload + o, 8);
+  /* pools carry the pool bit, encoders do not; no other call takes a client handle */
+  if ((cid & WMTR_REF_MASK) != WMTR_HANDLE_TAG || o < 0 || !(cid & WMTR_HANDLE_POOL) != (r->h.call != 10)) {
+    LOG(0, "call %u: bad client handle %llx\n", r->h.call, (unsigned long long)cid);
     return 0;
   }
-  *w0 = v;
-  memcpy(payload, &obj, 8);
-  return 1;
+  return cid;
 }
 
-/* after a creation that carried client handle `cid` */
+/* after a creation that carried client handle `cid`: the encoder enters the table, the client's entry names it */
 static void
 handle_created(struct wmtr_host *h, const struct wmtr_req_ext *r, uint8_t *payload, uint64_t cid) {
+  if (cid & WMTR_HANDLE_POOL) return;
   uint64_t obj;
   memcpy(&obj, payload + handle_ret_off(r->h.call), 8);
-  if (!(cid & WMTR_HANDLE_POOL)) {
-    struct wmtr_handle *e = &h->handles[cid % WMTR_HANDLE_SLOTS];
-    atomic_store_explicit(&e->obj, obj, memory_order_relaxed);
-    atomic_store_explicit(&e->id, cid, memory_order_release);
-  }
+  uint64_t t = obj ? x_result(h, obj, 0, 0, r->h.call == 30 ? WMTR_M_ENC_BLIT : r->h.call == 31 ? WMTR_M_ENC_COMPUTE : WMTR_M_ENC_RENDER) : 0;
+  struct wmtr_handle *e = &h->handles[cid % WMTR_HANDLE_SLOTS];
+  atomic_store_explicit(&e->obj, t, memory_order_relaxed);
+  atomic_store_explicit(&e->id, cid, memory_order_release);
   if (!obj) LOG(0, "call %s: creation of client handle %llx failed; the calls using it fail\n", call_name[r->h.call],
                 (unsigned long long)cid);
+  memcpy(payload + handle_ret_off(r->h.call), &cid, 8);
+}
+
+/* NSObject_retain / NSObject_release: references the guest owns are counted per handle, so a release without a
+ * matching retain or +1 result is refused instead of freeing an object others use */
+static NTSTATUS
+host_retain_release(struct wmtr_host *h, uint16_t call, uint64_t v) {
+  if (!v) return STATUS_SUCCESS;
+  if ((v & WMTR_REF_MASK) == WMTR_HANDLE_TAG) {
+    if (v & WMTR_HANDLE_POOL) {
+      uint64_t p = vpool_find(v);
+      if (!p) return STATUS_INVALID_HANDLE;
+      if (call == 1) vpool_pop((struct vpool *)(uintptr_t)p);
+      return STATUS_SUCCESS;
+    }
+    struct wmtr_handle *c = &h->handles[v % WMTR_HANDLE_SLOTS];
+    if (atomic_load_explicit(&c->id, memory_order_acquire) != v) return STATUS_INVALID_HANDLE;
+    v = atomic_load_explicit(&c->obj, memory_order_relaxed);
+  }
+  struct wmtr_htab *t = h->htab;
+  pthread_mutex_lock(&t->lock);
+  struct hent *e = hentry(t, v, WMTR_M_OBJC | WMTR_M_POOL);
+  if (!e) { pthread_mutex_unlock(&t->lock); return STATUS_INVALID_HANDLE; }
+  uint64_t obj = atomic_load_explicit(&e->obj, memory_order_relaxed);
+  if ((atomic_load_explicit(&e->key, memory_order_relaxed) & 0xff) == WMTR_K_POOL) {
+    pthread_mutex_unlock(&t->lock);
+    if (call == 1) vpool_pop((struct vpool *)(uintptr_t)obj);
+    return STATUS_SUCCESS;
+  }
+  if (call == 0) e->grefs++;
+  else if (!e->grefs) {
+    pthread_mutex_unlock(&t->lock);
+    LOG(1, "release of %llx: the client holds no reference; refused\n", (unsigned long long)v);
+    return STATUS_INVALID_HANDLE;
+  } else e->grefs--;
+  pthread_mutex_unlock(&t->lock);
+  if (call == 0) [(id)obj retain];
+  else [(id)obj release];
+  return STATUS_SUCCESS;
+}
+
+/* DispatchData_alloc_init's source: relocated guest bytes, or the token of compiled bitcode (call 77) no longer
+ * than that bitcode */
+static int
+x_dispatch_data(struct xreq *x) {
+  struct unixcall_generic_obj_uint64_obj_ret *p = (void *)x->payload;
+  if (!p->handle || x_relocated(x, x->payload)) return 1;
+  struct hent *e = hentry(x->h->htab, p->handle, WMTR_M_BITCODE_DATA);
+  if (!e || p->arg > e->aux) { x->bad = p->handle; return 0; }
+  x->undo[x->n_undo++] = (typeof(x->undo[0])){0, p->handle};
+  p->handle = atomic_load_explicit(&e->obj, memory_order_relaxed);
+  return 1;
 }
 
 /* ------------------------------------------------------------------------------------------- */
@@ -889,7 +1484,20 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
   uint64_t *orig = r->n_reloc <= 512 ? orig_small : malloc(8u * r->n_reloc);
   int nr = r->n_reloc;
   NTSTATUS st = STATUS_SUCCESS;
-  uint64_t w0 = 0, cid = 0;
+  uint64_t cid = 0;
+  uint16_t call = r->h.call;
+  int is_call = !(r->h.flags & WMTR_F_CONTROL) && call < WMTR_NCALLS;
+  /* which payload words the relocations rewrote: a pointer field must be one of them (or NULL) */
+  static __thread uint64_t *relmap;
+  static __thread uint32_t relmap_words;
+  int use_map = is_call && (call_needs[call] & NEED_PTR);
+  if (use_map) {
+    uint32_t words = (r->payload_size >> 9) + 1;
+    if (words > relmap_words) { free(relmap); relmap = malloc(8u * words); relmap_words = relmap ? words : 0; }
+    if (relmap) memset(relmap, 0, 8u * words);
+    else use_map = 0;
+  }
+  int nd = 0; /* relocations done (orig[] valid) */
   for (int i = 0; i < nr; i++) {
     if (r->payload_size < 8 || relocs[i] > r->payload_size - 8) { st = STATUS_INVALID_PARAMETER; break; }
     uint64_t v;
@@ -898,7 +1506,11 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
     void *p = v ? resolve(h, v, payload, r->payload_size) : NULL;
     if (v && !p) { st = STATUS_INVALID_PARAMETER; LOG(0, "call %u: bad reference %llx\n", r->h.call, (unsigned long long)v); break; }
     memcpy(payload + relocs[i], &p, 8);
+    if (use_map && !(relocs[i] & 7)) relmap[relocs[i] >> 9] |= 1ull << ((relocs[i] >> 3) & 63);
+    nd = i + 1;
   }
+  struct xreq x;
+  x.n_undo = 0;
   if (st == STATUS_SUCCESS) {
     if (r->h.flags & WMTR_F_CONTROL) {
       if (r->h.call == WMTR_CTL_VR_QUERY) /* answered from cached state: never blocks the executor */
@@ -911,8 +1523,17 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
         LOG(0, "call %u: params %u bytes, expected %u\n", r->h.call, r->h.params_size, call_params_size[r->h.call]);
       } else if (__atomic_load_n(&h->faulted, __ATOMIC_ACQUIRE)) {
         st = STATUS_ACCESS_VIOLATION; /* this client already faulted the executor: refuse further work */
-      } else if (!handles_in(h, r, payload, &w0, &cid)) {
-        st = STATUS_INVALID_HANDLE; /* a client handle whose creation failed (logged) */
+      } else if ((r->h.flags & WMTR_F_CLIENT_HANDLE) && !(cid = client_handle_of(r, payload))) {
+        st = STATUS_INVALID_HANDLE;
+      } else if (call == 0 || call == 1) {
+        st = host_retain_release(h, call, *(uint64_t *)payload);
+      } else if ((x.h = h, x.payload = payload, x.psize = r->payload_size, x.params_size = r->h.params_size,
+                  x.relmap = use_map ? relmap : NULL, x.call = call, x.save = r->h.flags & WMTR_F_SYNC, x.bad = 0,
+                  !(call == 114 ? x_dispatch_data(&x) : 1) || (wmtr_call_hfields[call] && !x_in(&x, wmtr_call_hfields[call], payload)))) {
+        /* a handle that names nothing of the expected kind, or a pointer the request did not relocate: refused */
+        st = STATUS_INVALID_HANDLE;
+        atomic_fetch_add_explicit(&h->n_refused, 1, memory_order_relaxed);
+        LOG(1, "call %u (%s): refused handle or pointer %llx\n", call, call_name[call], (unsigned long long)x.bad);
       } else {
         sigjmp_buf jb;
         if (sigsetjmp(jb, 1) == 0) {
@@ -920,11 +1541,18 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
           int cs = callstats_on();
           uint64_t t0 = cs ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
           @autoreleasepool {
-            st = host_call(h, r->h.call, payload, r, relocs, orig);
+            @try {
+              st = host_call(h, r->h.call, payload, r, relocs, orig);
+            } @catch (id e) { /* e.g. a selector the object does not implement: contained like a fault */
+              LOG(0, "call %u raised %s; failing this client's calls from now on\n", call, [[e description] UTF8String]);
+              __atomic_store_n(&h->faulted, 1, __ATOMIC_RELEASE);
+              st = STATUS_ACCESS_VIOLATION;
+            }
           }
           if (cs) callstats_add(r->h.call, r->h.flags & WMTR_F_SYNC, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
           fault_jmp = NULL;
-          if (cid) handle_created(h, r, payload, cid);
+          if (cid) handle_created(h, r, payload, cid); /* the client named the result itself */
+          else if (call_needs[call] & NEED_OUT) x_out(&x, wmtr_call_hfields[call], payload); /* results become handles */
           uint32_t ti = atomic_fetch_add(&h->trace_n, 1) % 128;
           h->trace[ti].call = r->h.call; h->trace[ti].slot = r->h.slot; h->trace[ti].st = (uint32_t)st;
           for (int k = 0; k < 4; k++) h->trace[ti].q[k] = r->h.params_size >= 8u * (k + 1) ? ((const uint64_t *)payload)[k] : 0;
@@ -954,7 +1582,12 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
       }
     } else st = STATUS_INVALID_PARAMETER;
   }
-  if (w0) memcpy(payload, &w0, 8); /* the caller gets its own handle back */
+  if (r->h.flags & WMTR_F_SYNC) {
+    /* the reply carries the caller's own values: its handles, and its wire references instead of host addresses */
+    for (uint32_t i = 0; i < x.n_undo; i++) memcpy(payload + x.undo[i].off, &x.undo[i].v, 8);
+    for (int i = 0; i < nd; i++)
+      if (relocs[i] + 8 <= r->h.params_size) memcpy(payload + relocs[i], &orig[i], 8);
+  }
   reply(h, r, outs, r->n_out, payload, st);
   if (orig != orig_small) free(orig);
 }
@@ -1096,6 +1729,9 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   h->slots = (struct wmtr_slot *)((uint8_t *)ring + WMTR_SLOTS_OFFSET);
   h->ops = ops; h->ctx = ctx;
   h->handles = calloc(WMTR_HANDLE_SLOTS, sizeof *h->handles);
+  h->htab = htab_create();
+  static pthread_once_t xlate_once = PTHREAD_ONCE_INIT;
+  pthread_once(&xlate_once, xlate_init);
   pthread_mutex_init(&h->lock, NULL); pthread_cond_init(&h->cond, NULL);
   const char *sp = getenv("WMTR_HOST_SPIN_US");
   wmtr_host_set_spin(h, (uint64_t)(sp && *sp ? atoll(sp) : WMTR_HOST_SPIN_US_DEFAULT) * 1000);
@@ -1166,6 +1802,29 @@ wmtr_host_destroy(struct wmtr_host *h) {
     else { callstats_vr(vr, NULL); wmtr_vr_destroy(vr); }
     h->owns_vr = 0;
   }
+  htab_unref(h->htab); /* entries of objects still alive keep it until their watchers go */
+  h->htab = NULL;
+}
+
+/* test hooks: put a host object into a context's table as if a call had returned it; the object a handle names
+ * (any kind, 0 if none); requests refused for a bad handle or pointer */
+__attribute__((visibility("default"))) uint64_t
+wmtr_host_debug_handle(struct wmtr_host *h, uint64_t obj, int kind, int plus1) {
+  /* kind 0: a real object, classified and watched like a call's result; else a test's stand-in, never touched */
+  return hinsert_w(h->htab, obj, kind ? kind : classify(obj), plus1, 0, !kind);
+}
+__attribute__((visibility("default"))) uint64_t
+wmtr_host_debug_object(struct wmtr_host *h, uint64_t handle) {
+  return resolve_handle(h, handle, ~0ull);
+}
+__attribute__((visibility("default"))) int
+wmtr_host_debug_kind(struct wmtr_host *h, uint64_t handle) {
+  struct hent *e = hentry(h->htab, handle, ~0ull);
+  return e ? (int)(atomic_load(&e->key) & 0xff) : -1;
+}
+__attribute__((visibility("default"))) uint64_t
+wmtr_host_refused(struct wmtr_host *h) {
+  return atomic_load(&h->n_refused);
 }
 
 uint64_t

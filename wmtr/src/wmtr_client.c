@@ -342,6 +342,18 @@ b_in(uint32_t field_off, const void *src, uint64_t size) {
   return o;
 }
 
+/* an input that carries object handles: always in the request's own bytes (the host translates handles only in
+ * its private copy of the request, never in shared arena memory; wmtr_handles.h) */
+static uint32_t
+b_in_handles(uint32_t field_off, const void *src, uint64_t size) {
+  if (!src) { uint64_t z = 0; memcpy(B.buf + field_off, &z, 8); return UINT32_MAX; }
+  if (size > WMTR_RING_BYTES / 4) { B.error = 1; return UINT32_MAX; }
+  uint32_t o = b_grow((uint32_t)size ? (uint32_t)size : 1);
+  memcpy(B.buf + o, src, size);
+  b_reloc(field_off, WMTR_REF_EXTRA | o);
+  return o;
+}
+
 static void
 b_out(uint32_t field_off, void *dst, uint64_t size, int inout) {
   if (!dst) { uint64_t z = 0; memcpy(B.buf + field_off, &z, 8); return; }
@@ -904,8 +916,8 @@ dispatch(uint16_t call, void *params, uint32_t size, int sync) {
   case 118: { struct unixcall_cache_set *p = params; b_begin(p, size); b_in(OFF(struct unixcall_cache_set, key), p->key.ptr, p->key_length); break; }
   case 119: { struct unixcall_setmetalcachepath *p = params; b_begin(p, size); b_cstr(OFF(struct unixcall_setmetalcachepath, path), p->path.ptr); break; }
   case 128: { struct unixcall_mtlcountersamplebuffer_resolvecounterrange *p = params; b_begin(p, size); b_out(OFF(struct unixcall_mtlcountersamplebuffer_resolvecounterrange, data_out), p->data_out.ptr, p->data_length, 0); break; }
-  case 129: { struct unixcall_mtlcommandbuffer_blitcommandencoderwithsamplebuffers *p = params; b_begin(p, size); b_in(OFF(struct unixcall_mtlcommandbuffer_blitcommandencoderwithsamplebuffers, attachments), p->attachments.ptr, p->num_attachments * sizeof(struct WMTSampleBufferAttachmentInfo)); break; }
-  case 133: case 134: { struct unixcall_mtlresidencyset_addallocations *p = params; b_begin(p, size); b_in(OFF(struct unixcall_mtlresidencyset_addallocations, allocations), p->allocations.ptr, p->count * 8); break; }
+  case 129: { struct unixcall_mtlcommandbuffer_blitcommandencoderwithsamplebuffers *p = params; b_begin(p, size); b_in_handles(OFF(struct unixcall_mtlcommandbuffer_blitcommandencoderwithsamplebuffers, attachments), p->attachments.ptr, p->num_attachments * sizeof(struct WMTSampleBufferAttachmentInfo)); break; }
+  case 133: case 134: { struct unixcall_mtlresidencyset_addallocations *p = params; b_begin(p, size); b_in_handles(OFF(struct unixcall_mtlresidencyset_addallocations, allocations), p->allocations.ptr, p->count * 8); break; }
   case 138: b_begin(params, size); b_in(OFF(struct unixcall_mtldevice_newheap, info), ((struct unixcall_mtldevice_newheap *)params)->info.ptr, sizeof(struct WMTHeapInfo)); break;
   case 140: b_begin(params, size); b_out(OFF(struct unixcall_mtldevice_heaptexturesizeandalign, info), ((struct unixcall_mtldevice_heaptexturesizeandalign *)params)->info.ptr, sizeof(struct WMTTextureInfo), 1); break;
   case 141: { struct unixcall_mtlheap_newbuffer *p = params; struct WMTBufferInfo *i = p->info.ptr; b_begin(p, size);
