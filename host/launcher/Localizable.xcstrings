@@ -5543,18 +5543,34 @@
         }
       }
     },
-    "Sets bitrate and sharpening together: Low for a weak Wi-Fi link, Ultra for a strong one. Refresh rate and stream size stay with the headset." : {
+    "Sets bitrate and sharpening together: Low for a weak Wi-Fi link, Ultra for a strong one; these keep the headset's stream size. Sharp also streams a larger image per eye (1248 × 1344) for a sharper periphery, from the next start; it needs a strong link. The refresh rate stays with the headset." : {
       "localizations" : {
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Задаёт битрейт и резкость вместе: «Низкое» — для слабой сети Wi-Fi, «Ультра» — для сильной. Частота обновления и размер потока остаются за гарнитурой."
+            "value" : "Задаёт битрейт и резкость вместе: «Низкое» — для слабой сети Wi-Fi, «Ультра» — для сильной; эти пресеты сохраняют размер потока гарнитуры. «Чёткое» также передаёт увеличенное изображение для каждого глаза (1248 × 1344), чтобы периферия была чётче; действует со следующего запуска и требует сильной сети. Частота обновления остаётся за гарнитурой."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "同时设置码率和锐化：“低”适合较弱的 Wi-Fi，“超高”适合较强的 Wi-Fi。刷新率和串流尺寸仍由头显决定。"
+            "value" : "同时设置码率和锐化：“低”适合较弱的 Wi-Fi，“超高”适合较强的 Wi-Fi，这些预设保留头显的串流尺寸。“清晰”还会为每只眼睛串流更大的图像（1248 × 1344），使周边视野更清晰；下次启动时生效，需要较强的网络。刷新率仍由头显决定。"
+          }
+        }
+      }
+    },
+    "Sharp" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Чёткое"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "清晰"
           }
         }
       }

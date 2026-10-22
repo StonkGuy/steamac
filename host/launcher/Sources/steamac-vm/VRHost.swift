@@ -276,7 +276,8 @@ enum VRSelfTest {
                     "--keyframe-interval", "2", "--tcp-only", "--app", "620=Portal 2"],
               "quality/codec/stream arguments: \(q)")
         let presets = LauncherSettings.VRPreset.allCases
-        check(presets.allSatisfy { $0.renderScale == 1 } && presets.map(\.bitrateMbps) == [30, 40, 50, 80] && LauncherSettings.VRPreset.high.bitrateMbps == LauncherSettings.vrDefaultBitrateMbps
+        check(presets.allSatisfy { $0.renderScale == 1 } && presets.map(\.bitrateMbps) == [30, 40, 50, 80, 80] && presets.map(\.eyeSize) == ["", "", "", "", "1248x1344"]
+              && LauncherSettings.vrEyeSizeValid(LauncherSettings.VRPreset.sharp.eyeSize) && LauncherSettings.VRPreset.high.bitrateMbps == LauncherSettings.vrDefaultBitrateMbps
               && presets.allSatisfy { LauncherSettings.vrRenderScaleRange.contains($0.renderScale)
                                       && LauncherSettings.vrBitrateRange.contains($0.bitrateMbps) }, "VR presets")
         enc.vrGameAppID = 0
