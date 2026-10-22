@@ -170,6 +170,10 @@
 #              into gfx->pipe; make the flush and dispatch bails structural (command-buffer error, no dispatch
 #              without a render state) instead of asserts. Not yet live-verified: the recorded runs under
 #              MESA_KK_ASYNC_PIPELINES=2 predate this patch's build.
+#   0049       steamac: kk_DestroyDevice released the Metal compiler before joining the MESA_KK_ASYNC_PIPELINES
+#              workers, so a pipeline still alive at vkDestroyDevice could have its render pipeline state built
+#              on a freed compiler (SIGSEGV / pointer-authentication fault in AGXMetal compileProgram, main thread
+#              in util_queue_destroy). The queue is now destroyed first (tests/async-teardown.c).
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -403,6 +407,7 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0042 = steamac: robustness fixes (XFB counter bounds, sparse container_of, minmax update-after-bind scan, sparse view underflow)"
 	echo "  0043 = steamac: drop a draw whose async render pipeline state failed instead of recording it with a NULL state"
 	echo "  0047 = steamac: gate the async draw on the program the draw actually uses (not the bound VS)"
+	echo "  0049 = steamac: join the async pipeline workers before the device releases its Metal compiler"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."

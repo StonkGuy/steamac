@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Thu, 22 Oct 2026 12:41:04 +0300
+Subject: [PATCH] kk: join the async pipeline workers before releasing the
+ compiler
+
+MESA_KK_ASYNC_PIPELINES builds a graphics pipeline's Metal render pipeline
+state on a worker (0041).  kk_DestroyDevice released the device's Metal
+compiler (kk_release_compiler) and only afterwards joined the workers in
+util_queue_destroy.  vkDestroyPipeline waits for its program's job, but a
+pipeline still alive at vkDestroyDevice keeps its job queued or running,
+and a worker inside newRenderPipelineStateWithDescriptor then used the freed
+MTL4 compiler: SIGSEGV or a pointer-authentication fault in AGXMetal's
+compileProgram / populateRenderPipelineDescriptorInfo, with the main thread
+in util_queue_destroy's thrd_join.
+
+Destroy the queue first in kk_DestroyDevice, before anything a worker uses
+is released.  Running jobs finish, queued ones are dropped with their
+fences signalled, so a later kk_shader_destroy returns from
+util_queue_drop_job without touching the destroyed queue.  No cost outside
+device destruction, and none when async pipelines are off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/kosmickrisp/vulkan/kk_device.c | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
+index ff91cc3..a3a7798 100644
+--- a/src/kosmickrisp/vulkan/kk_device.c
++++ b/src/kosmickrisp/vulkan/kk_device.c
+@@ -478,6 +478,16 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+ 
+    kk_device_note_lifecycle(dev, false);
+ 
++   /* MESA_KK_ASYNC_PIPELINES: a worker may still be building the render
++    * pipeline state of a pipeline that is alive at device destruction (the
++    * application, or a guest context being torn down, did not destroy it).
++    * The worker compiles through dev->mtl_compiler_handle, so join the
++    * workers before anything they use is released. util_queue_destroy
++    * signals the fences of jobs no worker picked up, so a later
++    * kk_shader_destroy of such a program does not touch the queue. */
++   if (dev->async_pipelines)
++      util_queue_destroy(&dev->pipeline_queue);
++
+    /* End capture before we start releasing resources. Otherwise, Metal capture
+     * may run into issues. */
+    if (pdev->settings.gpu_capture_enabled) {
+@@ -506,11 +516,6 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+    kk_release_compiler(dev);
+    simple_mtx_destroy(&dev->lazy_pipeline_lock);
+ 
+-   /* Every shader is destroyed before vk_device_finish releases the pipeline
+-    * cache (and its objects), so no async pipeline job can be in flight. */
+-   if (dev->async_pipelines)
+-      util_queue_destroy(&dev->pipeline_queue);
+-
+    vk_device_finish(&dev->vk);
+ 
+    vk_free(&dev->vk.alloc, dev);
+-- 
+2.39.5 (Apple Git-154)
+
