@@ -1068,6 +1068,11 @@ private struct AdvancedTab: View {
                            now: false, key: .frameLatency)
                 }
                 .disabled(settings.graphicsPath == .dxmt)
+                Toggle(isOn: $settings.nativeYtdlp) {
+                    Label2(title: "Native yt-dlp for VRChat",
+                           detail: String(localized: "VRChat's video players resolve links with a native yt-dlp in the guest instead of its Windows copy under emulation, which can stall the game for up to a minute. Off puts VRChat's own copy back."),
+                           now: false, key: .nativeYtdlp)
+                }
             }
             Section {
                 HStack {

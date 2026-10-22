@@ -1,0 +1,14 @@
+# steamac: native yt-dlp server for VRChat's video players (steamac.ytdlp=native, off by default): answers
+# the Tools/yt-dlp.exe stub on 127.0.0.1:47811 with a native arm64 yt-dlp (see /usr/lib/steamac/steam-ytdlp).
+# Exits at once when the option is off. Pulled in by the session targets through .wants symlinks in the layer.
+[Unit]
+Description=FX Steam Launcher native yt-dlp for VRChat
+PartOf=gamescope-session.target plasma-session.target
+
+[Service]
+Type=simple
+Slice=session.slice
+ExecStart=/usr/lib/steamac/steam-ytdlp --serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=3

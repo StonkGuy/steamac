@@ -1383,6 +1383,22 @@
         }
       }
     },
+    "VRChat's video players resolve links with a native yt-dlp in the guest instead of its Windows copy under emulation, which can stall the game for up to a minute. Off puts VRChat's own copy back." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Видеоплееры VRChat получают ссылки через нативный yt-dlp в гостевой системе, а не через его копию для Windows под эмуляцией, из-за которой игра может зависать до минуты. Если выключить, вернётся собственная копия VRChat."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VRChat 的视频播放器通过客体系统中的原生 yt-dlp 解析链接，而不是在模拟下运行其 Windows 版本（可能使游戏卡顿长达一分钟）。关闭后恢复 VRChat 自带的版本。"
+          }
+        }
+      }
+    },
     "connected" : {
       "localizations" : {
         "ru" : {
@@ -3967,6 +3983,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "静音"
+          }
+        }
+      }
+    },
+    "Native yt-dlp for VRChat" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нативный yt-dlp для VRChat"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VRChat 使用原生 yt-dlp"
           }
         }
       }

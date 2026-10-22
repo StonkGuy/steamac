@@ -79,6 +79,7 @@ struct Options {
     /// Settings > Advanced "Frame latency" (kernel cmdline `steamac.frame_latency=1`): the guest's
     /// DXVK config gets dxgi.maxFrameLatency = 1 for the Vulkan path. Default false: unset.
     var frameLatency = false
+    var nativeYtdlp = false
     /// Settings > VR "VR (experimental)" / --vr: start steamac-vrhost with the VM (VRHost) and tell the
     /// guest (kernel cmdline `steamac.vr=1`). Default off.
     var vr = false
@@ -168,6 +169,7 @@ struct Options {
                       [--no-crash-reports] [--steam-client frame|deck|deckbeta]
                       [--vulkan-driver moltenvk|kosmickrisp] [--graphics-path dxmt|vulkan]
                       [--frame-latency | --no-frame-latency] [--lan-remote-play | --no-lan-remote-play]
+                      [--native-ytdlp | --no-native-ytdlp]
                       [--vr | --no-vr] [--vr-bitrate MBIT] [--vr-size WxH]
                       [--vr-codec auto|hevc|h264] [--no-vr-pair-on-request] [--no-vr-audio]
            steamac-vm --selftest-display [--headless] [--selftest-out DIR] [--display WxH]
@@ -266,6 +268,12 @@ struct Options {
                            dxgi.maxFrameLatency = 1 (Vulkan path only), trading some throughput for
                            lower input latency. Off means no key is added, so the guest side is
                            unchanged. --no-frame-latency turns it off for this run.
+      --native-ytdlp       native yt-dlp for VRChat (kernel cmdline steamac.ytdlp=native; default:
+                           Settings > Advanced "Native yt-dlp for VRChat", off): the guest swaps
+                           VRChat's Tools/yt-dlp.exe in its Proton prefix for a stub that asks a
+                           native arm64 yt-dlp, so resolving a video URL does not run a Windows
+                           yt-dlp under Wine and FEX. Off restores VRChat's copy. --no-native-ytdlp
+                           turns it off for this run.
       --vr                 VR, experimental (default: Settings > VR "VR (experimental)", off):
                            starts steamac-vrhost (WiVRn-compatible headset server, bundled) with the
                            VM and links it to the DXMT path's Metal executor, so games' eye textures
@@ -431,6 +439,8 @@ struct Options {
             case "--selftest-graphics-path": o.selftestGraphicsPath = true
             case "--frame-latency": o.frameLatency = true
             case "--no-frame-latency": o.frameLatency = false
+            case "--native-ytdlp": o.nativeYtdlp = true
+            case "--no-native-ytdlp": o.nativeYtdlp = false
             case "--vr": o.vr = true
             case "--no-vr": o.vr = false
             case "--vr-bitrate":
@@ -551,6 +561,12 @@ struct Options {
 
     /// Settings > VR "VR (experimental)" -> kernel cmdline key: `steamac.vr=1` when this boot starts the
     /// VR host, nothing otherwise (absent is the default, so the guest side is unchanged).
+    /// Settings > Advanced "Native yt-dlp for VRChat" -> kernel cmdline key: on writes `steamac.ytdlp=native`,
+    /// off writes nothing (absent is the default; the guest then restores VRChat's own yt-dlp.exe).
+    static func nativeYtdlpArg(_ on: Bool) -> (key: String, value: String)? {
+        on ? ("steamac.ytdlp", "native") : nil
+    }
+
     static func vrArg(_ on: Bool) -> (key: String, value: String)? {
         on ? ("steamac.vr", "1") : nil
     }
@@ -596,6 +612,7 @@ struct Options {
             add("steamac.gfx", o.graphicsPath.rawValue)
             // only written when on; absent is the default (off), so an explicit =0 needs no key
             if let a = Options.frameLatencyArg(o.frameLatency) { add(a.key, a.value) }
+            if let a = Options.nativeYtdlpArg(o.nativeYtdlp) { add(a.key, a.value) }
             if let a = Options.vrArg(o.vr && VRHost.unavailableReason(o) == nil) { add(a.key, a.value) }
             if o.macTime {
                 add("steamac.tz", MacTime.zone)
@@ -654,6 +671,9 @@ struct Options {
         if given("--frame-latency") || given("--no-frame-latency") {
             ov[.frameLatency] = frameLatency ? "--frame-latency" : "--no-frame-latency"
         } else { frameLatency = s.frameLatency }
+        if given("--native-ytdlp") || given("--no-native-ytdlp") {
+            ov[.nativeYtdlp] = nativeYtdlp ? "--native-ytdlp" : "--no-native-ytdlp"
+        } else { nativeYtdlp = s.nativeYtdlp }
         if given("--vr") || given("--no-vr") { ov[.vrEnabled] = vr ? "--vr" : "--no-vr" } else { vr = s.vrEnabled }
         if given("--vr-bitrate") { ov[.vrBitrateMbps] = "--vr-bitrate \(vrBitrateMbps)" } else { vrBitrateMbps = s.vrBitrateMbps }
         if given("--vr-size") { ov[.vrEyeSize] = "--vr-size \(vrEyeSize)" } else { vrEyeSize = s.vrEyeSize }

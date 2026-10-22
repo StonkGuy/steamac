@@ -39,6 +39,9 @@ enum GraphicsPathSelfTest {
               "frame latency on must map to steamac.frame_latency=1")
         check(Options.frameLatencyArg(false) == nil, "frame latency off must add no kernel key")
         check(Options().frameLatency == false, "frame latency must default off")
+        check(Options.nativeYtdlpArg(true)?.key == "steamac.ytdlp" && Options.nativeYtdlpArg(true)?.value == "native",
+              "native yt-dlp on must add steamac.ytdlp=native")
+        check(Options.nativeYtdlpArg(false) == nil, "native yt-dlp off must add no kernel key")
         log("selftest-graphics-path: frame latency \(Options.frameLatencyArg(true)?.key ?? "-")=\(Options.frameLatencyArg(true)?.value ?? "off")")
         log(failures == 0 ? "selftest-graphics-path: PASS" : "selftest-graphics-path: \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)

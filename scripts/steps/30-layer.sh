@@ -46,6 +46,14 @@ else
     dxmt_info=ABSENT
 fi
 
+# Native yt-dlp for VRChat (steam-ytdlp, steamac.ytdlp=native): the Tools/yt-dlp.exe stub, built by
+# guest/ytdlp-stub/build.sh into work/out/ytdlp-stub. Optional: without it the option leaves VRChat's yt-dlp.exe.
+YTDLP=/work/out/ytdlp-stub/yt-dlp.exe
+if [[ -f $YTDLP ]]; then
+    install -m 0644 "$YTDLP" "$ST/usr/lib/steamac/ytdlp/yt-dlp.exe"
+    echo "[layer] included the yt-dlp stub ($(sha256sum < "$YTDLP" | cut -c1-16))"
+fi
+
 # VR (steam-vr-path, the launcher's "VR (experimental)"): Proton's vrclient_x64 rebuilt with
 # guest/proton-vrclient/patches (PE dll + unixlib) and the guest/vr OpenVR runtime (build-sniper.sh), staged in
 # /work/out/vr as x86_64-windows/vrclient_x64.dll, x86_64-unix/vrclient_x64.so, runtime/bin/linux64/vrclient.so.
@@ -101,7 +109,7 @@ grep -q 'fx-progress-agent sleep suspend$' "$ST/usr/lib/systemd/system/systemd-s
 for f in usr/bin/splctl usr/lib/rauc/post-install.sh usr/lib/steamac/kernelsetup.sh \
          usr/lib/steamac/rauc-shims/steamos-chroot usr/lib/steamac/steam-gfx-env \
          usr/lib/steamac/steam-shader-defaults usr/lib/steamac/steam-client \
-         usr/lib/steamac/nested-desktop usr/lib/steamac/steam-gfx-path usr/lib/steamac/steam-vr-path usr/lib/steamac/steam-frame-latency usr/lib/steamac/mem-trim usr/lib/steamac/steam-ui-gpu \
+         usr/lib/steamac/nested-desktop usr/lib/steamac/steam-gfx-path usr/lib/steamac/steam-vr-path usr/lib/steamac/steam-frame-latency usr/lib/steamac/steam-ytdlp usr/lib/steamac/mem-trim usr/lib/steamac/steam-ui-gpu \
          usr/lib/steamac/desktop-bin/kwin_wayland_wrapper \
          usr/lib/steamac/desktop-bin/steamosctl usr/lib/steamos/gamescope-session; do
     [[ -x $ST/$f ]] || { echo "[layer] $f missing or not executable" >&2; exit 1; }
@@ -120,6 +128,9 @@ grep -q 'ExecStartPre=-/usr/lib/steamac/steam-gfx-path' "$ST/usr/lib/systemd/use
     || { echo "[layer] steam-gfx-path (steam.service ExecStartPre, steamac-gfx-path.service) missing" >&2; exit 1; }
 grep -q 'ExecStartPre=-/usr/lib/steamac/steam-vr-path' "$ST/usr/lib/systemd/user/steam.service.d/50-steamac.conf" \
     || { echo "[layer] steam-vr-path (steam.service ExecStartPre) missing" >&2; exit 1; }
+grep -q 'ExecStartPre=-/usr/lib/steamac/steam-ytdlp' "$ST/usr/lib/systemd/user/steam.service.d/50-steamac.conf" \
+    && [[ -L $ST/usr/lib/systemd/user/gamescope-session.target.wants/steamac-ytdlp.service ]] \
+    || { echo "[layer] steam-ytdlp (steam.service ExecStartPre, steamac-ytdlp.service) missing" >&2; exit 1; }
 grep -q 'ExecStartPre=-/usr/lib/steamac/steam-frame-latency' "$ST/usr/lib/systemd/user/steam.service.d/50-steamac.conf" \
     || { echo "[layer] steam-frame-latency (steam.service ExecStartPre) missing" >&2; exit 1; }
 
