@@ -1,32 +1,92 @@
-From a10b19e093003b4e38d99db7ac0f3d197d7650bc Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
-Date: Sat, 10 Oct 2026 10:10:04 +0300
+Date: Sun, 11 Oct 2026 01:40:48 +0300
 Subject: [PATCH] rutabaga_gfx(macos): wmtr context type for remoted DXMT
  winemetal calls
 
-A virtio-gpu context type (capset 30) whose guest process forwards DXMT's
-winemetal unix calls through a shared-memory ring to a host executor
-(libwmtr_host.dylib, loaded with dlopen) that runs them against Metal.
-Blobs are POSIX shared memory mapped into the guest by the existing SHM
-blob path and into the VMM for the executor; EXECBUFFER carries RING,
-KICK and WAIT; WAIT fences complete when the reply slot reaches its
-sequence number. The component exists only with STEAMAC_WMTR=1 and a
-loadable library, so other guests see no change. The device's
-num_capsets counts it then (the stock value 5 covers only virgl, virgl2,
-venus, drm and cross-domain, so the guest would never query index 5);
-both sides read one cached load of the library.
+Add an opt-in virtio-gpu context type (capset 30, "wmtr") whose guest
+process forwards DXMT's winemetal unix calls through a shared-memory
+ring to a host executor that runs them against Metal. The executor is a
+separate library (libwmtr_host.dylib, STEAMAC_WMTR_LIB or the default
+name) loaded with dlopen and used only if its wmtr_host_abi_version() is
+one this patch implements (1: create, kick, progress, destroy and
+wmtr_layout, and two callbacks, blob_ptr and wake; 2: ABI 1 plus three
+optional callbacks appended to the ops, create_view, release_view and
+map_path, taken from the library's own wmtr_present_create_view,
+wmtr_present_release_view and wmtr_map_path when it exports them and
+left null otherwise, so the executor fails a present / keeps a path
+cleanly); this patch only carries the transport:
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+- blobs (blob_id = ring/buffer number below 1024, checked before
+  narrowing to u32; each id created once, as blobs live as long as the
+  context; size at most max_blob, 4 GiB) are POSIX shared memory, mapped
+  into the guest by the existing SHM blob path and into the VMM for the
+  executor;
+- EXECBUFFER carries 24-byte commands: RING (blob 0 is initialised:
+  start the executor; refused when blob 0, sized by the guest, is
+  smaller than the ring layout the library reports through wmtr_layout,
+  as the executor uses fixed offsets up to it), KICK (wake it), WAIT
+  (the fence of this EXECBUFFER completes when the executor's reply
+  slot reaches the sequence number; every WAIT of an EXECBUFFER holds
+  its fence, and WAITs of an EXECBUFFER without a fence, or of a
+  refused one, hold none; progress is checked and the waiter queued
+  under one lock, so a reply cannot slip between them, and RING
+  re-checks queued fences once the executor handle is stored, so a
+  reply during wmtr_host_create is not lost); a command buffer that is
+  not a whole number of commands is refused; each (context, ring) is an in-order
+  timeline, and reply slots share rings (slot s on ring 1 + s % 62,
+  events and slots >= 64 on ring 63, as the guest maps them), so the
+  fences of a ring complete strictly in FIFO order: one whose WAIT
+  already holds, or that has no WAIT, waits behind an earlier pending
+  one; pending fences complete when the context is destroyed;
+- teardown takes the executor handle out under its lock before
+  wmtr_host_destroy, so a wake during destroy never reaches the executor
+  being freed; the library runs no callback after wmtr_host_destroy
+  returns, and the context frees its state and mappings only then;
+  the library must not call wake while holding a lock that
+  wmtr_host_progress takes, and checks the guest's slot and ring
+  contents itself;
+- the capset id is below 32 because VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs
+  reports a 32-bit mask; no stock rutabaga capset uses 30.
+
+The component exists only with STEAMAC_WMTR=1 and a loadable library
+that exports the host API (one cached load shared by the device's config
+space and the rutabaga builder). Then num_capsets counts it: the stock 5
+covers virgl, virgl2, venus, drm and cross-domain, and the guest never
+asks for an index at or above that count. Without it nothing changes: no
+library is loaded and the guest sees the same five capsets.
+
+Unit tests (cargo test --lib wmtr in rutabaga_gfx, against a stand-in
+executor: no Metal, no library): off unless enabled; a WAIT fence stays
+pending until the reply and completes on it; satisfied WAITs and fences
+without a WAIT complete at once on an otherwise idle ring; pending
+fences complete on context drop and the executor is destroyed; malformed
+blobs and commands are rejected; on a shared ring (slots 0 and 62,
+events and slot 70) later fences wait for an earlier pending one and
+complete with it, in order; reused blob ids, ids at or above 1024 (1 <<
+32, u64::MAX) and blobs over max_blob are rejected and leave the
+existing blob in place; RING on a blob 0 smaller than the ring layout
+is refused before the executor starts; a library without
+wmtr_host_abi_version, with a version outside 1..=2, with part of the
+API or without wmtr_layout is refused; an ABI 2 library gets the view
+callbacks it exports and an ABI 1 library none; a wake delivered
+while the executor is destroyed does not call into it; two WAITs of one
+EXECBUFFER (slots 0 and 62) both hold its fence; WAITs of an EXECBUFFER
+without a fence or of a refused one hold no later fence; a reply from
+inside wmtr_host_create completes the fence waiting for it when RING
+returns; a partial command is refused. virtio::gpu: num_capsets stays 5
+without STEAMAC_WMTR.
 ---
- src/devices/src/virtio/gpu/device.rs   |  28 +-
+ src/devices/src/virtio/gpu/device.rs   |  23 +-
  src/rutabaga_gfx/src/lib.rs            |   9 +
  src/rutabaga_gfx/src/rutabaga_core.rs  |  18 +-
  src/rutabaga_gfx/src/rutabaga_utils.rs |   3 +
- src/rutabaga_gfx/src/wmtr.rs           | 518 +++++++++++++++++++++++++++++++++
- 5 files changed, 573 insertions(+), 3 deletions(-)
+ src/rutabaga_gfx/src/wmtr.rs           | 856 +++++++++++++++++++++++++
+ 5 files changed, 906 insertions(+), 3 deletions(-)
+ create mode 100644 src/rutabaga_gfx/src/wmtr.rs
 
 diff --git a/src/devices/src/virtio/gpu/device.rs b/src/devices/src/virtio/gpu/device.rs
-index cc0f8d4..d1d562e 100644
+index cc0f8d4..b58075f 100644
 --- a/src/devices/src/virtio/gpu/device.rs
 +++ b/src/devices/src/virtio/gpu/device.rs
 @@ -181,7 +181,9 @@ impl VirtioDevice for Gpu {
@@ -40,33 +100,28 @@ index cc0f8d4..d1d562e 100644
              blob_alignment: self.blob_alignment,
          };
  
-@@ -293,4 +295,28 @@ mod tests {
+@@ -293,4 +295,23 @@ mod tests {
          let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u32;
          assert_eq!(u32::from_le_bytes(data), page_size);
      }
 +
-+    /// The wmtr capset is listed after the five stock ones, so the count must include it or the guest
-+    /// never queries its index. Needs STEAMAC_WMTR_LIB=/path/to/libwmtr_host.dylib (skipped when unset).
-+    #[cfg(target_os = "macos")]
++    /// Without STEAMAC_WMTR=1 the device offers the five stock capsets, as before the wmtr context.
 +    #[test]
-+    fn num_capsets_includes_wmtr() {
-+        if std::env::var("STEAMAC_WMTR_LIB").is_err() {
-+            eprintln!("STEAMAC_WMTR_LIB unset: skipped");
-+            return;
-+        }
-+        std::env::set_var("STEAMAC_WMTR", "1");
++    fn num_capsets_stock_without_wmtr() {
++        std::env::remove_var("STEAMAC_WMTR");
 +        let gpu = Gpu::new(
 +            0,
 +            None,
 +            Box::new([]),
 +            NoopDisplayBackend::into_display_backend(None),
 +            Arc::new(DisplayControl::new(&[])),
++            #[cfg(target_os = "macos")]
 +            crossbeam_channel::unbounded().0,
 +        )
 +        .unwrap();
 +        let mut data = [0u8; 4];
 +        gpu.read_config(12, &mut data);
-+        assert_eq!(u32::from_le_bytes(data), 6);
++        assert_eq!(u32::from_le_bytes(data), 5);
 +    }
  }
 diff --git a/src/rutabaga_gfx/src/lib.rs b/src/rutabaga_gfx/src/lib.rs
@@ -173,12 +228,11 @@ index 085912c..3ccfd93 100644
  /// Rutabaga handle types (memory and sync in same namespace)
 diff --git a/src/rutabaga_gfx/src/wmtr.rs b/src/rutabaga_gfx/src/wmtr.rs
 new file mode 100644
-index 0000000..e86fcb6
+index 0000000..90b1ba1
 --- /dev/null
 +++ b/src/rutabaga_gfx/src/wmtr.rs
-@@ -0,0 +1,518 @@
-+// Copyright 2026 the steamac lean-graphics contributors
-+// SPDX-License-Identifier: BSD-3-Clause
+@@ -0,0 +1,900 @@
++// SPDX-License-Identifier: Apache-2.0
 +
 +//! wmtr: a virtio-gpu context type that carries DXMT's winemetal unix calls from a guest process
 +//! to a host executor (libwmtr_host.dylib, loaded at runtime) that runs them against Metal.
@@ -187,13 +241,22 @@ index 0000000..e86fcb6
 +//! number; this context backs each one with POSIX shared memory that is mapped both into the guest
 +//! (by the VMM's existing SHM blob path) and into this process for the executor. EXECBUFFER carries
 +//! 24-byte commands: RING (blob 0 is initialised: start the executor), KICK (wake it), WAIT (the
-+//! next fence on this ring completes when the reply slot or event queue reaches `seq`).
++//! fence of this EXECBUFFER completes when the reply slot or event queue reaches `seq`). Every WAIT
++//! of an EXECBUFFER applies to its fence; WAITs of an EXECBUFFER without a fence are dropped.
++//!
++//! Each (context, ring) is an in-order timeline for libkrun and the guest: signalling a fence
++//! retires every earlier fence on its ring. Reply slots share rings (slot s waits on ring
++//! 1 + s % 62, events and slots >= 64 on ring 63, as the guest maps them), so fences on a ring
++//! are completed strictly in FIFO order: a fence whose condition already holds waits behind an
++//! earlier one that is still pending.
 +//!
 +//! The component only exists when STEAMAC_WMTR=1 and the library loads, so nothing changes for
 +//! guests that never ask for the capset.
 +
 +use log::{error, info};
 +use std::collections::BTreeMap;
++use std::collections::VecDeque;
++use std::ffi::c_char;
 +use std::ffi::c_void;
 +use std::ffi::CString;
 +use std::sync::Arc;
@@ -213,22 +276,51 @@ index 0000000..e86fcb6
 +const WMTR_VGPU_KICK: u32 = 2;
 +const WMTR_VGPU_WAIT: u32 = 3;
 +const CMD_SIZE: usize = 24;
++/// Blob ids are wmtr blob numbers 0..MAX_BLOBS (0 is the ring); each id is created once.
++const MAX_BLOBS: u64 = 1024;
++/// Largest blob, advertised to the guest as max_blob in the capset.
++const MAX_BLOB_SIZE: u64 = 4 << 30;
 +
++/// Version of the interface between this context and the host library: the exported functions
++/// below and the layout of `WmtrHostOps`. The library reports its own from
++/// `wmtr_host_abi_version()`; any other value (or a library without it) is refused. Bump it on
++/// every change to either.
++const WMTR_HOST_ABI_VERSION: u32 = 2;
++/// Oldest library ABI accepted: ABI 2 only appends optional (nullable) ops to ABI 1.
++const WMTR_HOST_ABI_MIN: u32 = 1;
++
++/// Callbacks the context gives the executor (`struct wmtr_host_ops` in wmtr_host.h, ABI 1).
++///
++/// Contract for the library: callbacks may run on any executor or dispatch thread until
++/// `wmtr_host_destroy` returns, and never after; `wmtr_host_destroy` stops and joins everything
++/// that could call them. `wmtr_host_progress` must not call back into the ops, and `wake` must not
++/// be called while holding a lock that `wmtr_host_progress` takes (`wake` calls it). The ring in
++/// blob 0 and the `slot` passed to `wmtr_host_progress` come from the guest: the library checks
++/// both (any slot value, ring contents changing at any time).
 +#[repr(C)]
 +struct WmtrHostOps {
++    /// Host address and size of blob `blob` of this context, or null if it does not exist.
 +    blob_ptr: extern "C" fn(*mut c_void, u32, *mut u64) -> *mut c_void,
++    /// A reply or event is published: re-check pending fences.
 +    wake: extern "C" fn(*mut c_void, u32),
-+    create_view: Option<extern "C" fn(*mut c_void, u64, *mut c_void, *mut u64) -> u64>,
-+    release_view: Option<extern "C" fn(*mut c_void, u64)>,
-+    map_path: Option<extern "C" fn(*mut c_void, *const i8, *mut i8, u64) -> *const i8>,
++    /// ABI 2, optional (None: the executor fails the call): view + CAMetalLayer for a window.
++    create_view: Option<ViewCreate>,
++    /// ABI 2, optional: release a view from `create_view`.
++    release_view: Option<ViewRelease>,
++    /// ABI 2, optional (None: the client path is kept): map a client path to a host path.
++    map_path: Option<MapPath>,
 +}
 +
++type ViewCreate = extern "C" fn(*mut c_void, u64, *mut c_void, *mut u64) -> u64;
++type ViewRelease = extern "C" fn(*mut c_void, u64);
++type MapPath = extern "C" fn(*mut c_void, *const c_char, *mut c_char, u64) -> *const c_char;
++
++type HostAbiVersion = unsafe extern "C" fn() -> u32;
 +type HostCreate = unsafe extern "C" fn(*mut c_void, *const WmtrHostOps, *mut c_void) -> *mut c_void;
 +type HostVoid = unsafe extern "C" fn(*mut c_void);
 +type HostProgress = unsafe extern "C" fn(*mut c_void, u32) -> u64;
-+type ViewCreate = extern "C" fn(*mut c_void, u64, *mut c_void, *mut u64) -> u64;
-+type ViewRelease = extern "C" fn(*mut c_void, u64);
-+type MapPath = extern "C" fn(*mut c_void, *const i8, *mut i8, u64) -> *const i8;
++/// `wmtr_layout(ring_bytes, data_offset, slots_offset, slot_size)`: the ring layout in blob 0.
++type HostLayout = unsafe extern "C" fn(*mut u64, *mut u64, *mut u64, *mut u64);
 +
 +#[derive(Clone, Copy)]
 +struct HostLib {
@@ -236,6 +328,10 @@ index 0000000..e86fcb6
 +    kick: HostVoid,
 +    destroy: HostVoid,
 +    progress: HostProgress,
++    /// Smallest blob 0 the executor accepts (its ring layout, from `wmtr_layout`).
++    ring_bytes: u64,
++    /// ABI 2 extension, from the library's own `wmtr_present_create_view`,
++    /// `wmtr_present_release_view` and `wmtr_map_path`; None for an ABI 1 library or a missing one.
 +    create_view: Option<ViewCreate>,
 +    release_view: Option<ViewRelease>,
 +    map_path: Option<MapPath>,
@@ -244,49 +340,67 @@ index 0000000..e86fcb6
 +unsafe impl Send for HostLib {}
 +unsafe impl Sync for HostLib {}
 +
++/// Binds the host API from `sym` (dlsym on the library `name`): every function must exist and
++/// the library's ABI version must be WMTR_HOST_ABI_VERSION.
++///
++/// # Safety
++/// Non-null results of `sym` must be the library's functions with the signatures above.
++unsafe fn bind_host_lib(name: &str, sym: impl Fn(&str) -> *mut c_void) -> Option<HostLib> {
++    let v = sym("wmtr_host_abi_version");
++    if v.is_null() {
++        error!("wmtr: {name} has no wmtr_host_abi_version (expected {WMTR_HOST_ABI_VERSION})");
++        return None;
++    }
++    let version = std::mem::transmute::<*mut c_void, HostAbiVersion>(v)();
++    if !(WMTR_HOST_ABI_MIN..=WMTR_HOST_ABI_VERSION).contains(&version) {
++        error!("wmtr: {name} has host ABI {version}, expected {WMTR_HOST_ABI_MIN}..={WMTR_HOST_ABI_VERSION}");
++        return None;
++    }
++    let (c, k, d, p, l) = (
++        sym("wmtr_host_create"),
++        sym("wmtr_host_kick"),
++        sym("wmtr_host_destroy"),
++        sym("wmtr_host_progress"),
++        sym("wmtr_layout"),
++    );
++    if c.is_null() || k.is_null() || d.is_null() || p.is_null() || l.is_null() {
++        error!("wmtr: {name} lacks the host API");
++        return None;
++    }
++    let (mut ring_bytes, mut data, mut slots, mut slot) = (0, 0, 0, 0);
++    std::mem::transmute::<*mut c_void, HostLayout>(l)(&mut ring_bytes, &mut data, &mut slots, &mut slot);
++    let opt = |s: &str| if version >= 2 { Some(sym(s)).filter(|p| !p.is_null()) } else { None };
++    Some(HostLib {
++        ring_bytes,
++        create_view: opt("wmtr_present_create_view").map(|p| std::mem::transmute::<*mut c_void, ViewCreate>(p)),
++        release_view: opt("wmtr_present_release_view").map(|p| std::mem::transmute::<*mut c_void, ViewRelease>(p)),
++        map_path: opt("wmtr_map_path").map(|p| std::mem::transmute::<*mut c_void, MapPath>(p)),
++        create: std::mem::transmute::<*mut c_void, HostCreate>(c),
++        kick: std::mem::transmute::<*mut c_void, HostVoid>(k),
++        destroy: std::mem::transmute::<*mut c_void, HostVoid>(d),
++        progress: std::mem::transmute::<*mut c_void, HostProgress>(p),
++    })
++}
++
 +fn load_host_lib() -> Option<HostLib> {
 +    let name = std::env::var("STEAMAC_WMTR_LIB").unwrap_or_else(|_| "libwmtr_host.dylib".into());
 +    let cname = CString::new(name.clone()).ok()?;
-+    // SAFETY: dlopen/dlsym on a library we built; symbols are checked for null before use.
++    // SAFETY: dlopen/dlsym on the executor library; bind_host_lib checks every symbol and the
++    // ABI version before any other call.
 +    unsafe {
 +        let h = libc::dlopen(cname.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
 +        if h.is_null() {
 +            error!("wmtr: cannot load {name}");
 +            return None;
 +        }
-+        let sym = |s: &str| -> *mut c_void {
++        let lib = bind_host_lib(&name, |s| {
 +            let c = CString::new(s).unwrap();
 +            libc::dlsym(h, c.as_ptr())
-+        };
-+        let (c, k, d, p) = (
-+            sym("wmtr_host_create"),
-+            sym("wmtr_host_kick"),
-+            sym("wmtr_host_destroy"),
-+            sym("wmtr_host_progress"),
-+        );
-+        if c.is_null() || k.is_null() || d.is_null() || p.is_null() {
-+            error!("wmtr: {name} lacks the host API");
-+            return None;
++        });
++        if lib.is_none() {
++            libc::dlclose(h);
 +        }
-+        let opt = |s: &str| {
-+            let p = sym(s);
-+            if p.is_null() {
-+                None
-+            } else {
-+                Some(p)
-+            }
-+        };
-+        Some(HostLib {
-+            create: std::mem::transmute::<*mut c_void, HostCreate>(c),
-+            kick: std::mem::transmute::<*mut c_void, HostVoid>(k),
-+            destroy: std::mem::transmute::<*mut c_void, HostVoid>(d),
-+            progress: std::mem::transmute::<*mut c_void, HostProgress>(p),
-+            create_view: opt("wmtr_present_create_view")
-+                .map(|p| std::mem::transmute::<*mut c_void, ViewCreate>(p)),
-+            release_view: opt("wmtr_present_release_view")
-+                .map(|p| std::mem::transmute::<*mut c_void, ViewRelease>(p)),
-+            map_path: opt("wmtr_map_path").map(|p| std::mem::transmute::<*mut c_void, MapPath>(p)),
-+        })
++        lib
 +    }
 +}
 +
@@ -305,17 +419,18 @@ index 0000000..e86fcb6
 +    host_lib().is_some()
 +}
 +
++/// A fence on one ring's timeline; `wait` holds the (slot, seq) of every WAIT of its EXECBUFFER.
 +struct Waiter {
 +    fence: RutabagaFence,
-+    slot: u32,
-+    seq: u64,
++    wait: Vec<(u32, u64)>,
 +}
 +
 +/// State shared with the executor's callbacks (which run on executor/dispatch threads).
 +struct Shared {
 +    lib: HostLib,
 +    blobs: Mutex<BTreeMap<u32, (usize, u64)>>,
-+    waiters: Mutex<Vec<Waiter>>,
++    /// Fences not yet completed, per ring, in submission order.
++    waiters: Mutex<BTreeMap<u8, VecDeque<Waiter>>>,
 +    host: Mutex<usize>,
 +    fence_handler: RutabagaFenceHandler,
 +}
@@ -333,33 +448,41 @@ index 0000000..e86fcb6
 +    }
 +}
 +
-+extern "C" fn cb_wake(ctx: *mut c_void, slot: u32) {
++extern "C" fn cb_wake(ctx: *mut c_void, _slot: u32) {
 +    // SAFETY: as above.
 +    let s = unsafe { &*(ctx as *const Shared) };
-+    s.signal_ready(Some(slot));
++    s.signal_ready();
 +}
 +
 +impl Shared {
++    /// The executor's progress on `slot`, 0 once teardown has begun. The handle lock is held
++    /// across the call, so Drop cannot destroy the executor underneath it.
 +    fn progress(&self, slot: u32) -> u64 {
-+        let host = *self.host.lock().unwrap();
-+        if host == 0 {
++        let host = self.host.lock().unwrap();
++        if *host == 0 {
 +            return 0;
 +        }
-+        // SAFETY: host is a live executor handle.
-+        unsafe { (self.lib.progress)(host as *mut c_void, slot) }
++        // SAFETY: host is a live executor handle: Drop zeroes it under this lock before destroy.
++        unsafe { (self.lib.progress)(*host as *mut c_void, slot) }
 +    }
 +
-+    /// Completes every waiter (of `slot`, or all) whose condition holds.
-+    fn signal_ready(&self, slot: Option<u32>) {
-+        let mut w = self.waiters.lock().unwrap();
-+        let mut i = 0;
-+        while i < w.len() {
-+            if slot.is_none_or(|s| s == w[i].slot) && self.progress(w[i].slot) >= w[i].seq {
-+                let x = w.swap_remove(i);
-+                self.fence_handler.call(x.fence);
-+            } else {
-+                i += 1;
++    /// Completes the fences at the head of `queue` whose condition holds, in order, stopping at
++    /// the first one that is still pending (later fences on the ring wait behind it).
++    fn complete_ready(&self, queue: &mut VecDeque<Waiter>) {
++        while let Some(w) = queue.front() {
++            if !w.wait.iter().all(|&(slot, seq)| self.progress(slot) >= seq) {
++                break;
 +            }
++            let w = queue.pop_front().unwrap();
++            self.fence_handler.call(w.fence);
++        }
++    }
++
++    /// A reply arrived: any ring's head may now be ready (rings are shared between slots).
++    fn signal_ready(&self) {
++        let mut rings = self.waiters.lock().unwrap();
++        for queue in rings.values_mut() {
++            self.complete_ready(queue);
 +        }
 +    }
 +}
@@ -367,7 +490,8 @@ index 0000000..e86fcb6
 +pub struct WmtrContext {
 +    shared: Arc<Shared>,
 +    ops: Box<WmtrHostOps>,
-+    pending: BTreeMap<u8, (u32, u64)>,
++    /// WAITs of the EXECBUFFER being submitted, for the fence created right after it.
++    pending: Vec<(u32, u64)>,
 +    maps: Vec<(usize, u64)>,
 +}
 +
@@ -387,10 +511,17 @@ index 0000000..e86fcb6
 +        resource_create_blob: ResourceCreateBlob,
 +        _handle_opt: Option<RutabagaHandle>,
 +    ) -> RutabagaResult<RutabagaResource> {
-+        let blob = resource_create_blob.blob_id as u32;
++        // Checked before narrowing: blob_id is a u64 and 1 << 32 must not alias the ring (blob 0).
++        let id = resource_create_blob.blob_id;
 +        let size = resource_create_blob.size;
-+        if size == 0 || blob as usize >= 1024 {
++        if id >= MAX_BLOBS || size == 0 || size > MAX_BLOB_SIZE {
 +            return Err(RutabagaError::SpecViolation("wmtr: bad blob"));
++        }
++        let blob = id as u32;
++        // Blobs live as long as the context (the executor may hold their addresses), so an id
++        // is never replaced: a second create would leak the first mapping and move the blob.
++        if self.shared.blobs.lock().unwrap().contains_key(&blob) {
++            return Err(RutabagaError::SpecViolation("wmtr: blob id in use"));
 +        }
 +        let name = CString::new(format!("/wmtr.{}.{}.{}", std::process::id(), resource_id, blob)).unwrap();
 +        // SAFETY: plain POSIX shm calls; every result is checked.
@@ -443,6 +574,42 @@ index 0000000..e86fcb6
 +    }
 +
 +    fn submit_cmd(&mut self, commands: &mut [u8], _fence_ids: &[u64]) -> RutabagaResult<()> {
++        // libkrun creates an EXECBUFFER's fence right after submitting it, also when the submit
++        // failed: WAITs left from an EXECBUFFER without a fence, or from a refused one, must not
++        // hold that fence or a later one.
++        self.pending.clear();
++        if commands.len() % CMD_SIZE != 0 {
++            return Err(RutabagaError::SpecViolation("wmtr: partial command"));
++        }
++        let result = self.run_commands(commands);
++        if result.is_err() {
++            self.pending.clear();
++        }
++        result
++    }
++
++    fn attach(&mut self, _resource: &mut RutabagaResource) {}
++
++    fn detach(&mut self, _resource: &RutabagaResource) {}
++
++    fn context_create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
++        let wait = std::mem::take(&mut self.pending);
++        // Enqueue and check under the waiter lock: the executor publishes progress before it
++        // takes this lock in cb_wake, so a reply cannot slip between the push and the check.
++        let mut rings = self.shared.waiters.lock().unwrap();
++        let queue = rings.entry(fence.ring_idx).or_default();
++        queue.push_back(Waiter { fence, wait });
++        self.shared.complete_ready(queue);
++        Ok(())
++    }
++
++    fn component_type(&self) -> RutabagaComponentType {
++        RutabagaComponentType::Wmtr
++    }
++}
++
++impl WmtrContext {
++    fn run_commands(&mut self, commands: &[u8]) -> RutabagaResult<()> {
 +        for c in commands.chunks_exact(CMD_SIZE) {
 +            let ty = u32::from_le_bytes(c[0..4].try_into().unwrap());
 +            let slot = u32::from_le_bytes(c[4..8].try_into().unwrap());
@@ -453,7 +620,10 @@ index 0000000..e86fcb6
 +                        return Err(RutabagaError::SpecViolation("wmtr: ring already started"));
 +                    }
 +                    let ring = match self.shared.blobs.lock().unwrap().get(&0) {
-+                        Some(&(p, _)) => p,
++                        Some(&(p, n)) if n >= self.shared.lib.ring_bytes => p,
++                        // the guest sizes blob 0; the executor reads and writes the ring at fixed
++                        // offsets up to its layout, so a shorter blob never reaches it
++                        Some(_) => return Err(RutabagaError::SpecViolation("wmtr: ring blob too small")),
 +                        None => return Err(RutabagaError::SpecViolation("wmtr: no ring blob")),
 +                    };
 +                    let ctx = Arc::as_ptr(&self.shared) as *mut c_void;
@@ -464,6 +634,9 @@ index 0000000..e86fcb6
 +                        return Err(RutabagaError::SpecViolation("wmtr: executor start failed"));
 +                    }
 +                    *self.shared.host.lock().unwrap() = h as usize;
++                    // A reply published before the handle was stored read progress 0 in its
++                    // wake: re-check the fences queued so far.
++                    self.shared.signal_ready();
 +                }
 +                WMTR_VGPU_KICK => {
 +                    let h = self.host();
@@ -472,53 +645,30 @@ index 0000000..e86fcb6
 +                        unsafe { (self.shared.lib.kick)(h) };
 +                    }
 +                }
-+                WMTR_VGPU_WAIT => {
-+                    let ring = if slot >= 64 { 63 } else { 1 + (slot % 62) as u8 };
-+                    self.pending.insert(ring, (slot, seq));
-+                }
++                WMTR_VGPU_WAIT => self.pending.push((slot, seq)),
 +                _ => return Err(RutabagaError::SpecViolation("wmtr: unknown command")),
 +            }
 +        }
 +        Ok(())
 +    }
-+
-+    fn attach(&mut self, _resource: &mut RutabagaResource) {}
-+
-+    fn detach(&mut self, _resource: &RutabagaResource) {}
-+
-+    fn context_create_fence(&mut self, fence: RutabagaFence) -> RutabagaResult<()> {
-+        let Some((slot, seq)) = self.pending.remove(&fence.ring_idx) else {
-+            self.shared.fence_handler.call(fence);
-+            return Ok(());
-+        };
-+        // Check and enqueue under the waiter lock: the executor publishes progress before it
-+        // takes this lock in cb_wake, so a reply cannot slip between the check and the push.
-+        let mut w = self.shared.waiters.lock().unwrap();
-+        if self.shared.progress(slot) >= seq {
-+            drop(w);
-+            self.shared.fence_handler.call(fence);
-+        } else {
-+            w.push(Waiter { fence, slot, seq });
-+        }
-+        Ok(())
-+    }
-+
-+    fn component_type(&self) -> RutabagaComponentType {
-+        RutabagaComponentType::Wmtr
-+    }
 +}
 +
 +impl Drop for WmtrContext {
 +    fn drop(&mut self) {
-+        let h = self.host();
++        // Retire the handle under the lock first: a wake from an executor or dispatch thread
++        // during destroy then sees 0 and never calls into the executor being freed.
++        let h = std::mem::take(&mut *self.shared.host.lock().unwrap()) as *mut c_void;
 +        if !h.is_null() {
-+            // SAFETY: live executor; destroy joins its thread.
++            // SAFETY: live executor, no longer reachable through `shared`. Once destroy returns
++            // no callback runs (the WmtrHostOps contract), so `ops`, `shared` and the blob
++            // mappings can be released below.
 +            unsafe { (self.shared.lib.destroy)(h) };
-+            *self.shared.host.lock().unwrap() = 0;
 +        }
-+        // complete anything still waiting so guest pollers do not hang
-+        for w in self.shared.waiters.lock().unwrap().drain(..) {
-+            self.shared.fence_handler.call(w.fence);
++        // complete anything still waiting (in ring order) so guest pollers do not hang
++        for queue in self.shared.waiters.lock().unwrap().values_mut() {
++            for w in queue.drain(..) {
++                self.shared.fence_handler.call(w.fence);
++            }
 +        }
 +        for &(p, n) in &self.maps {
 +            // SAFETY: our own mappings.
@@ -551,7 +701,7 @@ index 0000000..e86fcb6
 +        let mut v = Vec::with_capacity(16);
 +        v.extend_from_slice(&1u32.to_le_bytes());
 +        v.extend_from_slice(&16384u32.to_le_bytes());
-+        v.extend_from_slice(&(4u64 << 30).to_le_bytes());
++        v.extend_from_slice(&MAX_BLOB_SIZE.to_le_bytes());
 +        v
 +    }
 +
@@ -567,6 +717,12 @@ index 0000000..e86fcb6
 +        _context_name: Option<&str>,
 +        fence_handler: RutabagaFenceHandler,
 +    ) -> RutabagaResult<Box<dyn RutabagaContext>> {
++        Ok(Box::new(self.new_context(fence_handler)))
++    }
++}
++
++impl Wmtr {
++    fn new_context(&self, fence_handler: RutabagaFenceHandler) -> WmtrContext {
 +        let ops = Box::new(WmtrHostOps {
 +            blob_ptr: cb_blob_ptr,
 +            wake: cb_wake,
@@ -574,124 +730,405 @@ index 0000000..e86fcb6
 +            release_view: self.lib.release_view,
 +            map_path: self.lib.map_path,
 +        });
-+        Ok(Box::new(WmtrContext {
++        WmtrContext {
 +            shared: Arc::new(Shared {
 +                lib: self.lib,
 +                blobs: Mutex::new(BTreeMap::new()),
-+                waiters: Mutex::new(Vec::new()),
++                waiters: Mutex::new(BTreeMap::new()),
 +                host: Mutex::new(0),
 +                fence_handler,
 +            }),
 +            ops,
-+            pending: BTreeMap::new(),
++            pending: Vec::new(),
 +            maps: Vec::new(),
-+        }))
++        }
 +    }
 +}
 +
 +#[cfg(test)]
 +mod tests {
-+    //! Needs the built host library: STEAMAC_WMTR_LIB=/path/to/libwmtr_host.dylib (skipped when unset).
++    //! The context against a stand-in executor (no Metal, no host library): blob 0 backs the ring,
++    //! RING starts the executor, a WAIT fence completes exactly when the executor reports progress.
 +    use super::*;
-+    use crate::rutabaga_os::AsRawDescriptor;
++    use std::sync::atomic::{AtomicU64, Ordering};
 +
-+    type Layout = unsafe extern "C" fn(*mut u64, *mut u64, *mut u64, *mut u64);
++    struct Fake {
++        ops: *const WmtrHostOps,
++        ctx: *mut c_void,
++        ring: *mut c_void,
++    }
++    unsafe impl Send for Fake {}
++    static FAKE: Mutex<Option<Fake>> = Mutex::new(None);
++    /// done_seq per reply slot (0..64) and the event queue (64)
++    static PROGRESS: [AtomicU64; 65] = [const { AtomicU64::new(0) }; 65];
++    static KICKS: AtomicU64 = AtomicU64::new(0);
++    /// set while the stand-in destroy runs; progress calls during it are counted in LATE
++    static DESTROYING: AtomicU64 = AtomicU64::new(0);
++    static LATE: AtomicU64 = AtomicU64::new(0);
++    const SLOT: u32 = 5;
++    /// The stand-in executor is process-global: tests that start it run one at a time.
++    static SERIAL: Mutex<()> = Mutex::new(());
 +
-+    fn layout(path: &str) -> (u64, u64, u64, u64) {
-+        let c = CString::new(path).unwrap();
-+        // SAFETY: test-only dlopen of the library under test.
-+        unsafe {
-+            let h = libc::dlopen(c.as_ptr(), libc::RTLD_NOW);
-+            assert!(!h.is_null());
-+            let f: Layout = std::mem::transmute(libc::dlsym(h, c"wmtr_layout".as_ptr()));
-+            let (mut a, mut b, mut cc, mut d) = (0, 0, 0, 0);
-+            f(&mut a, &mut b, &mut cc, &mut d);
-+            (a, b, cc, d)
++    fn serial() -> std::sync::MutexGuard<'static, ()> {
++        let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
++        for p in &PROGRESS {
++            p.store(0, Ordering::SeqCst);
 +        }
++        KICKS.store(0, Ordering::SeqCst);
++        LATE.store(0, Ordering::SeqCst);
++        g
 +    }
 +
-+    /// Blob 0 through context_create_blob, executor start (RING), one synchronous PING request written
-+    /// into the ring by hand, KICK, and a WAIT fence that must complete exactly when the reply lands.
++    /// The executor finishes the next call on `slot`: publish progress, then wake (its order).
++    fn reply(slot: u32) {
++        let (ops, ctx) = {
++            let f = FAKE.lock().unwrap();
++            let f = f.as_ref().unwrap();
++            (f.ops, f.ctx)
++        };
++        PROGRESS[slot as usize].fetch_add(1, Ordering::SeqCst);
++        // SAFETY: ops/ctx are the live context's, as for the real executor.
++        unsafe { ((*ops).wake)(ctx, slot) };
++    }
++
++    unsafe extern "C" fn create(ring: *mut c_void, ops: *const WmtrHostOps, ctx: *mut c_void) -> *mut c_void {
++        *FAKE.lock().unwrap() = Some(Fake { ops, ctx, ring });
++        ring
++    }
++    /// One kick = one reply on SLOT: publish progress, then wake (the real executor's order).
++    unsafe extern "C" fn kick(_h: *mut c_void) {
++        KICKS.fetch_add(1, Ordering::SeqCst);
++        reply(SLOT);
++    }
++    /// A dispatch thread still delivers a wake while the executor is being destroyed.
++    unsafe extern "C" fn destroy(_h: *mut c_void) {
++        DESTROYING.store(1, Ordering::SeqCst);
++        let f = FAKE.lock().unwrap().take();
++        if let Some(f) = f {
++            ((*f.ops).wake)(f.ctx, SLOT);
++        }
++        DESTROYING.store(0, Ordering::SeqCst);
++    }
++    unsafe extern "C" fn progress(_h: *mut c_void, slot: u32) -> u64 {
++        if DESTROYING.load(Ordering::SeqCst) != 0 {
++            LATE.fetch_add(1, Ordering::SeqCst);
++        }
++        PROGRESS.get(slot as usize).map_or(0, |p| p.load(Ordering::SeqCst))
++    }
++
++    fn component(done: Arc<Mutex<Vec<u64>>>) -> (Wmtr, RutabagaFenceHandler) {
++        let handler = RutabagaFenceHandler::new(move |f: RutabagaFence| done.lock().unwrap().push(f.fence_id));
++        let lib = HostLib {
++            create,
++            kick,
++            destroy,
++            progress,
++            ring_bytes: 65536,
++            create_view: None,
++            release_view: None,
++            map_path: None,
++        };
++        (Wmtr { lib, fence_handler: handler.clone() }, handler)
++    }
++
++    fn cmd(ty: u32, slot: u32, seq: u64) -> Vec<u8> {
++        let mut v = Vec::with_capacity(CMD_SIZE);
++        v.extend_from_slice(&ty.to_le_bytes());
++        v.extend_from_slice(&slot.to_le_bytes());
++        v.extend_from_slice(&seq.to_le_bytes());
++        v.extend_from_slice(&0u64.to_le_bytes());
++        v
++    }
++
++    fn blob(id: u64, size: u64) -> ResourceCreateBlob {
++        ResourceCreateBlob { blob_mem: 2, blob_flags: 3, blob_id: id, size }
++    }
++
++    fn fence(id: u64, ring_idx: u8) -> RutabagaFence {
++        RutabagaFence { flags: RUTABAGA_FLAG_INFO_RING_IDX, fence_id: id, ctx_id: 1, ring_idx }
++    }
++
 +    #[test]
-+    fn ring_ping_completes_wait_fence() {
-+        let Ok(lib) = std::env::var("STEAMAC_WMTR_LIB") else {
-+            eprintln!("STEAMAC_WMTR_LIB unset: skipped");
-+            return;
-+        };
-+        std::env::set_var("STEAMAC_WMTR", "1");
-+        let (ring_bytes, data_off, slots_off, slot_size) = layout(&lib);
-+        let done: Arc<Mutex<Vec<RutabagaFence>>> = Arc::new(Mutex::new(Vec::new()));
-+        let d2 = done.clone();
-+        let handler = RutabagaFenceHandler::new(move |f| d2.lock().unwrap().push(f));
-+        let comp = Wmtr::init(handler.clone()).expect("component");
++    fn off_unless_enabled() {
++        std::env::remove_var("STEAMAC_WMTR");
++        assert!(!enabled());
++        assert!(Wmtr::init(RutabagaFenceHandler::new(|_| {})).is_none());
++    }
++
++    #[test]
++    fn wait_fence_completes_on_reply() {
++        let _serial = serial();
++        let done = Arc::new(Mutex::new(Vec::new()));
++        let (comp, handler) = component(done.clone());
++        assert_eq!(comp.get_capset(RUTABAGA_CAPSET_WMTR, 1).len(), 16);
 +        let mut ctx = comp.create_context(1, RUTABAGA_CAPSET_WMTR, None, handler).unwrap();
-+        let res = ctx
-+            .context_create_blob(
-+                1,
-+                ResourceCreateBlob { blob_mem: 2, blob_flags: 3, blob_id: 0, size: ring_bytes },
-+                None,
-+            )
-+            .unwrap();
-+        let fd = res.handle.as_ref().unwrap().os_handle.as_raw_descriptor();
-+        // SAFETY: maps the blob's shm like the guest does.
-+        let base = unsafe {
-+            libc::mmap(std::ptr::null_mut(), ring_bytes as usize, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0)
-+        } as *mut u8;
-+        assert_ne!(base as *mut c_void, libc::MAP_FAILED);
-+        // SAFETY: offsets come from the host library's own layout.
-+        unsafe {
-+            *(base as *mut u32) = 0x52544d57; // magic
-+            *(base.add(4) as *mut u32) = 1; // version
-+        }
-+        let cmd = |ty: u32, slot: u32, seq: u64| {
-+            let mut v = Vec::with_capacity(CMD_SIZE);
-+            v.extend_from_slice(&ty.to_le_bytes());
-+            v.extend_from_slice(&slot.to_le_bytes());
-+            v.extend_from_slice(&seq.to_le_bytes());
-+            v.extend_from_slice(&0u64.to_le_bytes());
-+            v
-+        };
++
++        // the ring blob is shared memory the guest maps through the SHM handle
++        let res = ctx.context_create_blob(1, blob(0, 65536), None).unwrap();
++        let handle = res.handle.as_ref().unwrap();
++        assert_eq!(handle.handle_type, RUTABAGA_MEM_HANDLE_TYPE_SHM);
++        assert_eq!(res.size, 65536);
++
 +        ctx.submit_cmd(&mut cmd(WMTR_VGPU_RING, 0, 0), &[]).unwrap();
-+        // WAIT slot 5 seq 1 on ring 6, fence before the request exists: must stay pending
-+        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, 5, 1), &[]).unwrap();
-+        let fence = RutabagaFence { flags: RUTABAGA_FLAG_INFO_RING_IDX, fence_id: 77, ctx_id: 1, ring_idx: 6 };
-+        ctx.context_create_fence(fence).unwrap();
++        assert!(FAKE.lock().unwrap().as_ref().is_some_and(|f| !f.ring.is_null()));
++
++        // WAIT slot 5 seq 1 (ring 6) before any reply: the fence stays pending
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, SLOT, 1), &[]).unwrap();
++        ctx.context_create_fence(fence(77, 6)).unwrap();
 +        assert!(done.lock().unwrap().is_empty(), "fence completed before the reply");
-+        // request: wmtr_req_ext {size 40, call PING=3, flags SYNC|CONTROL, slot 5, params 8, seq 1, 0 relocs, 0 outs, payload 8}
-+        let mut req = Vec::new();
-+        req.extend_from_slice(&40u32.to_le_bytes());
-+        req.extend_from_slice(&3u16.to_le_bytes());
-+        req.extend_from_slice(&5u16.to_le_bytes());
-+        req.extend_from_slice(&5u32.to_le_bytes());
-+        req.extend_from_slice(&8u32.to_le_bytes());
-+        req.extend_from_slice(&1u64.to_le_bytes());
-+        req.extend_from_slice(&0u16.to_le_bytes());
-+        req.extend_from_slice(&0u16.to_le_bytes());
-+        req.extend_from_slice(&8u32.to_le_bytes());
-+        req.extend_from_slice(&0u64.to_le_bytes()); // payload
-+        assert_eq!(req.len(), 40);
-+        // SAFETY: as above; head is at offset 8 of struct wmtr_ring, waiting flag at +16 of a slot.
-+        unsafe {
-+            std::ptr::copy_nonoverlapping(req.as_ptr(), base.add(data_off as usize), 40);
-+            *(base.add((slots_off + 5 * slot_size + 16) as usize) as *mut u32) = 1; // slot 5 waiting
-+            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-+            *(base.add(8) as *mut u64) = 40; // head
-+        }
++
++        // the reply completes it
 +        ctx.submit_cmd(&mut cmd(WMTR_VGPU_KICK, 0, 0), &[]).unwrap();
-+        for _ in 0..2000 {
-+            if !done.lock().unwrap().is_empty() {
-+                break;
++        assert_eq!(*done.lock().unwrap(), vec![77]);
++
++        // a WAIT already satisfied completes at once
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, SLOT, 1), &[]).unwrap();
++        ctx.context_create_fence(fence(78, 6)).unwrap();
++        // a fence on a ring without a WAIT completes at once
++        ctx.context_create_fence(fence(79, 0)).unwrap();
++        assert_eq!(*done.lock().unwrap(), vec![77, 78, 79]);
++
++        // a WAIT that never gets its reply is completed when the context goes away
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, SLOT, 100), &[]).unwrap();
++        ctx.context_create_fence(fence(80, 6)).unwrap();
++        assert_eq!(done.lock().unwrap().len(), 3);
++        drop(ctx);
++        assert_eq!(*done.lock().unwrap(), vec![77, 78, 79, 80]);
++        assert!(FAKE.lock().unwrap().is_none(), "executor not destroyed");
++        assert_eq!(KICKS.load(Ordering::SeqCst), 1);
++    }
++
++    #[test]
++    fn rejects_malformed_requests() {
++        let (comp, handler) = component(Arc::new(Mutex::new(Vec::new())));
++        let mut ctx = comp.create_context(2, RUTABAGA_CAPSET_WMTR, None, handler).unwrap();
++        assert!(ctx.context_create_blob(1, blob(0, 0), None).is_err());
++        assert!(ctx.context_create_blob(1, blob(1024, 4096), None).is_err());
++        assert!(ctx.context_create_blob(1, blob(1, MAX_BLOB_SIZE + 1), None).is_err());
++        // RING before blob 0 exists, then an unknown command
++        assert!(ctx.submit_cmd(&mut cmd(WMTR_VGPU_RING, 0, 0), &[]).is_err());
++        assert!(ctx.submit_cmd(&mut cmd(9, 0, 0), &[]).is_err());
++        // KICK without an executor is ignored
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_KICK, 0, 0), &[]).unwrap();
++        // a command cut short is refused, not silently dropped
++        let mut partial = cmd(WMTR_VGPU_KICK, 0, 0);
++        partial.extend_from_slice(&[0; 8]);
++        assert!(ctx.submit_cmd(&mut partial, &[]).is_err());
++    }
++
++    unsafe extern "C" fn layout(ring: *mut u64, data: *mut u64, slots: *mut u64, slot: *mut u64) {
++        (*ring, *data, *slots, *slot) = (65536, 4096, 32768, 512);
++    }
++
++    unsafe extern "C" fn abi_current() -> u32 {
++        WMTR_HOST_ABI_VERSION
++    }
++    extern "C" fn view_create(_c: *mut c_void, _hwnd: u64, _dev: *mut c_void, _layer: *mut u64) -> u64 {
++        1
++    }
++    extern "C" fn view_release(_c: *mut c_void, _view: u64) {}
++    unsafe extern "C" fn abi_v1() -> u32 {
++        WMTR_HOST_ABI_MIN
++    }
++    unsafe extern "C" fn abi_next() -> u32 {
++        WMTR_HOST_ABI_VERSION + 1
++    }
++
++    /// Teardown retires the executor handle before destroying it: a wake that arrives during
++    /// wmtr_host_destroy must not reach wmtr_host_progress with the handle being freed.
++    #[test]
++    fn teardown_retires_handle_before_destroy() {
++        let _serial = serial();
++        let done = Arc::new(Mutex::new(Vec::new()));
++        let (comp, handler) = component(done.clone());
++        let mut ctx = comp.create_context(4, RUTABAGA_CAPSET_WMTR, None, handler).unwrap();
++        ctx.context_create_blob(1, blob(0, 65536), None).unwrap();
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_RING, 0, 0), &[]).unwrap();
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, SLOT, 1), &[]).unwrap();
++        ctx.context_create_fence(fence(40, 6)).unwrap();
++        assert!(done.lock().unwrap().is_empty());
++        drop(ctx);
++        assert_eq!(LATE.load(Ordering::SeqCst), 0, "progress called during destroy");
++        assert!(FAKE.lock().unwrap().is_none(), "executor not destroyed");
++        assert_eq!(*done.lock().unwrap(), vec![40]);
++    }
++
++    /// The library is used only if it reports this ABI version and exports the whole API.
++    #[test]
++    fn host_lib_abi_version_checked() {
++        let table = |abi: Option<HostAbiVersion>, with_progress: bool, with_layout: bool| {
++            move |s: &str| -> *mut c_void {
++                match s {
++                    "wmtr_host_abi_version" => abi.map_or(std::ptr::null_mut(), |f| f as *mut c_void),
++                    "wmtr_host_create" => create as *mut c_void,
++                    "wmtr_host_kick" => kick as *mut c_void,
++                    "wmtr_host_destroy" => destroy as *mut c_void,
++                    "wmtr_host_progress" if with_progress => progress as *mut c_void,
++                    "wmtr_layout" if with_layout => layout as *mut c_void,
++                    "wmtr_present_create_view" => view_create as *mut c_void,
++                    "wmtr_present_release_view" => view_release as *mut c_void,
++                    _ => std::ptr::null_mut(),
++                }
 +            }
-+            std::thread::sleep(std::time::Duration::from_millis(1));
++        };
++        // SAFETY: the table holds this module's stand-in functions with the right signatures.
++        unsafe {
++            let lib = bind_host_lib("test", table(Some(abi_current), true, true));
++            assert_eq!(lib.map(|l| l.ring_bytes), Some(65536));
++            assert!(bind_host_lib("test", table(None, true, true)).is_none(), "unversioned library");
++            assert!(bind_host_lib("test", table(Some(abi_next), true, true)).is_none(), "other ABI");
++            assert!(bind_host_lib("test", table(Some(abi_current), false, true)).is_none(), "partial API");
++            assert!(bind_host_lib("test", table(Some(abi_current), true, false)).is_none(), "no ring layout");
++            // ABI 2 binds the optional ops the library exports and leaves the missing one None
++            let l = lib.unwrap();
++            assert!(l.create_view.is_some() && l.release_view.is_some() && l.map_path.is_none());
++            // an ABI 1 library stays accepted and gets no ABI 2 ops, even if it has the symbols
++            let l = bind_host_lib("test", table(Some(abi_v1), true, true)).expect("ABI 1");
++            assert!(l.create_view.is_none() && l.release_view.is_none() && l.map_path.is_none());
 +        }
-+        let got = done.lock().unwrap().clone();
-+        assert_eq!(got.len(), 1, "WAIT fence not completed by the reply");
-+        assert_eq!(got[0].fence_id, 77);
-+        // SAFETY: done_seq is the first field of slot 5.
-+        assert_eq!(unsafe { *(base.add((slots_off + 5 * slot_size) as usize) as *const u64) }, 1);
-+        // a fence on a ring with no pending WAIT completes at once
-+        ctx.context_create_fence(RutabagaFence { flags: RUTABAGA_FLAG_INFO_RING_IDX, fence_id: 78, ctx_id: 1, ring_idx: 0 }).unwrap();
-+        assert_eq!(done.lock().unwrap().len(), 2);
++        // ABI 2 appends three nullable callbacks to ABI 1's two (struct wmtr_host_ops order)
++        assert_eq!(std::mem::size_of::<WmtrHostOps>(), 5 * std::mem::size_of::<usize>());
++        assert_eq!(std::mem::offset_of!(WmtrHostOps, create_view), 2 * std::mem::size_of::<usize>());
++    }
++
++    /// Each blob id is created once and only below MAX_BLOBS: a reused id or one that truncates to
++    /// a smaller u32 (1 << 32 would alias the ring) is rejected and leaves the existing blob alone.
++    #[test]
++    fn blob_ids_are_unique_and_in_range() {
++        // resource ids differ from the other tests' (shm names are per pid/resource/blob)
++        let (comp, handler) = component(Arc::new(Mutex::new(Vec::new())));
++        let mut ctx = comp.new_context(handler);
++        ctx.context_create_blob(11, blob(0, 65536), None).unwrap();
++        let ring = ctx.shared.blobs.lock().unwrap()[&0];
++        assert!(ctx.context_create_blob(12, blob(0, 65536), None).is_err());
++        assert!(ctx.context_create_blob(13, blob(1 << 32, 4096), None).is_err());
++        assert!(ctx.context_create_blob(14, blob(u64::MAX, 4096), None).is_err());
++        assert_eq!(ctx.shared.blobs.lock().unwrap()[&0], ring);
++        assert_eq!(ctx.maps.len(), 1);
++        // the last valid id works; the guest is told the size limit
++        ctx.context_create_blob(15, blob(MAX_BLOBS - 1, 4096), None).unwrap();
++        let caps = comp.get_capset(RUTABAGA_CAPSET_WMTR, 1);
++        assert_eq!(u64::from_le_bytes(caps[8..16].try_into().unwrap()), MAX_BLOB_SIZE);
++    }
++
++    /// RING on a blob 0 smaller than the executor's ring layout is refused before the executor is
++    /// created: it reads and writes the ring at fixed offsets up to that size.
++    #[test]
++    fn short_ring_is_refused() {
++        let _serial = serial();
++        let (comp, handler) = component(Arc::new(Mutex::new(Vec::new())));
++        let mut ctx = comp.create_context(5, RUTABAGA_CAPSET_WMTR, None, handler).unwrap();
++        ctx.context_create_blob(51, blob(0, 16384), None).unwrap();
++        assert!(ctx.submit_cmd(&mut cmd(WMTR_VGPU_RING, 0, 0), &[]).is_err());
++        assert!(FAKE.lock().unwrap().is_none(), "executor started on a short ring");
++        drop(ctx);
++    }
++
++    /// Slots 0 and 62 share ring 1. A ring is an in-order timeline, so a satisfied WAIT (and a
++    /// fence without one) must not complete ahead of an earlier fence that is still pending:
++    /// signalling it would retire the pending one before its reply exists.
++    #[test]
++    fn shared_ring_completes_in_order() {
++        let _serial = serial();
++        let done = Arc::new(Mutex::new(Vec::new()));
++        let (comp, handler) = component(done.clone());
++        let mut ctx = comp.create_context(3, RUTABAGA_CAPSET_WMTR, None, handler).unwrap();
++        ctx.context_create_blob(1, blob(0, 65536), None).unwrap();
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_RING, 0, 0), &[]).unwrap();
++
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, 0, 1), &[]).unwrap();
++        ctx.context_create_fence(fence(10, 1)).unwrap();
++        // slot 62 seq 0 already holds, but ring 1 still has fence 10 pending
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, 62, 0), &[]).unwrap();
++        ctx.context_create_fence(fence(11, 1)).unwrap();
++        ctx.context_create_fence(fence(12, 1)).unwrap();
++        // the event queue and slots >= 64 share ring 63 the same way
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, 64, 1), &[]).unwrap();
++        ctx.context_create_fence(fence(20, 63)).unwrap();
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, 70, 0), &[]).unwrap();
++        ctx.context_create_fence(fence(21, 63)).unwrap();
++        // another ring is independent
++        ctx.context_create_fence(fence(30, 2)).unwrap();
++        assert_eq!(*done.lock().unwrap(), vec![30]);
++
++        // a reply on another slot of the ring changes nothing
++        reply(62);
++        assert_eq!(*done.lock().unwrap(), vec![30]);
++        reply(0);
++        assert_eq!(*done.lock().unwrap(), vec![30, 10, 11, 12]);
++        reply(64);
++        assert_eq!(*done.lock().unwrap(), vec![30, 10, 11, 12, 20, 21]);
++        drop(ctx);
++    }
++
++    /// Every WAIT of an EXECBUFFER holds its fence (slots 0 and 62 both map to ring 1): the second
++    /// must not replace the first, or the fence completes before slot 0 has replied.
++    #[test]
++    fn all_waits_of_an_execbuffer_hold_its_fence() {
++        let _serial = serial();
++        let done = Arc::new(Mutex::new(Vec::new()));
++        let (comp, handler) = component(done.clone());
++        let mut ctx = comp.create_context(6, RUTABAGA_CAPSET_WMTR, None, handler).unwrap();
++        ctx.context_create_blob(1, blob(0, 65536), None).unwrap();
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_RING, 0, 0), &[]).unwrap();
++
++        let mut both = cmd(WMTR_VGPU_WAIT, 0, 1);
++        both.extend(cmd(WMTR_VGPU_WAIT, 62, 1));
++        ctx.submit_cmd(&mut both, &[]).unwrap();
++        ctx.context_create_fence(fence(60, 1)).unwrap();
++        reply(62);
++        assert!(done.lock().unwrap().is_empty(), "fence completed before slot 0 replied");
++        reply(0);
++        assert_eq!(*done.lock().unwrap(), vec![60]);
++        drop(ctx);
++    }
++
++    /// WAITs belong to the fence of their own EXECBUFFER: those of an EXECBUFFER without a fence,
++    /// or of one that was refused (libkrun still creates its fence), hold no later fence.
++    #[test]
++    fn waits_do_not_outlive_their_execbuffer() {
++        let _serial = serial();
++        let done = Arc::new(Mutex::new(Vec::new()));
++        let (comp, handler) = component(done.clone());
++        let mut ctx = comp.create_context(7, RUTABAGA_CAPSET_WMTR, None, handler).unwrap();
++        ctx.context_create_blob(1, blob(0, 65536), None).unwrap();
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_RING, 0, 0), &[]).unwrap();
++
++        // no fence for this one
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, SLOT, 100), &[]).unwrap();
++        ctx.submit_cmd(&mut Vec::new(), &[]).unwrap();
++        ctx.context_create_fence(fence(70, 6)).unwrap();
++        // refused after its WAIT
++        let mut refused = cmd(WMTR_VGPU_WAIT, SLOT, 100);
++        refused.extend(cmd(9, 0, 0));
++        assert!(ctx.submit_cmd(&mut refused, &[]).is_err());
++        ctx.context_create_fence(fence(71, 6)).unwrap();
++        assert_eq!(*done.lock().unwrap(), vec![70, 71]);
++        drop(ctx);
++    }
++
++    /// The executor replies from inside wmtr_host_create, before the context has stored its
++    /// handle (so that wake reads progress 0).
++    unsafe extern "C" fn create_replying(ring: *mut c_void, ops: *const WmtrHostOps, ctx: *mut c_void) -> *mut c_void {
++        *FAKE.lock().unwrap() = Some(Fake { ops, ctx, ring });
++        reply(SLOT);
++        ring
++    }
++
++    /// A reply that arrives while RING is still storing the executor handle is not lost: the
++    /// fence waiting for it completes when RING returns, not at the next wake.
++    #[test]
++    fn reply_during_executor_start_is_not_lost() {
++        let _serial = serial();
++        let done = Arc::new(Mutex::new(Vec::new()));
++        let (mut comp, handler) = component(done.clone());
++        comp.lib.create = create_replying;
++        let mut ctx = comp.create_context(8, RUTABAGA_CAPSET_WMTR, None, handler).unwrap();
++        ctx.context_create_blob(1, blob(0, 65536), None).unwrap();
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_WAIT, SLOT, 1), &[]).unwrap();
++        ctx.context_create_fence(fence(90, 6)).unwrap();
++        ctx.submit_cmd(&mut cmd(WMTR_VGPU_RING, 0, 0), &[]).unwrap();
++        assert_eq!(*done.lock().unwrap(), vec![90]);
 +        drop(ctx);
 +    }
 +}
