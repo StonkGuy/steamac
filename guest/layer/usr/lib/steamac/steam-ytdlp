@@ -1,0 +1,74 @@
+#!/bin/bash
+# steamac: native yt-dlp for VRChat's video players (kernel command line steamac.ytdlp=native; off by default).
+#
+# VRChat resolves video URLs by starting Tools/yt-dlp.exe in its prefix and waiting for it; under Proton +
+# FEX that Windows yt-dlp takes 12-52 s and the game stalls meanwhile (VRChat's known Proton issue).
+#   native  VRChat's yt-dlp.exe in each VRChat prefix (compatdata/438100) is kept as yt-dlp.exe.steamac-orig
+#           and replaced by the steamac stub ($PAYLOAD/yt-dlp.exe, a few KiB), read-only so VRChat does not
+#           download its own copy over it. The stub asks the native server (--serve, steamac-ytdlp.service)
+#           and falls back to the original when the server is not there.
+#   off     (no steamac.ytdlp=native) the original is moved back byte for byte; a stub without an original
+#           is removed (VRChat downloads yt-dlp.exe again on its next start).
+# No game file is touched: Tools/ holds the yt-dlp copy VRChat downloads into the prefix's user profile.
+# Idempotent; runs as an ExecStartPre of steam.service (VRChat is not running then).
+# Usage: steam-ytdlp | steam-ytdlp --serve
+# Test overrides: STEAMAC_CMDLINE, STEAMAC_STEAM_ROOT, STEAMAC_YTDLP_PAYLOAD.
+set -uo pipefail
+
+CMDLINE=${STEAMAC_CMDLINE:-/proc/cmdline}
+STEAM=${STEAMAC_STEAM_ROOT:-$HOME/.local/share/Steam}
+PAYLOAD=${STEAMAC_YTDLP_PAYLOAD:-/usr/lib/steamac/ytdlp}
+TOOLS=pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat/Tools
+ORIG=yt-dlp.exe.steamac-orig
+log() { echo "steam-ytdlp: $*" >&2; }
+
+mode=off
+for w in $(cat "$CMDLINE" 2>/dev/null); do
+    case $w in steamac.ytdlp=native) mode=native ;; steamac.ytdlp=*) mode=off ;; esac
+done
+
+# VRChat prefixes in every Steam library
+prefixes() {
+    local lib
+    { printf '%s\n' "$STEAM"
+      sed -n 's/^[[:space:]]*"path"[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$STEAM/steamapps/libraryfolders.vdf" 2>/dev/null
+    } | sort -u | while IFS= read -r lib; do
+        [[ -d $lib/steamapps/compatdata/438100/pfx ]] && printf '%s\n' "$lib/steamapps/compatdata/438100"
+    done
+}
+
+if [[ ${1:-} == --serve ]]; then
+    [[ $mode == native ]] || { log "steamac.ytdlp=native not set; not serving"; exit 0; }
+    pfx=$(prefixes | head -n1)
+    exec /usr/bin/python3 -I "$PAYLOAD/ytdlp_server.py" ${pfx:+"$pfx/pfx/drive_c"}
+fi
+
+if [[ $mode == native && ! -f $PAYLOAD/yt-dlp.exe ]]; then
+    log "no stub in $PAYLOAD; leaving VRChat's yt-dlp.exe"; mode=off
+fi
+
+is_stub() { [[ -f $PAYLOAD/yt-dlp.exe ]] && cmp -s "$PAYLOAD/yt-dlp.exe" "$1" || grep -aq 'steamac yt-dlp stub' "$1" 2>/dev/null; }
+
+while IFS= read -r c; do
+    t=$c/$TOOLS
+    if [[ $mode == native ]]; then
+        [[ -d $t ]] || { log "$t: VRChat has not run yet; nothing to replace"; continue; }
+        if [[ -f $t/yt-dlp.exe ]] && cmp -s "$PAYLOAD/yt-dlp.exe" "$t/yt-dlp.exe"; then continue; fi
+        if [[ -f $t/yt-dlp.exe ]] && ! is_stub "$t/yt-dlp.exe"; then
+            # VRChat updated its yt-dlp (or this is the first run): keep the newest original
+            chmod u+w "$t/$ORIG" 2>/dev/null; mv -f "$t/yt-dlp.exe" "$t/$ORIG" || { log "$t: cannot keep original"; continue; }
+        fi
+        chmod u+w "$t/yt-dlp.exe" 2>/dev/null
+        cp -f "$PAYLOAD/yt-dlp.exe" "$t/yt-dlp.exe.steamac-tmp" && chmod 0555 "$t/yt-dlp.exe.steamac-tmp" \
+            && mv -f "$t/yt-dlp.exe.steamac-tmp" "$t/yt-dlp.exe" && log "$t: native yt-dlp stub installed"
+    else
+        [[ -f $t/yt-dlp.exe ]] && is_stub "$t/yt-dlp.exe" || continue
+        chmod u+w "$t/yt-dlp.exe"
+        if [[ -f $t/$ORIG ]]; then
+            mv -f "$t/$ORIG" "$t/yt-dlp.exe" && log "$t: VRChat's yt-dlp.exe restored"
+        else
+            rm -f "$t/yt-dlp.exe" && log "$t: stub removed (no original kept; VRChat downloads its own)"
+        fi
+    fi
+done < <(prefixes)
+exit 0

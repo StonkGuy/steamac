@@ -33,7 +33,7 @@ final class LauncherSettings: ObservableObject {
         case soundEnabled, soundOutputUID, soundVolume, soundMute, soundLatency
         // Advanced
         case cpus, memMiB, sshEnabled, sshPort, network, lanRemotePlay, diskImage, steamosBranch, steamClient, vulkanDriver,
-             graphicsPath, frameLatency
+             graphicsPath, frameLatency, nativeYtdlp
         // VR
         case vrEnabled, vrBitrateMbps, vrEyeSize, vrCodec, vrPairOnRequest, vrHeadsetAudio, vrGameAppID
         case vrRenderScale, vrUpscaler, vrSharpness, vrForceSRGB, vrKeyframeInterval, vrTCPOnly, vrShowStats
@@ -43,7 +43,7 @@ final class LauncherSettings: ObservableObject {
             case .openFullscreen, .dpiSource, .fixedDPI, .fixedWidthMM, .fixedHeightMM, .refreshRate,
                  .windowWidth, .windowHeight, .windowSizePreset, .retinaResolution, .renderScale, .soundEnabled, .cpus, .memMiB, .sshEnabled,
                  .sshPort, .network, .lanRemotePlay,
-                 .diskImage, .steamClient, .followMacTime, .vulkanDriver, .graphicsPath, .frameLatency, .vrEnabled,
+                 .diskImage, .steamClient, .followMacTime, .vulkanDriver, .graphicsPath, .frameLatency, .nativeYtdlp, .vrEnabled,
                  .vrEyeSize, .vrCodec, .vrPairOnRequest, .vrHeadsetAudio, .vrRenderScale, .vrUpscaler, .vrSharpness,
                  .vrForceSRGB, .vrKeyframeInterval, .vrTCPOnly:
                 return true
@@ -477,6 +477,9 @@ final class LauncherSettings: ObservableObject {
     /// Frame latency mode of the next start (Vulkan path; kernel cmdline `steamac.frame_latency=1`).
     /// Off by default: the guest's DXVK config is left unchanged.
     @Published var frameLatency = false { didSet { save(.frameLatency, frameLatency) } }
+    /// Native yt-dlp for VRChat's video players on the next start (kernel cmdline `steamac.ytdlp=native`).
+    /// Off by default: VRChat's own yt-dlp.exe is used.
+    @Published var nativeYtdlp = false { didSet { save(.nativeYtdlp, nativeYtdlp) } }
 
     init() {
         let domain = LauncherSettings.domain
@@ -561,6 +564,7 @@ final class LauncherSettings: ObservableObject {
         if let v = d.string(forKey: Key.vulkanDriver.rawValue).flatMap(VulkanDriver.init(rawValue:)) { vulkanDriver = v }
         if let v = d.string(forKey: Key.graphicsPath.rawValue).flatMap(GraphicsPath.init(rawValue:)) { graphicsPath = v }
         bool(.frameLatency, &frameLatency)
+        bool(.nativeYtdlp, &nativeYtdlp)
         bool(.vrEnabled, &vrEnabled)
         int(.vrBitrateMbps, &vrBitrateMbps)
         vrBitrateMbps = min(LauncherSettings.vrBitrateRange.upperBound, max(LauncherSettings.vrBitrateRange.lowerBound, vrBitrateMbps))
@@ -654,6 +658,7 @@ final class LauncherSettings: ObservableObject {
         case .vulkanDriver: guard let v = VulkanDriver(rawValue: text) else { return false }; vulkanDriver = v
         case .graphicsPath: guard let v = GraphicsPath(rawValue: text) else { return false }; graphicsPath = v
         case .frameLatency: guard let b else { return false }; frameLatency = b
+        case .nativeYtdlp: guard let b else { return false }; nativeYtdlp = b
         case .vrEnabled: guard let b else { return false }; vrEnabled = b
         case .vrBitrateMbps: guard let i, LauncherSettings.vrBitrateRange.contains(i) else { return false }; vrBitrateMbps = i
         case .vrEyeSize:
@@ -704,6 +709,7 @@ final class LauncherSettings: ObservableObject {
         vulkanDriver = fresh.vulkanDriver
         graphicsPath = fresh.graphicsPath
         frameLatency = fresh.frameLatency
+        nativeYtdlp = fresh.nativeYtdlp
         vrEnabled = fresh.vrEnabled; vrBitrateMbps = fresh.vrBitrateMbps; vrEyeSize = fresh.vrEyeSize
         vrCodec = fresh.vrCodec; vrPairOnRequest = fresh.vrPairOnRequest; vrHeadsetAudio = fresh.vrHeadsetAudio
         vrGameAppID = fresh.vrGameAppID
@@ -744,6 +750,7 @@ final class LauncherSettings: ObservableObject {
             .network: network, .lanRemotePlay: lanRemotePlay,
             .diskImage: diskImage, .steamClient: steamClient.rawValue, .followMacTime: followMacTime,
             .vulkanDriver: vulkanDriver.rawValue, .graphicsPath: graphicsPath.rawValue, .frameLatency: frameLatency,
+            .nativeYtdlp: nativeYtdlp,
             .vrEnabled: vrEnabled, .vrEyeSize: vrEyeSize, .vrCodec: vrCodec.rawValue,
             .vrPairOnRequest: vrPairOnRequest, .vrHeadsetAudio: vrHeadsetAudio, .vrRenderScale: vrRenderScale,
             .vrUpscaler: vrUpscaler.rawValue, .vrSharpness: vrSharpness, .vrForceSRGB: vrForceSRGB,
