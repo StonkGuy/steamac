@@ -1,0 +1,135 @@
+From d0e4f62730c95dc9c223730e76bcffa0bc10fc93 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Tue, 20 Oct 2026 07:35:51 +0300
+Subject: [PATCH] kk: views of formats without texel buffer support read as
+ null descriptors
+
+Ported from fxgl/steamac 1.9.1 host/kosmickrisp patch 0042 ("kk: R32G32B32
+uniform texel buffers; views of formats without texel buffer support read
+as null descriptors", STEAMAC-2Z, The Witcher 3 via vkd3d-proton); the fix
+and its wording are theirs. Only the null-descriptor part is taken.
+
+vkd3d-proton creates typed buffer views without checking the format's
+features: structured buffers of 12-byte strides get R32G32B32_UINT texel
+buffer views, typed SRVs may be R32G32B32_FLOAT. Venus forwards them, Metal
+has no 3-component pixel format, and kk_CreateBufferView dereferenced the
+NULL kk_get_va_format result (SIGSEGV; repro: a uniform texel buffer view of
+VK_FORMAT_R32G32B32_UINT, exit 139).
+
+Views of formats no texture buffer can back (no Metal format or no texel
+buffer read support) are invalid usage; they are created without a texture
+and their descriptors are null descriptors, with one warning per format
+("kk: texel buffer views of VK_FORMAT_... are not supported; they read as
+null descriptors"). Failing the creation would only move the problem: Venus
+creates views asynchronously, and the guest's next use of the missing view
+would kill its context. kk_DestroyBufferView and the descriptor write skip
+the missing texture. Cost when unused: one NULL test at view creation and
+one at descriptor write; no shader change.
+
+Deliberately left out of upstream 0042: R32G32B32 uniform texel buffer
+support (advertising UNIFORM_TEXEL_BUFFER for R32G32B32_*, the R32 texture
+of three texels per element, KK_TEXEL_BUFFER_RGB32 and the texel fetch /
+size query lowering in kk_nir_lower_descriptors.c). That lowering adds a
+mask, selects and a branch to every texel-buffer fetch in every shader, and
+the newly advertised formats make DXVK/vkd3d create views they never created
+before; it is the prime suspect for the stock 1.9.1 GPU hang (PageFault)
+in Unity HDRP titles. Until that is cleared, R32G32B32 views read as zero
+instead of crashing.
+---
+ src/kosmickrisp/vulkan/kk_buffer_view.c    | 33 ++++++++++++++++++++--
+ src/kosmickrisp/vulkan/kk_descriptor_set.c | 10 +++----
+ 2 files changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_buffer_view.c b/src/kosmickrisp/vulkan/kk_buffer_view.c
+index 5674962..11abc73 100644
+--- a/src/kosmickrisp/vulkan/kk_buffer_view.c
++++ b/src/kosmickrisp/vulkan/kk_buffer_view.c
+@@ -19,8 +19,12 @@
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/mtl_format.h"
+ 
++#include "util/log.h"
++#include "vk_enum_to_str.h"
+ #include "vk_format.h"
+ 
++#include <stdatomic.h>
++
+ VkFormatFeatureFlags2
+ kk_get_buffer_format_features(struct kk_physical_device *pdev,
+                               VkFormat vk_format)
+@@ -53,6 +57,23 @@ kk_get_buffer_format_features(struct kk_physical_device *pdev,
+    return features;
+ }
+ 
++/* A view no Metal texture buffer can back: vkd3d-proton creates typed views
++ * without checking the format's features (and Venus forwards them), so one
++ * reached the driver and dereferenced the missing format (STEAMAC-2Z). The view
++ * gets no texture; its descriptors read as null descriptors (zero). */
++static void
++kk_buffer_view_warn_unsupported(VkFormat format)
++{
++   static atomic_uint warned[8];
++   const unsigned bit = 1u << (format & 31);
++   if ((uint32_t)format < 256 &&
++       (atomic_fetch_or(&warned[format >> 5], bit) & bit))
++      return;
++   mesa_logw("kk: texel buffer views of %s are not supported; they read as "
++             "null descriptors",
++             vk_Format_to_str(format));
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
+                     const VkAllocationCallbacks *pAllocator,
+@@ -67,7 +88,12 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
+    enum pipe_format p_format = vk_format_to_pipe_format(view->vk.format);
+    const struct kk_va_format *supported_format = kk_get_va_format(p_format);
+ 
+-   /* If we reached here, we support reading at least */
++   if (!supported_format || !supported_format->texel_buffer.read) {
++      kk_buffer_view_warn_unsupported(view->vk.format);
++      *pBufferView = kk_buffer_view_to_handle(view);
++      return VK_SUCCESS;
++   }
++
+    enum mtl_texture_usage usage = MTL_TEXTURE_USAGE_SHADER_READ;
+    if (supported_format->texel_buffer.write)
+       usage |= MTL_TEXTURE_USAGE_SHADER_WRITE;
+@@ -159,10 +185,11 @@ kk_DestroyBufferView(VkDevice _device, VkBufferView bufferView,
+ 
+    if (view->sparse)
+       kk_buffer_view_sparse_finish(dev, view);
+-   else
++   else if (view->mtl_texel_buffer_handle)
+       kk_device_remove_texture_from_residency_set(
+          dev, view->mtl_texel_buffer_handle);
+-   mtl_release(view->mtl_texel_buffer_handle);
++   if (view->mtl_texel_buffer_handle)
++      mtl_release(view->mtl_texel_buffer_handle);
+    vk_buffer_view_destroy(&dev->vk, pAllocator, &view->vk);
+ }
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_descriptor_set.c b/src/kosmickrisp/vulkan/kk_descriptor_set.c
+index 7c8e91b..ea16440 100644
+--- a/src/kosmickrisp/vulkan/kk_descriptor_set.c
++++ b/src/kosmickrisp/vulkan/kk_descriptor_set.c
+@@ -261,12 +261,10 @@ write_buffer_view_desc(struct kk_descriptor_set *set,
+                        uint32_t elem)
+ {
+    struct kk_texel_buffer_descriptor desc = {};
+-   if (bufferView != VK_NULL_HANDLE) {
+-      VK_FROM_HANDLE(kk_buffer_view, view, bufferView);
+-
+-      assert(view->mtl_texel_buffer_handle);
+-      assert(view->texel_buffer_gpu_id);
+-
++   /* Views of formats no texture buffer backs have no texture
++    * (kk_CreateBufferView): null descriptors */
++   VK_FROM_HANDLE(kk_buffer_view, view, bufferView);
++   if (view != NULL && view->mtl_texel_buffer_handle != NULL) {
+       desc.image_gpu_resource_id = view->texel_buffer_gpu_id;
+       desc.texel_offset = view->texel_offset;
+       desc.residency_gpu_resource_id = view->residency_gpu_id;
+-- 
+2.39.5 (Apple Git-154)
+
