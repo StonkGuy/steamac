@@ -1,4 +1,4 @@
-From 441f2395fee5f2c0b3da5084da92d0fe12a17576 Mon Sep 17 00:00:00 2001
+From 09102c0aa4b43e3f3c3b44f91befb21f7654b8a3 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 12:03:00 +0200
 Subject: [PATCH] kk: start and end times in the MESA_KK_DEBUG=compiles log

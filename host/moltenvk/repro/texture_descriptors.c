@@ -1,6 +1,11 @@
 /* STEAMAC-3S/3Z/3J/3F/4B/3K/3G/3R: texel-buffer widths reaching Metal.
- * Run without Vulkan validation: a bad guest view must fail, not abort the VM.
- * Each case gets its own process so pre-fix Metal assertions name the case.
+ * Run without Vulkan validation: a bad guest view must neither abort the VM nor
+ * fail. Under Venus vkCreateBufferView is asynchronous, so a failure is a
+ * command-stream error at the view's first use that kills the guest process
+ * (Dragon's Dogma 2 at the end of loading a save, KosmicKrisp 0064): a view of
+ * zero elements is a null descriptor and an oversized one is narrowed to
+ * maxTexelBufferElements. Each case gets its own process so pre-fix Metal
+ * assertions name the case.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,15 +79,17 @@ static void buffer_case(const char *name)
 		.offset = offset, .range = explicit_range ? range : VK_WHOLE_SIZE };
 	VkBufferView view = VK_NULL_HANDLE;
 	VkResult result = vkCreateBufferView(dev, &ci, NULL, &view);
-	VkResult expected = valid ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
-	if (result != expected) {
-		fprintf(stderr, "FAIL %s returned %d (expected %d)\n", name, result, expected);
+	/* Valid views are created; invalid ones are created too (null or narrowed), never failed */
+	if (result != VK_SUCCESS) {
+		fprintf(stderr, "FAIL %s returned %d (expected VK_SUCCESS: %s)\n", name, result,
+			valid ? "a valid view" : "an invalid view must not fail under Venus");
 		exit(1);
 	}
 	vkDestroyBufferView(dev, view, NULL);
 	vkDestroyBuffer(dev, buffer, NULL);
 	vkFreeMemory(dev, memory, NULL);
-	printf("OK   %s (maxTexelBufferElements=%u)\n", name, props.limits.maxTexelBufferElements);
+	printf("OK   %s%s (maxTexelBufferElements=%u)\n", name, valid ? "" : " accepted without Metal",
+		props.limits.maxTexelBufferElements);
 }
 
 int main(int argc, char **argv)

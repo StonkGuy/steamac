@@ -1,4 +1,4 @@
-From b9e8f4d26346782d2403c2499519a03ff12e7e6a Mon Sep 17 00:00:00 2001
+From 33af29e9421f5aac2c0f60c75175d23ea22d771a Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 15:00:00 +0200
 Subject: [PATCH] kk: support 64-bit image atomics
@@ -28,13 +28,6 @@ Tested with host/moltenvk/repro/image_atomic64.c: 32768 invocations racing on
 64-bit image min/max with the CPU recomputing every texel, and the uncontended
 fetch result checked exactly. The Metal operation itself was verified on an
 M5 Max with steamac-dev/scripts/mtl_tex_atomic64.swift.
-
-Apple8 and later only, like the buffer atomics (0049): the extension and
-shaderImageInt64Atomics are gated on kk_physical_device_has_int64_minmax_atomics,
-and kk_get_image_plane_format_features reports no features at all for
-R64_UINT/R64_SINT where it is not advertised, so an application that checks
-format support never creates such an image on an M1 (Metal validation there:
-"This device does not support ulong texture atomics").
 
 Generated-by: LLM
 ---
@@ -101,7 +94,7 @@ index ddfcaae..85ded20 100644
  VK_KHR_shader_atomic_int64 on KosmicKrisp
 +VK_EXT_shader_image_atomic_int64 on KosmicKrisp
 diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
-index a26ac98..ed17ade 100644
+index d89c8f4..6ba5818 100644
 --- a/src/kosmickrisp/compiler/nir_to_msl.c
 +++ b/src/kosmickrisp/compiler/nir_to_msl.c
 @@ -716,6 +716,11 @@ tex_type_name(nir_alu_type ty)
@@ -226,12 +219,12 @@ index 0c6eedd..e002fd7 100644
  };
  
 diff --git a/src/kosmickrisp/vulkan/kk_debug.h b/src/kosmickrisp/vulkan/kk_debug.h
-index 6df4591..a716b5e 100644
+index 49db8e5..63c4c6e 100644
 --- a/src/kosmickrisp/vulkan/kk_debug.h
 +++ b/src/kosmickrisp/vulkan/kk_debug.h
-@@ -31,6 +31,10 @@ enum kk_debug {
-    /* Do not advertise subgroups in the vertex stage (the lane id is recovered
-     * there in msl_emit_vertex_subgroup_helpers): A/B for the recovery */
+@@ -32,6 +32,10 @@ enum kk_debug {
+     * there by emit_vertex_lane_id_helper's kk_vertex_lane_id): A/B for the
+     * recovery */
     KK_DEBUG_NO_VERTEX_SUBGROUPS = 1ull << 8,
 +   /* Do not advertise VK_EXT_shader_image_atomic_int64 (64-bit storage-image
 +    * atomics, lowered in nir_to_msl.c): A/B and a fallback if a title trips

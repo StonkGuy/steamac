@@ -1,4 +1,4 @@
-From 0406b99365040af7d45086205bd2881711f8e061 Mon Sep 17 00:00:00 2001
+From 3bdd51ed3c7dac54ac5af2d4d447c15f55778c43 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 02:31:45 +0200
 Subject: [PATCH] kk: keep compiled MSL libraries with the device
@@ -15,11 +15,6 @@ is retained for the device's lifetime and returned from a hash table keyed by
 the source string. On a warm Dragon's Dogma 2 launch this cuts library compiles
 from 87,243 to 6,244, all compile requests from 131,636 to 34,051 and the total
 Metal time from 80 s to 14 s (measured with MESA_KK_DEBUG=compiles).
-
-_mesa_hash_table_create's first argument is a ralloc context, not
-VkAllocationCallbacks: the table is created with a NULL context (a debug build's
-ralloc canary assert fired in vkCreateDevice with &dev->vk.alloc, and release
-ralloc wrote its child link into the vk_object_base in front of it).
 
 Generated-by: LLM
 ---

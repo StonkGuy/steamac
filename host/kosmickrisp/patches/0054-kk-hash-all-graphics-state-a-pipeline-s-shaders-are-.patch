@@ -1,4 +1,4 @@
-From 2cf797abfde4b2e36b1201fe19dc797b12a11211 Mon Sep 17 00:00:00 2001
+From f5ca3d40ad1143ea2aeff6e7e765798b018e8b21 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 12:02:52 +0200
 Subject: [PATCH] kk: hash all graphics state a pipeline's shaders are built
@@ -20,22 +20,13 @@ application's VkPipelineCache - for instance a D32 pipeline built for a
 D24S8 attachment. Hash them too, for graphics stages only (compute
 pipelines have no graphics state).
 
-The fragment key and the view mask are hashed whenever any graphics stage is
-in the set, not only with a fragment stage: a pipeline without a pixel shader
-still builds its VS and empty FS from that state, so two depth-only pipelines
-with the same VS but D32 vs D16, GREATER vs LESS or 1 vs 4 samples must not
-share a shader. alpha_to_coverage_enable and alpha_to_one_enable, which
-msl_nir_lower_multisample_alpha bakes into the FS, are part of the key too.
-With 0055's device and disk caches this key is hit on every pipeline creation
-and across launches, not only through an application's VkPipelineCache.
-
 Generated-by: LLM
 ---
  src/kosmickrisp/vulkan/kk_shader.c | 43 +++++++++++++++++++++++++++++-
  1 file changed, 42 insertions(+), 1 deletion(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 5742f07..52c8362 100644
+index 10ac76c..84cbbdd 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -123,6 +123,12 @@ kk_populate_vs_key(struct kk_vs_key *key,

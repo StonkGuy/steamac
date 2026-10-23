@@ -1,4 +1,4 @@
-From 71aa7ecf87684cf6995ddd5c540ed1879f5cd6f1 Mon Sep 17 00:00:00 2001
+From 4c618c64d20185ed56cb5ceb38b278762024c875 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 09:45:28 +0200
 Subject: [PATCH] kk: share compiled pipeline states between equal pipelines
@@ -32,9 +32,6 @@ starts whole bursts of pipelines with the same shaders at once - without it the
 table stops duplicate work only after the fact. Measured on the benchmark
 (MODULES=200 REPEAT=24 THREADS=8): 664 program compiles before, 453 after, with
 453 distinct - the duplicates are gone rather than merely cheap.
-
-The tables are created with a NULL ralloc context (_mesa_hash_table_create's
-first argument is not VkAllocationCallbacks; 0050 has the same fix).
 
 Generated-by: LLM
 ---
@@ -150,7 +147,7 @@ index f447fbe..16426b0 100644
     /* os_time_get_nano() at creation (command queue error diagnostics) */
     int64_t created_ns;
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index b0ab43f..ac88fd7 100644
+index 4c2723a..b15df7c 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -1308,6 +1308,282 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
@@ -785,7 +782,7 @@ index b0ab43f..ac88fd7 100644
  
        mtx_lock(&dev->compile_mtx);
        s->compile_result = result;
-@@ -2221,7 +2554,7 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
+@@ -2223,7 +2556,7 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
        return result;
  
     /* Never queued, or the pool has no worker: compile it here. */

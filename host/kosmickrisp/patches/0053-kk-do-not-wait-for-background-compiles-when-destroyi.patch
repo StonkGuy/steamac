@@ -1,4 +1,4 @@
-From 1aaa0481768bc6e3734139f0baf37c051a536eda Mon Sep 17 00:00:00 2001
+From a0248dacf47a037cacd1bb97cf997794ac129d41 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 12:02:51 +0200
 Subject: [PATCH] kk: do not wait for background compiles when destroying a
@@ -35,7 +35,7 @@ Generated-by: LLM
  2 files changed, 51 insertions(+), 12 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index ac88fd7..5742f07 100644
+index b15df7c..10ac76c 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -844,17 +844,46 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,

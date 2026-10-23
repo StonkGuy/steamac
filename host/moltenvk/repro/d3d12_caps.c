@@ -32,23 +32,26 @@
  *					  (VK_KHR_compute_shader_derivatives),
  *					  shaderBufferInt64Atomics and shaderInt8
  *
- * Two of those inputs cannot be provided on Apple GPUs. Metal has no 64-bit atomic that returns a
- * value: atomic_ulong exists, and the MSL compiler accepts the *void*
- * atomic_max_explicit/atomic_min_explicit on device atomic_ulong (measured on an M5 Max,
- * 2026-10-13), but it rejects 64-bit fetch forms, loads, stores, exchanges, compare-exchanges and
- * every 64-bit atomic in threadgroup memory — DD2's pipeline dies on "no matching function for call
- * to 'atomic_fetch_max_explicit'". SPIR-V's OpAtomic*Min/Max must return the original value, so the
- * void forms are not enough for an honest shaderBufferInt64Atomics, and MoltenVK hardcodes it false
- * as well. Emulation is not the way out either: lanes of an Apple SIMD group do not make independent
- * progress, so a 32-bit spinlock in a shader hangs the GPU (tried, 2026-10-13), and a lock-free one
- * would need the 64-bit compare-exchange Metal does not have. Metal also has no conservative
+ * Metal has no 64-bit atomic that returns a value: atomic_ulong exists, and from Apple8 the MSL
+ * compiler accepts the *void* atomic_max_explicit/atomic_min_explicit on device atomic_ulong (and
+ * the matching texture atomics), but it rejects 64-bit fetch forms, loads, stores, exchanges,
+ * compare-exchanges and every 64-bit atomic in threadgroup memory. KosmicKrisp (patch 0049/0058)
+ * advertises shaderBufferInt64Atomics and shaderImageInt64Atomics on Apple8 and later anyway,
+ * lowering OpAtomicUMax/UMin to the void forms with a read of the cell just before them as the
+ * returned value (exact when uncontended, which is what Dragon's Dogma 2's own use needs) and
+ * failing pipelines that use any other 64-bit atomic at creation; the guest keeps both extensions
+ * from D3D12 titles by default and gives them to the titles that fit (steam-gfx-env,
+ * steam-title-defaults). With them, SM 6.6 and the AtomicInt64 fields are reachable there.
+ * Emulation of the rest is not the way out: lanes of an Apple SIMD group do not make independent
+ * progress, so a 32-bit spinlock in a shader hangs the GPU (tried, 2026-10-13), and a lock-free
+ * one would need the 64-bit compare-exchange Metal does not have. Metal also has no conservative
  * rasterization (no Metal API; the coverage behaviour D3D12's Tier 1 is defined by cannot be
- * emulated). So the AtomicInt64 fields and feature level 12_1 stay false, SM 6.6 is unreachable, and
- * a title that requires AtomicInt64OnDescriptorHeapResourceSupported (Dragon's Dogma 2) cannot run.
- * 12_1 additionally needs ROVs, which Metal could express with raster order groups but neither host
- * driver maps to VK_EXT_fragment_shader_interlock yet. Apple's own D3DMetal sidesteps all of this by
- * compiling to AIR instead of MSL (air.atomic.global.{min,max}.u.i64, and no stage restriction on
- * the SIMD-group intrinsics); that route is closed to a Vulkan driver that emits MSL.
+ * emulated), so feature level 12_1 stays false and is forced per title (VKD3D_FEATURE_LEVEL).
+ * 12_1 additionally needs ROVs, which Metal could express with raster order groups but neither
+ * host driver maps to VK_EXT_fragment_shader_interlock yet. Apple's own D3DMetal sidesteps all of
+ * this by compiling to AIR instead of MSL (air.atomic.global.{min,max}.u.i64, and no stage
+ * restriction on the SIMD-group intrinsics); that route is closed to a Vulkan driver that emits
+ * MSL.
  *
  * The 12_0 prerequisites are what the sparse binding/residency work buys, so they are checked here as
  * a regression guard: a driver that loses them drops below D3D12 feature level 12_0 and every DX12

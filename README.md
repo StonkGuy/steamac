@@ -89,9 +89,15 @@ Per-title environment that a game needs from the driver it runs on is a default,
 D3D feature level 12_1, which vkd3d-proton derives from ROVs and conservative rasterization — on
 Metal neither exists (conservative rasterization has no Metal API; ROVs would need Metal's raster
 order groups mapped to `VK_EXT_fragment_shader_interlock`), and the title only checks the level, so
-it is reported as `VKD3D_FEATURE_LEVEL=12_1 VKD3D_SHADER_MODEL=6_6`. An existing value is only
-prefixed, never replaced, a value without `%command%` is left alone, and an edit made in Steam after
-ours wins (marker `~/.config/steamac/title-defaults.json`).
+it is reported as `VKD3D_FEATURE_LEVEL=12_1 VKD3D_SHADER_MODEL=6_6`, together with
+`VKD3D_DISABLE_EXTENSIONS=` (empty): KosmicKrisp's 64-bit atomics cover unsigned min/max only, so
+`steam-gfx-env` keeps `VK_KHR_shader_atomic_int64` and `VK_EXT_shader_image_atomic_int64` from every
+D3D12 title by default (a title whose shaders use another 64-bit atomic would silently lose those
+pipelines, and vkd3d-proton reports shader model 6.6 from them), and a title that fits gets them back
+in its own launch options. An entry applies only where the Venus device advertises the features it
+needs (DD2's: the 64-bit atomics, Apple8/M2 and later), an existing value is only prefixed, never
+replaced, a value without `%command%` is left alone, and an edit made in Steam after ours wins
+(marker `~/.config/steamac/title-defaults.json`).
 
 SteamOS takes the Mac's time zone and 12/24-hour clock format (Settings > General
 **Use the Mac's time zone and clock format**, on by default, applies on the next start).

@@ -1,0 +1,136 @@
+From 81a97e29a93e12a0c6dcb68e9bf08a733c77644f Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Fri, 23 Oct 2026 12:16:35 +0200
+Subject: [PATCH] kk: depth/stencil states with the pipeline; inline compiles
+ free orphaned programs
+
+kk_cmd_bind_graphics_shader waited for the program's background compile
+(0051) only to read its depth/stencil state, so it compiled that program
+inline on the ring thread under virglrenderer's submission lock, and
+before Apple10 a bound reduction sampler then compiled the minmax program
+inline as well. When the compile had failed, a static depth/stencil state
+was taken for a dynamic one.
+
+Both programs' depth/stencil states (mtl_depth_stencil_state, cheap to
+build) are now created with the pipeline, in kk_compile_shaders and in
+the pipeline-cache path, and the bind reads them without waiting; draws
+and dispatches still wait for the Metal pipelines (kk_cmd_shader_pipeline).
+
+The inline compile at a program's first use (0057) now checks
+compile_orphaned afterwards: a program destroyed while that thread
+compiled it is freed by that thread, as the worker does, instead of
+leaking.
+
+Generated-by: LLM
+---
+ src/kosmickrisp/vulkan/kk_shader.c | 53 +++++++++++++++++++++---------
+ 1 file changed, 38 insertions(+), 15 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index 2880744..f241dda 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -1849,6 +1849,19 @@ kk_compile_ds_state(struct kk_device *device, struct kk_shader_info *info)
+    return state;
+ }
+ 
++/* The depth/stencil state of a program's VS, built when the pipeline is
++ * created (kk_compile_shaders, kk_deserialize_shader) rather than with its
++ * Metal pipelines: binding the pipeline needs it, and a bind that waited for
++ * the program's compile ran on the ring thread under virglrenderer's
++ * submission lock. Both of a pipeline's programs get one. */
++static void
++kk_create_ds_state(struct kk_device *dev, struct kk_shader *vs)
++{
++   if (vs->info.stage == MESA_SHADER_VERTEX && vs->info.vs.has_ds &&
++       vs->pipeline.gfx.ds_handle == NULL)
++      vs->pipeline.gfx.ds_handle = kk_compile_ds_state(dev, &vs->info);
++}
++
+ static void
+ kk_gather_ds_info(const struct vk_depth_stencil_state *ds, bool has_depth,
+                   bool has_stencil, struct kk_shader_info *info)
+@@ -2079,11 +2092,10 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
+       return VK_ERROR_INVALID_SHADER_NV;
+    }
+ 
+-   /* A pipeline whose minmax program was compiled first has it already. The
+-    * state is bound on its own, so it is needed on both paths below. */
+-   if (vs->info.vs.has_ds && pipe->gfx.ds_handle == NULL) {
+-      pipe->gfx.ds_handle = kk_compile_ds_state(device, &vs->info);
+-   }
++   /* The depth/stencil state is built when the pipeline is created
++    * (kk_create_ds_state), so that binding never waits for this compile; a
++    * program created another way gets it here. */
++   kk_create_ds_state(device, vs);
+ 
+    /* A render pipeline built from the same two programs and state is the same
+     * Metal pipeline (kk_metal_caches_init) */
+@@ -2692,7 +2704,12 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
+       s->compile_done = true;
+       dev->compile_pending--;
+       cnd_broadcast(&dev->compile_cnd);
++      const bool orphaned = s->compile_orphaned;
+       mtx_unlock(&dev->compile_mtx);
++      /* Destroyed while this thread compiled it (kk_shader_destroy): the
++       * thread that compiles a program frees it, as the worker does */
++      if (orphaned)
++         kk_shader_free(dev, s, &dev->vk.alloc);
+       return result;
+    }
+    while (!s->compile_done && s->compile_queued)
+@@ -2820,11 +2837,15 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+ 
+    /* Both programs go to the background pool: the ring thread returns instead
+     * of spending a title's whole shader compilation here, one pipeline at a
+-    * time (kk_compile_pool_init). */
++    * time (kk_compile_pool_init). Their depth/stencil states are built now:
++    * binding needs them, and must not wait for the pool. */
+    if (result == VK_SUCCESS) {
++      kk_create_ds_state(dev, s);
+       kk_compile_enqueue(dev, s);
+-      if (s->minmax != NULL)
++      if (s->minmax != NULL) {
++         kk_create_ds_state(dev, s->minmax);
+          kk_compile_enqueue(dev, s->minmax);
++      }
+    }
+ 
+    /* The VS has the pipeline data now, so free the generated shaders. */
+@@ -3011,9 +3032,12 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+     * reduction sampler means the emulating program is the one that gets used
+     * first, but the pool compiles them regardless (kk_compile_pool_init). */
+    if (info.stage == MESA_SHADER_COMPUTE || info.stage == MESA_SHADER_VERTEX) {
++      kk_create_ds_state(dev, shader);
+       kk_compile_enqueue(dev, shader);
+-      if (shader->minmax != NULL)
++      if (shader->minmax != NULL) {
++         kk_create_ds_state(dev, shader->minmax);
+          kk_compile_enqueue(dev, shader->minmax);
++      }
+    }
+ 
+    if (result != VK_SUCCESS)
+@@ -3121,13 +3145,12 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
+    if (stage != MESA_SHADER_VERTEX)
+       return;
+ 
+-   /* The program (and with it its depth/stencil state) is compiled in the
+-    * background (kk_compile_pool_init); binding is its first use. Waiting here
+-    * keeps a pipeline with static depth/stencil state from being taken for a
+-    * dynamic one, whose state the application never sets. */
+-   if (unlikely(!p_atomic_read(&shader->pipeline_ready)))
+-      (void) kk_compile_wait(kk_cmd_buffer_device(cmd), shader);
+-
++   /* The program is compiled in the background (kk_compile_pool_init) and
++    * draws wait for it (kk_cmd_shader_pipeline); its depth/stencil state was
++    * built with the pipeline (kk_create_ds_state), so binding does not: that
++    * wait ran on the ring thread under virglrenderer's submission lock, and a
++    * pipeline with static depth/stencil state must not be taken for a dynamic
++    * one, whose state the application never sets. */
+    bool requires_dynamic_depth_stencil = shader->pipeline.gfx.ds_handle == NULL;
+    if (cmd->state.gfx.is_depth_stencil_dynamic) {
+       /* If we are switching from dynamic to static, we need to clean up
+-- 
+2.54.0 (Apple Git-157)
+

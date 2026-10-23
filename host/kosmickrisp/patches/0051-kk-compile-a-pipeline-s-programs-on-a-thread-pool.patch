@@ -1,4 +1,4 @@
-From d9099d59d03d6b851fa266ae4f16d471c3bd5546 Mon Sep 17 00:00:00 2001
+From 2a21be2e59d25dc2d2d1e5b94b77bf6ce84c3e70 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 08:54:56 +0200
 Subject: [PATCH] kk: compile a pipeline's programs on a thread pool
@@ -49,6 +49,10 @@ player watching the game's compile screen. The remaining floor is Apple's
 compiler service, which runs the compiles on about one core
 (MTLCompilerService in top) however many are submitted.
 
+MESA_KK_COMPILE_THREADS is capped at 64; every VkDevice has a pool of its
+own (gamescope, Steam and a game make three in a session), so the default
+stays below the core count.
+
 Generated-by: LLM
 ---
  src/kosmickrisp/compiler/nir_to_msl.c    |  51 ++++
@@ -57,12 +61,12 @@ Generated-by: LLM
  src/kosmickrisp/vulkan/kk_cmd_draw.c     |  17 +-
  src/kosmickrisp/vulkan/kk_device.c       |  14 +-
  src/kosmickrisp/vulkan/kk_device.h       |  27 +-
- src/kosmickrisp/vulkan/kk_shader.c       | 340 ++++++++++++++++-------
+ src/kosmickrisp/vulkan/kk_shader.c       | 342 ++++++++++++++++-------
  src/kosmickrisp/vulkan/kk_shader.h       |  18 ++
- 8 files changed, 379 insertions(+), 114 deletions(-)
+ 8 files changed, 381 insertions(+), 114 deletions(-)
 
 diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
-index c8d84b1..a26ac98 100644
+index 47687c3..d89c8f4 100644
 --- a/src/kosmickrisp/compiler/nir_to_msl.c
 +++ b/src/kosmickrisp/compiler/nir_to_msl.c
 @@ -982,6 +982,57 @@ atomic_is_64bit_unsigned_minmax(nir_intrinsic_instr *instr)
@@ -352,7 +356,7 @@ index 03d919a..f447fbe 100644
     /* os_time_get_nano() at creation (command queue error diagnostics) */
     int64_t created_ns;
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 0de5fdc..b0ab43f 100644
+index 0de5fdc..4c2723a 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -850,6 +850,11 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
@@ -425,7 +429,7 @@ index 0de5fdc..b0ab43f 100644
     return library;
  }
  
-@@ -2059,6 +2094,136 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s)
+@@ -2059,6 +2094,138 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s)
     return result;
  }
  
@@ -477,13 +481,15 @@ index 0de5fdc..b0ab43f 100644
 +   cnd_init(&dev->compile_cnd);
 +
 +   /* A worker per core, leaving room for the ring thread and the rest of the
-+    * system. MESA_KK_COMPILE_THREADS overrides it (A/B, and machines where
-+    * that many Metal compiles at once is too much). */
++    * system; every VkDevice has a pool of its own (gamescope, Steam and a game
++    * make three in a session), so the default stays below the core count.
++    * MESA_KK_COMPILE_THREADS overrides it (A/B, and machines where that many
++    * Metal compiles at once is too much), capped at 64. */
 +   long cpus = sysconf(_SC_NPROCESSORS_ONLN);
 +   uint32_t threads = cpus > 3 ? MIN2(16u, (uint32_t)(cpus - 2)) : 2u;
 +   const char *env = getenv("MESA_KK_COMPILE_THREADS");
 +   if (env != NULL)
-+      threads = MAX2(1u, (uint32_t)atoi(env));
++      threads = CLAMP((uint32_t)MAX2(1, atoi(env)), 1u, 64u);
 +
 +   dev->compile_threads = vk_zalloc(&dev->vk.alloc, threads * sizeof(thrd_t),
 +                                    8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
@@ -562,7 +568,7 @@ index 0de5fdc..b0ab43f 100644
  /* Graphics pipeline state the VS of a program holds. */
  static void
  kk_gather_program(struct kk_device *dev,
-@@ -2105,38 +2270,6 @@ kk_minmax_layouts_used(uint32_t minmax_sets, uint32_t set_layout_count,
+@@ -2105,38 +2272,6 @@ kk_minmax_layouts_used(uint32_t minmax_sets, uint32_t set_layout_count,
     return false;
  }
  
@@ -601,7 +607,7 @@ index 0de5fdc..b0ab43f 100644
  static VkResult
  kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
                     struct vk_shader_compile_info *infos,
-@@ -2183,18 +2316,6 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+@@ -2183,18 +2318,6 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
     if (s->vk.stage != MESA_SHADER_COMPUTE)
        kk_gather_program(dev, state, shaders, total_shaders);
  
@@ -620,7 +626,7 @@ index 0de5fdc..b0ab43f 100644
     if (minmax_sets) {
        struct kk_shader *minmax_shaders[shader_count + 2u];
        bool minmax_generated[shader_count + 2u];
-@@ -2213,12 +2334,13 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+@@ -2213,12 +2336,13 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
        }
     }
  
@@ -640,7 +646,7 @@ index 0de5fdc..b0ab43f 100644
     }
  
     /* The VS has the pipeline data now, so free the generated shaders. */
-@@ -2401,11 +2523,14 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -2401,11 +2525,14 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
           goto fail;
     }
  
@@ -660,7 +666,7 @@ index 0de5fdc..b0ab43f 100644
  
     if (result != VK_SUCCESS)
        goto fail;
-@@ -2431,60 +2556,70 @@ kk_cmd_bind_compute_shader(struct kk_cmd_buffer *cmd, struct kk_shader *shader)
+@@ -2431,60 +2558,70 @@ kk_cmd_bind_compute_shader(struct kk_cmd_buffer *cmd, struct kk_shader *shader)
   * update-after-bind set may get one after recording, before submission: such
   * sets are recorded for kk_queue_submit, which then re-records the command
   * buffer from its command queue. One-time-submit command buffers have no
@@ -773,7 +779,7 @@ index 0de5fdc..b0ab43f 100644
        }
     }
     return &program->pipeline;
-@@ -2502,6 +2637,13 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
+@@ -2502,6 +2639,13 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
     if (stage != MESA_SHADER_VERTEX)
        return;
  

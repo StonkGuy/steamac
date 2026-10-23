@@ -1,4 +1,4 @@
-From f2db811d4bcb7b645f2753cde3c69a260937dcd9 Mon Sep 17 00:00:00 2001
+From 0b8ac402aee1a991824531f79201548bed09607c Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 12:02:52 +0200
 Subject: [PATCH] kk: keep translated shaders in a device cache and on disk

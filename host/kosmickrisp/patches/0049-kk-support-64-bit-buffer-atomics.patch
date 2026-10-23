@@ -1,4 +1,4 @@
-From 22358d5a9d68dde61ab9a0af5226baf38f3fd364 Mon Sep 17 00:00:00 2001
+From 588dd44d24ec4d7ab8d8f28fd0e38dd307cca388 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 00:42:49 +0200
 Subject: [PATCH] kk: support 64-bit buffer atomics
@@ -25,20 +25,6 @@ min/max with the CPU recomputing every expectation, the fetch results checked
 against the values that were actually written, and the uncontended fetch result
 checked exactly.
 
-Apple8 and later only: Metal's ulong atomic min/max on buffers and textures
-exist from Apple8 (Metal feature set tables, macOS), and an M1 (Apple7)
-rejects the pipeline ("Unsupported i64 atomic operation for given target"), so
-the extension and shaderBufferInt64Atomics are gated on
-kk_physical_device_has_int64_minmax_atomics (gpu_apple_family >= 8), like
-depthBounds is on its family.
-
-The fetch form assigns its result to the predeclared tN instead of declaring it
-again: inside the bounds-check `if` of a storage buffer access the inner
-declaration shadowed the outer one (a use after the scope read 0), and with
-physical-pointer (buffer device address) access, which has no such `if`, Metal
-reported "redefinition of 'tN'". atomic64.c runs the exact fetch check through
-a buffer device address as well (dd2_atomic64_fetch_bda.comp).
-
 Generated-by: LLM
 ---
  docs/drivers/kosmickrisp.rst                | 11 ++++-
@@ -47,9 +33,9 @@ Generated-by: LLM
  src/kosmickrisp/compiler/nir_to_msl.c       | 53 +++++++++++++++++++++
  src/kosmickrisp/vulkan/kk_debug.c           |  1 +
  src/kosmickrisp/vulkan/kk_debug.h           |  4 ++
- src/kosmickrisp/vulkan/kk_physical_device.c | 12 +++++
+ src/kosmickrisp/vulkan/kk_physical_device.c | 11 +++++
  src/kosmickrisp/vulkan/kk_physical_device.h | 13 +++++
- 8 files changed, 95 insertions(+), 2 deletions(-)
+ 8 files changed, 94 insertions(+), 2 deletions(-)
 
 diff --git a/docs/drivers/kosmickrisp.rst b/docs/drivers/kosmickrisp.rst
 index 144fb85..ff09656 100644
@@ -103,7 +89,7 @@ index a9237cd..ddfcaae 100644
  VK_KHR_map_memory2 on v3dv
 +VK_KHR_shader_atomic_int64 on KosmicKrisp
 diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
-index 6cccf74..c8d84b1 100644
+index 4de6d5c..47687c3 100644
 --- a/src/kosmickrisp/compiler/nir_to_msl.c
 +++ b/src/kosmickrisp/compiler/nir_to_msl.c
 @@ -960,6 +960,54 @@ atomic_op_to_msl(nir_atomic_op op)
@@ -186,7 +172,7 @@ index 621d2ba..0c6eedd 100644
     {NULL, 0},
  };
 diff --git a/src/kosmickrisp/vulkan/kk_debug.h b/src/kosmickrisp/vulkan/kk_debug.h
-index acc6042..6df4591 100644
+index 6775c60..49db8e5 100644
 --- a/src/kosmickrisp/vulkan/kk_debug.h
 +++ b/src/kosmickrisp/vulkan/kk_debug.h
 @@ -24,6 +24,10 @@ enum kk_debug {
@@ -198,13 +184,13 @@ index acc6042..6df4591 100644
 +    * lowering's racy fetch result */
 +   KK_DEBUG_NO_INT64_ATOMICS = 1ull << 7,
     /* Do not advertise subgroups in the vertex stage (the lane id is recovered
-     * there in msl_emit_vertex_subgroup_helpers): A/B for the recovery */
-    KK_DEBUG_NO_VERTEX_SUBGROUPS = 1ull << 8,
+     * there by emit_vertex_lane_id_helper's kk_vertex_lane_id): A/B for the
+     * recovery */
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
-index 50d12c4..277d213 100644
+index fc3af88..277d213 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
-@@ -77,6 +77,16 @@ kk_get_device_extensions(const struct kk_instance *instance,
+@@ -77,6 +77,15 @@ kk_get_device_extensions(const struct kk_instance *instance,
        .KHR_imageless_framebuffer = true,
        .KHR_sampler_mirror_clamp_to_edge = true,
        .KHR_separate_depth_stencil_layouts = true,
@@ -217,11 +203,10 @@ index 50d12c4..277d213 100644
 +      .KHR_shader_atomic_int64 =
 +         kk_physical_device_has_int64_minmax_atomics(pdev) &&
 +         !KK_DEBUG(NO_INT64_ATOMICS),
-+      .KHR_shader_float_controls = true,
+       .KHR_shader_float_controls = true,
        .KHR_shader_float16_int8 = true,
        .KHR_shader_subgroup_extended_types = true,
-       .KHR_spirv_1_4 = true,
-@@ -306,6 +316,7 @@ kk_get_device_features(
+@@ -307,6 +316,7 @@ kk_get_device_features(
        .samplerMirrorClampToEdge = true,
        .scalarBlockLayout = true,
        .separateDepthStencilLayouts = true,
@@ -229,7 +214,7 @@ index 50d12c4..277d213 100644
        .shaderFloat16 = true,
        .shaderInputAttachmentArrayDynamicIndexing = true,
        .shaderInputAttachmentArrayNonUniformIndexing = true,
-@@ -313,6 +324,7 @@ kk_get_device_features(
+@@ -314,6 +324,7 @@ kk_get_device_features(
        .shaderOutputLayer = true,
        .shaderOutputViewportIndex = true,
        .shaderSampledImageArrayNonUniformIndexing = true,

@@ -12,23 +12,35 @@ Dragon's Dogma 2 (2054970) asks for D3D feature level 12_1. vkd3d-proton derives
 on Metal neither exists — conservative rasterization has no Metal API at all, and ROVs would need
 Metal's raster order groups mapped to the extension, which KosmicKrisp does not do yet. The title
 only checks the level, so it is reported: without it the game refuses the GPU with "Unsupported
-graphics card" before it draws a frame. Shader model 6_6 goes with it.
+graphics card" before it draws a frame. Shader model 6_6 goes with it, and so do the driver's
+64-bit atomics, which steam-gfx-env keeps from D3D12 titles by default (VKD3D_DISABLE_EXTENSIONS
+in the launch wrapper's environment file; an empty value in the launch options wins over it).
+
+A title's entry applies only where the driver can back it: each lists the Vulkan features the
+Venus device must advertise (DD2: the 64-bit atomics, which KosmicKrisp has from Apple8/M2 on),
+read once from vulkaninfo. Without them nothing is written, so an M1 is not told shader model
+6_6 for a game that cannot run on it.
 
 An observed user edit wins: the value we last wrote is remembered per account in
 ~/.config/steamac/title-defaults.json; if a title's LaunchOptions changed since, this script leaves
-it alone from then on (the marker file itself is the only state it keeps).
+it alone from then on (the marker file itself is the only state it keeps). Launch options that
+already carry the words are recorded as ours too, so removing them later is an edit that wins.
 """
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 
-# appid -> the environment assignments the title needs, in order.
+# appid -> (the environment assignments the title needs, in order;
+#           the Vulkan features the device must advertise for them to help).
 TITLES = {
-    # Dragon's Dogma 2: D3D feature level 12_1 (see the module docstring).
-    "2054970": ("VKD3D_FEATURE_LEVEL=12_1", "VKD3D_SHADER_MODEL=6_6"),
+    # Dragon's Dogma 2: D3D feature level 12_1 and shader model 6_6, which needs the 64-bit atomics
+    # that are off by default (see the module docstring).
+    "2054970": (("VKD3D_DISABLE_EXTENSIONS=", "VKD3D_FEATURE_LEVEL=12_1", "VKD3D_SHADER_MODEL=6_6"),
+                ("shaderBufferInt64Atomics", "shaderImageInt64Atomics")),
 }
 
 VDF_PATH = ("UserLocalConfigStore", "Software", "Valve", "Steam", "apps")
@@ -110,6 +122,35 @@ def vdf_set(text, path, value):
     return text[:pos] + addition + text[pos:]
 
 
+_features = None
+
+
+def device_features():
+    """The Venus device's Vulkan features from vulkaninfo, name -> bool; None when unavailable."""
+    global _features
+    if _features is None:
+        try:
+            # Bounded: a wedged virtio-gpu fence must never block steam.service start.
+            out = subprocess.run(["timeout", "-k", "2", "10", "vulkaninfo"], capture_output=True, text=True,
+                                 check=False).stdout
+        except OSError:
+            out = ""
+        _features = {}
+        for m in re.finditer(r"^\s*(\w+)\s*=\s*(true|false)\s*$", out, re.M):
+            _features.setdefault(m[1], m[2] == "true")
+        if not _features:
+            print("steam-title-defaults: no Vulkan features from vulkaninfo, leaving titles that need them", file=sys.stderr)
+            _features = False
+    return _features or None
+
+
+def device_backs(needs):
+    if not needs:
+        return True
+    features = device_features()
+    return features is not None and all(features.get(name) for name in needs)
+
+
 def want_launch_options(current, needed):
     """The LaunchOptions value to write, or None to leave the title alone."""
     if current:
@@ -135,8 +176,8 @@ def main():
             text = config.read_text()
             values, _ = vdf_entries(text)
             accounts = state.setdefault("accounts", {})
-            changed = False
-            for appid, needed in TITLES.items():
+            written = {}
+            for appid, (needed, needs) in TITLES.items():
                 path = (*VDF_PATH, appid, "LaunchOptions")
                 stored = values.get(tuple(part.lower() for part in path))
                 current = stored[0] if stored else None
@@ -147,15 +188,23 @@ def main():
                         marker["user"] = True
                         print("steam-title-defaults: keeping " + appid + " launch options (user edit)", file=sys.stderr)
                     continue
+                if not device_backs(needs):
+                    continue
                 wanted = want_launch_options(current, needed)
                 if wanted is None:
+                    if current and "last" not in marker:
+                        # Already there (by hand): ours from now on, so removing them is an edit.
+                        marker["last"] = current
                     continue
                 text = vdf_set(text, path, wanted)
-                marker["last"] = wanted
-                changed = True
+                written[appid] = wanted
                 print("steam-title-defaults: " + appid + " launch options = " + wanted, file=sys.stderr)
-            if changed:
+            if written:
+                # The marker records a value only once it is on disk: a failed write must not be
+                # taken for a user edit at the next boot.
                 atomic_write(config, text)
+                for appid, wanted in written.items():
+                    accounts[account][appid]["last"] = wanted
         except (OSError, ValueError) as error:
             print("steam-title-defaults: leaving account config: " + str(error), file=sys.stderr)
     atomic_write(marker_path, json.dumps(state, sort_keys=True) + "\n")

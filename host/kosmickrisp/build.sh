@@ -198,8 +198,8 @@
 #              (Metal's ulong min/max atomics; an M1 rejects them). Repro: atomic64.c.
 #   0050       steamac: the device keeps compiled MSL libraries, keyed by the source (a title asks for the same
 #              program ~100 times: Dragon's Dogma 2 87,243 -> 6,244 library compiles in a warm launch).
-#   0051       steamac: a pipeline's programs are compiled on a pool of threads (MESA_KK_COMPILE_THREADS) instead of the
-#              ring thread; draws, dispatches and binds compile or wait for them.
+#   0051       steamac: a pipeline's programs are compiled on a pool of threads (MESA_KK_COMPILE_THREADS, at most 64)
+#              instead of the ring thread; draws and dispatches compile or wait for them.
 #   0052       steamac: equal pipelines share their compiled Metal pipeline states (single-flight tables per device).
 #   0053       steamac: destroying a shader whose program is still queued or compiling no longer waits for it; the
 #              worker frees it. Dragon's Dogma 2's pipeline ring thread spent 73% of its time in vkDestroyPipeline
@@ -211,7 +211,7 @@
 #              translated SPIR-V -> NIR -> MSL once, not on every creation and every launch.
 #   0056       steamac: MESA_KK_DEBUG=compiles lines carry start and end times ("[t <start> <end>]", ms).
 #   0057       steamac: the first use of a program that is still queued compiles it right away instead of waiting
-#              for the queue ahead of it (a bind under virglrenderer's shared submission lock froze the guest).
+#              for the queue ahead of it (a draw under virglrenderer's shared submission lock froze the guest).
 #              0053 + 0057, Dragon's Dogma 2 first launch, every cache cleared, M5 Max: the game's compile screen
 #              takes ~8.5 min and gameplay renders at ~9 min, with ~7.5-9 Metal compiles in flight (62 min before
 #              0051; 0052 alone reached 16% of the compile screen in 6 min).
@@ -231,6 +231,18 @@
 #              (1,048,576 slots on M1 Max), which aborts rather than returning an error. Sparse texture buffers
 #              and textures used as attachments retain their own registrations. Repro: residency_limits.c
 #              (1,100,000 simultaneous views, real texel fetches before/after removing unrelated views).
+#   0062       steamac: the device's tables of compiled MSL libraries and Metal pipeline states (0050/0052) are
+#              bounded: least recently used entries past 4096 per table (MESA_KK_METAL_CACHE_MAX) are dropped, and
+#              libraries are keyed by the blake3 digest of their source rather than the source itself (the pipeline
+#              keys name their libraries by the same digests, not by address).
+#   0063       steamac: a pipeline's depth/stencil states (both programs) are built when it is created, so binding
+#              never waits for a Metal compile (0051 waited there under virglrenderer's submission lock, and took a
+#              static state for dynamic when the compile had failed); a program destroyed during the inline compile
+#              of its first use (0057) is freed by that thread instead of leaking.
+#   0064       steamac: a texel buffer view of zero elements or past maxTexelBufferElements is created as a null
+#              descriptor or narrowed to the limit instead of failing (0059 failed it): under Venus vkCreateBufferView is
+#              asynchronous, so a failure is a command-stream error at the view's first use that kills the guest process
+#              (Dragon's Dogma 2 at the end of loading a save). Repro: texture_descriptors.c (every case created).
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
