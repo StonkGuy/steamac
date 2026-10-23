@@ -143,7 +143,8 @@ start over.
 
 Mouse (`--mouse auto`, by default): the SteamOS cursor follows the Mac cursor precisely, and the Mac
 cursor is hidden over the picture so only gamescope's cursor shows (it reappears over the black bars,
-the progress pill, while booting, paused or asleep, and outside the window). gamescope
+the clickable progress pill and "Report…" link, menus and other windows, while booting, paused or
+asleep, and outside the window). gamescope
 (gaming mode) does not accept absolute coordinates, so the launcher moves it with relative deltas
 without acceleration, in pixels of the surface gamescope shows: the agent sends its size with each
 focus line (`focus steam 1920x1200` when Steam's Settings > Display > Resolution is not the native

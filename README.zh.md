@@ -128,7 +128,7 @@ gamescope 会话中（游戏模式与桌面模式）：会话结束时（切换�
 | Ctrl+Option | 释放已捕获的鼠标 |
 | 关闭窗口 | 关闭客户机（电源键） |
 
-鼠标（`--mouse auto`，默认）：SteamOS 光标精确跟随 Mac 光标。gamescope
+鼠标（`--mouse auto`，默认）：SteamOS 光标精确跟随 Mac 光标，画面上方的 Mac 光标被隐藏，只显示 gamescope 的光标（在黑边、可点按的进度条和 "Report…" 链接、菜单和其他窗口上方，启动、暂停或睡眠期间，以及窗口之外，Mac 光标会重新出现）。gamescope
 （游戏模式）不接受绝对坐标，启动器用无加速相对位移驱动它，单位是 gamescope 所显示表面的像素：代理在每条焦点消息中附带其尺寸（Steam 设置 > 显示 > 分辨率不是原生分辨率时为 `focus steam 1920x1200`，界面小于显示器并被放大），启动器按 gamescope 将其缩放进显示器的方式把窗口映射到该表面（`--selftest-pointer`）。当客户机中游戏获得焦点（代理发送 `focus game <appid> <w>x<h>`），
 首次点按捕获鼠标（视角用相对移动）；Ctrl+Option 释放。回到 Steam 时自动解除捕获。**鼠标**菜单：
 - **在此游戏中捕获鼠标** — 当前游戏自动捕获（按 appid 保存）；

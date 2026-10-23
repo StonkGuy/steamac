@@ -344,8 +344,9 @@ final class StallIndicatorView: NSView {
     private var detail = ""
     private(set) var shown = false
     private var fading = false
-    /// Shown or hidden (after the fade-out): the window hides the Mac cursor over the picture
-    /// and shows it over the card's "Report…" link, so it re-decides when the card comes or goes.
+    /// Shown or hidden (after the fade-out), and the "Report…" link placed or removed on a card
+    /// already shown: the window hides the Mac cursor over the picture and shows it over the
+    /// link, so it re-decides then.
     var onVisibilityChange: (() -> Void)?
 
     var currentTitle: String { title }
@@ -363,10 +364,13 @@ final class StallIndicatorView: NSView {
     var showsReportLink = false {
         didSet {
             guard showsReportLink != oldValue else { return }
+            reportLinkChanged = true
             needsLayout = true
             window?.invalidateCursorRects(for: self)
         }
     }
+    /// layout() places the link, then onVisibilityChange re-decides the cursor over it.
+    private var reportLinkChanged = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -556,6 +560,10 @@ final class StallIndicatorView: NSView {
         linkLayer.isHidden = link == nil
         CATransaction.commit()
         window?.invalidateCursorRects(for: self)
+        if reportLinkChanged {
+            reportLinkChanged = false
+            onVisibilityChange?()
+        }
     }
 
     /// Render the indicator (model values) over `background` at `scale` pixels per point.

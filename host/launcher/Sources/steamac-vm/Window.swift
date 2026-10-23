@@ -213,6 +213,7 @@ final class WindowController: NSObject, NSWindowDelegate {
         view.contentPixelSize = CGSize(width: width, height: height)
         scanoutSize = (width, height)
         view.redraw()
+        refreshHostCursor()   // the black bars moved
     }
 
     /// Guest size for the current window: content size in points times `pixelScale`.
@@ -258,14 +259,20 @@ final class WindowController: NSObject, NSWindowDelegate {
     /// Programmatic / zoom-button resizes (no live resize session).
     func windowDidResize(_ notification: Notification) {
         if !window.inLiveResize && !inFullScreenTransition { scheduleGuestResize() }
+        refreshHostCursor()
     }
 
     func windowWillEnterFullScreen(_ notification: Notification) { inFullScreenTransition = true }
     func windowWillExitFullScreen(_ notification: Notification) { inFullScreenTransition = true }
-    func windowDidEnterFullScreen(_ notification: Notification) { inFullScreenTransition = false; scheduleGuestResize() }
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        inFullScreenTransition = false
+        scheduleGuestResize()
+        refreshHostCursor()
+    }
     func windowDidExitFullScreen(_ notification: Notification) {
         inFullScreenTransition = false
         scheduleGuestResize()
+        refreshHostCursor()
         if let done = onDidExitFullScreen {
             onDidExitFullScreen = nil
             done()
@@ -681,6 +688,7 @@ final class WindowController: NSObject, NSWindowDelegate {
         guestSurface = s
         log("input: guest pointer surface " + (s.map { "\($0.0)x\($0.1)" } ?? "= display"))
         guestCursor = nil
+        refreshHostCursor()   // auto mode: the picture is this surface's rectangle
     }
 
     /// "Name (appid)" when the guest told us the game's name. IDs are interpolated as text: an
@@ -829,6 +837,7 @@ extension WindowController {
         log("input: mouse released")
         updateTitle()
         window.invalidateCursorRects(for: pill)
+        refreshHostCursor()
     }
 
     private func releaseButtons() {
@@ -848,27 +857,35 @@ extension WindowController {
     }
 
     /// gamescope draws the SteamOS cursor itself, so over the picture the Mac cursor is hidden
-    /// (two cursors otherwise, the Mac one a frame or two ahead). It shows outside the picture,
-    /// over a clickable overlay (pill, "Report…"), while booting, paused or asleep, and in
-    /// `capture` mode, where the guest cursor does not follow until a click captures. While
-    /// captured, grabPointer hides it on its own.
+    /// (two cursors otherwise, the Mac one a frame or two ahead). Only in `auto` mode: `tablet`
+    /// is for other guest compositors, which may put their cursor on a plane the host does not
+    /// draw, and in `capture` the guest cursor does not follow until a click captures. It shows
+    /// outside the picture, over a clickable view (pill, "Report…"), under the boot overlay
+    /// (opaque, it covers gamescope's cursor), while booting, paused or asleep, and wherever
+    /// another window (a menu, the full-screen menu bar, an alert) is on top. While captured,
+    /// grabPointer hides it on its own.
     private func updateHostCursor(_ e: NSEvent) { updateHostCursor(at: e.locationInWindow) }
 
     /// `location` in window coordinates. Also hidden only while this is the key window: a
     /// non-key window gets no mouseMoved, and releaseAll showed the cursor when key was lost.
     private func updateHostCursor(at location: NSPoint) {
         guard !captured else { return }
-        var hide = mouseMode != .capture && !bootOrShutdown && !pauseView.shown && !guestAsleep
+        var hide = mouseMode == .auto && !bootOrShutdown && !overlay.shown && !pauseView.shown && !guestAsleep
             && window.isKeyWindow && inPicture(at: location)
         if hide, let sup = view.superview {
             hide = view.hitTest(sup.convert(location, from: nil)) === view
+        }
+        // Last (a WindowServer query): the topmost window under the pointer is this one.
+        if hide {
+            hide = NSWindow.windowNumber(at: window.convertPoint(toScreen: location), belowWindowWithWindowNumber: 0) == window.windowNumber
         }
         setHostCursorHidden(hide)
     }
 
     /// What decides the cursor changed without the mouse moving: the progress phase, the pause
-    /// card, sleep, the pill, the overlay or the stall card ("Report…") fading in or out under a
-    /// still pointer, the window becoming key. Decided from where the pointer is now.
+    /// card, sleep, the pill, the overlay or the stall card and its "Report…" link coming or
+    /// going, the window becoming key or changing size, the scanout or the focused surface
+    /// changing (the picture's rectangle), a capture ending. Decided from where the pointer is now.
     func refreshHostCursor() {
         updateHostCursor(at: window.mouseLocationOutsideOfEventStream)
     }
@@ -1133,18 +1150,27 @@ enum MainMenu {
     }
 
     /// libMTLHud (loaded by MTL_HUD_ENABLED=1, main.swift) adds a menu of its own once the HUD
-    /// attaches, with "Enable HUD" (Cmd-F9): that item flips the library's global switch, which
-    /// the HUD mode the launcher sets on each layer (VMView.applyHUD) overrides, so it did
-    /// nothing. It drives the launcher's setting instead (one HUD, one state, ticked by
-    /// validateMenuItem like the View menu item, which also fixes its title: the library renames
-    /// it "Hide HUD" from its own switch, which would contradict the tick); its Cmd-F9 never
-    /// worked (a function-key modifier macOS honours on system items only) and goes.
+    /// attaches, with "Enable HUD": that item flips the library's global switch, which the HUD
+    /// mode the launcher sets on each layer (VMView.applyHUD) overrides, so it did nothing. It
+    /// drives the launcher's setting instead (one HUD, one state, ticked and titled by
+    /// validateMenuItem like the View menu item; the library's own "Enable"/"Hide HUD" title
+    /// would contradict the tick). Its Cmd-F9 never worked: AppKit drops the function-key
+    /// modifier the library asks for (the warning it logs at every start, before the item
+    /// reaches a menu), so the key equivalent goes too.
+    ///
+    /// The library adds the item before it sets its target, then adds the rest of its submenu
+    /// and finally the submenu's item to the main menu: every addition re-scans the menu it went
+    /// into with its submenus, now and once more after the library's current call returns, so
+    /// the item is adopted whatever order the library builds the menu in.
     static let adoptedHUDItemTag = 0x4855
     private static var hudMenuObserver: NSObjectProtocol?
     private static func adoptHUDMenuItems(target: AnyObject, metalHUD: Selector) {
-        hudMenuObserver = NotificationCenter.default.addObserver(forName: NSMenu.didAddItemNotification, object: nil, queue: .main) { n in
-            guard let menu = n.object as? NSMenu else { return }
-            for i in menu.items where i.action == NSSelectorFromString("toggleEnabled:") && i.target.map({ "\(type(of: $0))".contains("HUD") }) == true {
+        let toggle = NSSelectorFromString("toggleEnabled:")
+        func adopt(in menu: NSMenu) {
+            for i in menu.items {
+                if let sub = i.submenu { adopt(in: sub) }
+                guard i.action == toggle, let handler = NSClassFromString("HUDKeyboardEventHandler"),
+                      (i.target as AnyObject?)?.isKind(of: handler) == true else { continue }
                 i.target = target
                 i.action = metalHUD
                 i.tag = adoptedHUDItemTag
@@ -1152,6 +1178,11 @@ enum MainMenu {
                 i.keyEquivalentModifierMask = []
                 log("menu: libMTLHud's \"\(i.title)\" drives the Metal Performance HUD setting")
             }
+        }
+        hudMenuObserver = NotificationCenter.default.addObserver(forName: NSMenu.didAddItemNotification, object: nil, queue: .main) { n in
+            guard let menu = n.object as? NSMenu else { return }
+            adopt(in: menu)
+            DispatchQueue.main.async { adopt(in: menu) }
         }
     }
 
