@@ -69,6 +69,11 @@ struct wmtr_host {
   _Atomic uint32_t trace_n;
   dispatch_queue_t compile_q, block_q;
   pthread_mutex_t free_lock, event_lock;
+  /* frees that found the free ring full (under free_lock): moved into the ring as the client drains it,
+   * so a deallocator never waits for the client, which may be blocked on the very call that frees */
+  struct wmtr_free_entry *free_ovf;
+  uint32_t n_free_ovf_locked, cap_free_ovf;
+  _Atomic uint32_t n_free_ovf;
   /* views the client created and has not released: released on destroy, so a client that exits
    * without ReleaseMetalView (DXMT never calls it at process exit) does not leave its layer behind */
   pthread_mutex_t view_lock;
@@ -632,19 +637,46 @@ keep_autoreleased(uint32_t slot, uint16_t call, uint8_t *params) {
 
 /* ------------------------------------------------------------------------------------------- *
  * overridden calls */
+/* move queued overflow frees into the free ring while it has room (free_lock held) */
+static void
+flush_free_ovf_locked(struct wmtr_host *h) {
+  struct wmtr_ring *R = h->ring;
+  uint32_t n = h->n_free_ovf_locked, k = 0;
+  uint64_t head = R->free_head;
+  while (k < n && head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) < WMTR_FREE_RING)
+    R->free_ring[head++ % WMTR_FREE_RING] = h->free_ovf[k++];
+  if (!k) return;
+  __atomic_store_n(&R->free_head, head, __ATOMIC_RELEASE);
+  memmove(h->free_ovf, h->free_ovf + k, (size_t)(n - k) * sizeof *h->free_ovf);
+  h->n_free_ovf_locked = n - k;
+  atomic_store_explicit(&h->n_free_ovf, n - k, memory_order_relaxed);
+}
+
+/* called from Metal's deallocator, often inside a call the client is blocked on: never waits */
 static void
 push_free(struct wmtr_host *h, uint32_t blob, uint32_t off, uint64_t size) {
+  struct wmtr_free_entry e = {blob, off, (uint32_t)size, 0};
   pthread_mutex_lock(&h->free_lock);
   struct wmtr_ring *R = h->ring;
+  if (h->n_free_ovf_locked) flush_free_ovf_locked(h);
   uint64_t head = R->free_head;
-  while (head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) >= WMTR_FREE_RING) {
-    pthread_mutex_unlock(&h->free_lock); /* client drains on its next allocation */
-    usleep(100);
-    pthread_mutex_lock(&h->free_lock);
-    head = R->free_head;
+  if (!h->n_free_ovf_locked && head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) < WMTR_FREE_RING) {
+    R->free_ring[head % WMTR_FREE_RING] = e;
+    __atomic_store_n(&R->free_head, head + 1, __ATOMIC_RELEASE);
+  } else {
+    if (h->n_free_ovf_locked == h->cap_free_ovf) {
+      uint32_t cap = h->cap_free_ovf ? 2 * h->cap_free_ovf : WMTR_FREE_RING;
+      struct wmtr_free_entry *q = realloc(h->free_ovf, (size_t)cap * sizeof *q);
+      if (!q) { /* the range stays allocated until the client exits */
+        pthread_mutex_unlock(&h->free_lock);
+        LOG(0, "free ring full and no memory to queue: dropping a free of %llu bytes\n", (unsigned long long)size);
+        return;
+      }
+      h->free_ovf = q; h->cap_free_ovf = cap;
+    }
+    h->free_ovf[h->n_free_ovf_locked++] = e;
+    atomic_store_explicit(&h->n_free_ovf, h->n_free_ovf_locked, memory_order_relaxed);
   }
-  R->free_ring[head % WMTR_FREE_RING] = (struct wmtr_free_entry){blob, off, (uint32_t)size, 0};
-  __atomic_store_n(&R->free_head, head + 1, __ATOMIC_RELEASE);
   pthread_mutex_unlock(&h->free_lock);
 }
 
@@ -874,6 +906,11 @@ struct job { struct wmtr_host *h; uint8_t *copy; uint32_t len; };
 
 static void
 execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
+  if (atomic_load_explicit(&h->n_free_ovf, memory_order_relaxed)) {
+    pthread_mutex_lock(&h->free_lock);
+    flush_free_ovf_locked(h);
+    pthread_mutex_unlock(&h->free_lock);
+  }
   const struct wmtr_req_ext *r = (const void *)rec;
   const uint32_t *relocs = (const void *)(rec + sizeof *r);
   const struct wmtr_out *outs = (const void *)(rec + sizeof *r + 4u * r->n_reloc);
@@ -1160,6 +1197,10 @@ wmtr_host_destroy(struct wmtr_host *h) {
   h->n_views = 0;
   free(h->views); h->views = NULL; h->cap_views = 0;
   pthread_mutex_unlock(&h->view_lock);
+  pthread_mutex_lock(&h->free_lock);
+  free(h->free_ovf); h->free_ovf = NULL; h->n_free_ovf_locked = h->cap_free_ovf = 0;
+  atomic_store_explicit(&h->n_free_ovf, 0, memory_order_relaxed);
+  pthread_mutex_unlock(&h->free_lock);
   if (h->owns_vr) {
     struct wmtr_vr *vr = atomic_exchange(&h->vr, NULL);
     if (h->owns_vr == 2) vr_shared_release(vr);
