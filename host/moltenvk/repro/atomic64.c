@@ -16,6 +16,13 @@
  *  dd2_atomic64_fetch.comp  one invocation, so the fetch result is exactly Vulkan's "original
  *                           value"; preset twice, once where the atomic changes the cell and once
  *                           where it does not, and every returned value is checked exactly.
+ *  dd2_atomic64_fetch_bda.comp
+ *                           the same through a buffer device address (physical pointer access).
+ *                           The descriptor form's atomic sits inside nir_to_msl's bounds-check
+ *                           `if`, where a redeclared result temp shadowed the predeclared one and
+ *                           still compiled; the pointer form has no `if`, so that redeclaration
+ *                           was a Metal compile error ("redefinition of 'tN'"). Run when
+ *                           bufferDeviceAddress is available.
  *  dd2_atomic64_signed.comp signed 64-bit min/max in its own pipeline: MSL has no atomic_long at
  *                           all, so this half is not lowerable and is reported as such rather than
  *                           failing the unsigned half (Dragon's Dogma 2's failing op is unsigned).
@@ -79,10 +86,11 @@ static VkShaderModule module(const char *dir, const char *name)
 	return m;
 }
 
-/* A host-visible, coherent buffer, mapped for the whole run. */
-static VkBuffer host_buffer(VkPhysicalDevice pd, VkDeviceSize size, void **map)
+/* A host-visible, coherent buffer, mapped for the whole run (with a device address when asked). */
+static VkBuffer host_buffer_flags(VkPhysicalDevice pd, VkDeviceSize size, void **map, int device_address)
 {
-	VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT };
+	VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+		(device_address ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0) };
 	VkBuffer buf;
 	CK(vkCreateBuffer(dev, &bci, NULL, &buf));
 	VkMemoryRequirements mr;
@@ -94,12 +102,18 @@ static VkBuffer host_buffer(VkPhysicalDevice pd, VkDeviceSize size, void **map)
 	       (mp.memoryTypes[t].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) !=
 	           (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
 		t++;
-	VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = t };
+	VkMemoryAllocateFlagsInfo mafi = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT };
+	VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, device_address ? &mafi : NULL, .allocationSize = mr.size, .memoryTypeIndex = t };
 	VkDeviceMemory mem;
 	CK(vkAllocateMemory(dev, &mai, NULL, &mem));
 	CK(vkBindBufferMemory(dev, buf, mem, 0));
 	CK(vkMapMemory(dev, mem, 0, VK_WHOLE_SIZE, 0, map));
 	return buf;
+}
+
+static VkBuffer host_buffer(VkPhysicalDevice pd, VkDeviceSize size, void **map)
+{
+	return host_buffer_flags(pd, size, map, 0);
 }
 
 /* The shader's mix(): a bijective 64-to-64-bit scramble, so every invocation's value is distinct. */
@@ -172,16 +186,20 @@ int main(int argc, char **argv)
 	VkPhysicalDevice pd;
 	if (vkEnumeratePhysicalDevices(inst, &n, &pd) < 0 || !n) { printf("FAIL no physical device\n"); return 1; }
 
-	VkPhysicalDeviceShaderAtomicInt64Features a64 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES };
+	VkPhysicalDeviceBufferDeviceAddressFeatures bdaf = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+	VkPhysicalDeviceShaderAtomicInt64Features a64 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES, &bdaf };
 	VkPhysicalDeviceFeatures2 f2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &a64 };
 	vkGetPhysicalDeviceFeatures2(pd, &f2);
 	int buffer64 = a64.shaderBufferInt64Atomics == VK_TRUE;
 	int shared64 = a64.shaderSharedInt64Atomics == VK_TRUE;
-	printf("INFO shaderBufferInt64Atomics=%d shaderSharedInt64Atomics=%d\n", buffer64, shared64);
+	int bda = bdaf.bufferDeviceAddress == VK_TRUE;
+	printf("INFO shaderBufferInt64Atomics=%d shaderSharedInt64Atomics=%d bufferDeviceAddress=%d\n", buffer64, shared64, bda);
 	force = getenv("REPRO_FORCE") != NULL;
 
 	a64.shaderBufferInt64Atomics = buffer64 ? VK_TRUE : VK_FALSE;
 	a64.shaderSharedInt64Atomics = shared64 ? VK_TRUE : VK_FALSE;
+	bdaf = (VkPhysicalDeviceBufferDeviceAddressFeatures){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+		.bufferDeviceAddress = bda ? VK_TRUE : VK_FALSE };
 	f2.features.shaderInt64 = VK_TRUE;
 	float prio = 1;
 	VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueCount = 1, .pQueuePriorities = &prio };
@@ -273,20 +291,47 @@ int main(int argc, char **argv)
 	}
 
 	/* ---- the fetch result, uncontended: exact semantics ----------------------------------- */
-	if (!buffer64 && !force) {
-		printf("SKIP exact fetch-result check: shaderBufferInt64Atomics is not advertised\n");
-	} else {
+	/* twice: through a descriptor (bounds-checked access in nir_to_msl) and through a buffer
+	 * device address (physical pointer access, no bounds-check scope around the atomic) */
+	for (int via_bda = 0; via_bda < 2; via_bda++) {
+		if (!buffer64 && !force) {
+			if (!via_bda)
+				printf("SKIP exact fetch-result check: shaderBufferInt64Atomics is not advertised\n");
+			continue;
+		}
+		if (via_bda && !bda) {
+			printf("SKIP exact fetch-result check through a buffer device address: bufferDeviceAddress is not advertised\n");
+			continue;
+		}
+		const char *how = via_bda ? " (buffer device address)" : "";
 		struct { uint64_t umax_val, umax_old, umin_val, umin_old; } *f;
-		VkBuffer fbuf = host_buffer(pd, 32, (void **)&f);
+		VkBuffer fbuf = host_buffer_flags(pd, 32, (void **)&f, via_bda);
 		VkDescriptorSetLayout dsl = descriptor_layout(1);
-		struct pipeline p = compute_pipeline(dsl, dir, "dd2_atomic64_fetch.comp.spv", "main");
-		VkDescriptorSetAllocateInfo dsai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = dpool, .descriptorSetCount = 1, .pSetLayouts = &dsl };
-		VkDescriptorSet set;
-		CK(vkAllocateDescriptorSets(dev, &dsai, &set));
-		VkDescriptorBufferInfo bi = { fbuf, 0, VK_WHOLE_SIZE };
-		VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
-			.descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi };
-		vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);
+		struct pipeline p;
+		VkDescriptorSet set = VK_NULL_HANDLE;
+		VkDeviceAddress va = 0;
+		if (via_bda) {
+			VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 8 };
+			VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
+			CK(vkCreatePipelineLayout(dev, &plci, NULL, &p.layout));
+			VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+				.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+				           .module = module(dir, "dd2_atomic64_fetch_bda.comp.spv"), .pName = "main" }, .layout = p.layout };
+			VkResult r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &p.pipe);
+			check("create dd2_atomic64_fetch_bda.comp.spv (the atomic's result temp is assigned, not redeclared)", r == VK_SUCCESS);
+			if (r)
+				continue;
+			VkBufferDeviceAddressInfo bdai = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = fbuf };
+			va = vkGetBufferDeviceAddress(dev, &bdai);
+		} else {
+			p = compute_pipeline(dsl, dir, "dd2_atomic64_fetch.comp.spv", "main");
+			VkDescriptorSetAllocateInfo dsai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = dpool, .descriptorSetCount = 1, .pSetLayouts = &dsl };
+			CK(vkAllocateDescriptorSets(dev, &dsai, &set));
+			VkDescriptorBufferInfo bi = { fbuf, 0, VK_WHOLE_SIZE };
+			VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
+				.descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi };
+			vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);
+		}
 
 		/* preset A: both atomics change their cell; preset B: neither does */
 		struct { uint64_t umax_val, umin_val; } presets[2] = {
@@ -299,7 +344,10 @@ int main(int argc, char **argv)
 			f->umin_val = presets[r].umin_val;
 			VkCommandBuffer cmd = begin(pool);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipe);
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, 1, &set, 0, NULL);
+			if (via_bda)
+				vkCmdPushConstants(cmd, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(va), &va);
+			else
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, 1, &set, 0, NULL);
 			vkCmdDispatch(cmd, 1, 1, 1);
 			VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
 				.dstAccessMask = VK_ACCESS_HOST_READ_BIT };
@@ -312,10 +360,10 @@ int main(int argc, char **argv)
 			uint64_t want_max = presets[r].umax_val > 0xfeedfacecafebeefUL ? presets[r].umax_val : 0xfeedfacecafebeefUL;
 			uint64_t want_min = presets[r].umin_val < 0x123456789abcdef0UL ? presets[r].umin_val : 0x123456789abcdef0UL;
 			char msg[160];
-			snprintf(msg, sizeof(msg), "preset %d: atomicMax returns the original value (got %llu want %llu)", r,
+			snprintf(msg, sizeof(msg), "preset %d: atomicMax returns the original value%s (got %llu want %llu)", r, how,
 				(unsigned long long)f->umax_old, (unsigned long long)presets[r].umax_val);
 			check(msg, f->umax_old == presets[r].umax_val && f->umax_val == want_max);
-			snprintf(msg, sizeof(msg), "preset %d: atomicMin returns the original value", r);
+			snprintf(msg, sizeof(msg), "preset %d: atomicMin returns the original value%s", r, how);
 			check(msg, f->umin_old == presets[r].umin_val && f->umin_val == want_min);
 		}
 	}

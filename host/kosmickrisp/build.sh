@@ -194,7 +194,8 @@
 #   0048       steamac: subgroup operations in the vertex stage (simd_* functions are legal in MSL vertex functions,
 #              only the attributes are not). Dragon's Dogma 2 uses wave ops in vertex shaders. Repro: wave_vertex.c.
 #   0049       steamac: 64-bit buffer atomics (min/max lowered to MSL's void atomic_max/min_explicit on device
-#              atomic_ulong); the operations MSL cannot express fail at pipeline creation. Repro: atomic64.c.
+#              atomic_ulong); the operations MSL cannot express fail at pipeline creation. Apple8 and later only
+#              (Metal's ulong min/max atomics; an M1 rejects them). Repro: atomic64.c.
 #   0050       steamac: the device keeps compiled MSL libraries, keyed by the source (a title asks for the same
 #              program ~100 times: Dragon's Dogma 2 87,243 -> 6,244 library compiles in a warm launch).
 #   0051       steamac: a pipeline's programs are compiled on a pool of threads (MESA_KK_COMPILE_THREADS) instead of the
@@ -217,8 +218,9 @@
 #   0058       steamac: 64-bit image atomics (VK_EXT_shader_image_atomic_int64, shaderImageInt64Atomics): R64_UINT/
 #              R64_SINT storage images as R32G32_UINT, image umax/umin lowered to Metal's void texture atomic_max/min
 #              on ulong4, every other 64-bit image atomic rejected at pipeline creation (the buffer case is 0049).
-#              Needed by UE5's D3D12 SM6 path (Nanite) through vkd3d-proton; MESA_KK_DEBUG=noimageint64atomics
-#              turns it off. Repro case 27 (image_atomic64.c).
+#              Needed by UE5's D3D12 SM6 path (Nanite) through vkd3d-proton; Apple8 and later only, and R64
+#              reports no format features below that; MESA_KK_DEBUG=noimageint64atomics turns it off.
+#              Repro case 27 (image_atomic64.c).
 #   0059       steamac: reject zero/oversized texel buffer views before Metal (STEAMAC-3S/3Z/3J/3F/4B/3K/3G/3R).
 #              VK_WHOLE_SIZE may round down to zero texels or exceed Metal's 2^28 texture-buffer width; both ordinary
 #              and placement sparse texture constructors abort on those descriptors. maxTexelBufferElements reserves

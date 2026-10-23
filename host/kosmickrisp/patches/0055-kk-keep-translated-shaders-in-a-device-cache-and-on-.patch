@@ -1,4 +1,4 @@
-From 5cfb5770463f681f92ac04932ce95d08a985f49f Mon Sep 17 00:00:00 2001
+From f2db811d4bcb7b645f2753cde3c69a260937dcd9 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 12:02:52 +0200
 Subject: [PATCH] kk: keep translated shaders in a device cache and on disk
@@ -30,7 +30,7 @@ Generated-by: LLM
  2 files changed, 46 insertions(+)
 
 diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
-index 65cab91..2d7a712 100644
+index 891e590..19a9277 100644
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
 @@ -423,6 +423,18 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
@@ -72,10 +72,10 @@ index 65cab91..2d7a712 100644
     if (dev->heap)
        kk_destroy_bo(dev, dev->heap);
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
-index 05df951..266e295 100644
+index 277d213..784d7fd 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
-@@ -995,6 +995,13 @@ kk_get_device_properties(
+@@ -998,6 +998,13 @@ kk_get_device_properties(
              "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
  }
  
@@ -89,7 +89,7 @@ index 05df951..266e295 100644
  static void
  kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
  {
-@@ -1006,12 +1013,34 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+@@ -1009,12 +1016,34 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
     _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
                         sizeof(instance->driver_build_sha));
  

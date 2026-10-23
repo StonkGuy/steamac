@@ -1,4 +1,4 @@
-From fba71080e2ec9e75fa9f289ca463da10926627e5 Mon Sep 17 00:00:00 2001
+From 22358d5a9d68dde61ab9a0af5226baf38f3fd364 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 00:42:49 +0200
 Subject: [PATCH] kk: support 64-bit buffer atomics
@@ -25,16 +25,31 @@ min/max with the CPU recomputing every expectation, the fetch results checked
 against the values that were actually written, and the uncontended fetch result
 checked exactly.
 
+Apple8 and later only: Metal's ulong atomic min/max on buffers and textures
+exist from Apple8 (Metal feature set tables, macOS), and an M1 (Apple7)
+rejects the pipeline ("Unsupported i64 atomic operation for given target"), so
+the extension and shaderBufferInt64Atomics are gated on
+kk_physical_device_has_int64_minmax_atomics (gpu_apple_family >= 8), like
+depthBounds is on its family.
+
+The fetch form assigns its result to the predeclared tN instead of declaring it
+again: inside the bounds-check `if` of a storage buffer access the inner
+declaration shadowed the outer one (a use after the scope read 0), and with
+physical-pointer (buffer device address) access, which has no such `if`, Metal
+reported "redefinition of 'tN'". atomic64.c runs the exact fetch check through
+a buffer device address as well (dd2_atomic64_fetch_bda.comp).
+
 Generated-by: LLM
 ---
  docs/drivers/kosmickrisp.rst                | 11 ++++-
  docs/features.txt                           |  2 +-
  docs/relnotes/new_features.txt              |  1 +
- src/kosmickrisp/compiler/nir_to_msl.c       | 49 +++++++++++++++++++++
+ src/kosmickrisp/compiler/nir_to_msl.c       | 53 +++++++++++++++++++++
  src/kosmickrisp/vulkan/kk_debug.c           |  1 +
  src/kosmickrisp/vulkan/kk_debug.h           |  4 ++
- src/kosmickrisp/vulkan/kk_physical_device.c |  9 ++++
- 7 files changed, 75 insertions(+), 2 deletions(-)
+ src/kosmickrisp/vulkan/kk_physical_device.c | 12 +++++
+ src/kosmickrisp/vulkan/kk_physical_device.h | 13 +++++
+ 8 files changed, 95 insertions(+), 2 deletions(-)
 
 diff --git a/docs/drivers/kosmickrisp.rst b/docs/drivers/kosmickrisp.rst
 index 144fb85..ff09656 100644
@@ -88,10 +103,10 @@ index a9237cd..ddfcaae 100644
  VK_KHR_map_memory2 on v3dv
 +VK_KHR_shader_atomic_int64 on KosmicKrisp
 diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
-index 6cccf74..c9f1079 100644
+index 6cccf74..c8d84b1 100644
 --- a/src/kosmickrisp/compiler/nir_to_msl.c
 +++ b/src/kosmickrisp/compiler/nir_to_msl.c
-@@ -960,6 +960,50 @@ atomic_op_to_msl(nir_atomic_op op)
+@@ -960,6 +960,54 @@ atomic_op_to_msl(nir_atomic_op op)
     }
  }
  
@@ -124,9 +139,13 @@ index 6cccf74..c9f1079 100644
 +   const char *type = msl_type_for_def(ctx->types, &instr->def);
 +
 +   /* Only read the cell when the result is used: the load exists to give the fetch form something
-+    * to return, and skipping it keeps an unused atomic a pure store. */
++    * to return, and skipping it keeps an unused atomic a pure store. tN is declared by
++    * predeclare_ssa_values like every other intrinsic result: a declaration here would shadow it
++    * inside the bounds-check `if` of a storage buffer access (a use after that scope then reads
++    * the predeclared 0) and is a redefinition with physical-pointer (buffer device address)
++    * access, which has no such `if`. */
 +   if (!nir_def_is_unused(&instr->def)) {
-+      P_IND(ctx, "%s t%d = *(device %s*)(", type, instr->def.index, type);
++      P_IND(ctx, "t%d = *(device %s*)(", instr->def.index, type);
 +      src_to_msl(ctx, &instr->src[0]);
 +      P(ctx, ");\n");
 +   }
@@ -142,7 +161,7 @@ index 6cccf74..c9f1079 100644
  static void
  atomic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
                const char *scope, bool shared)
-@@ -1131,6 +1175,11 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+@@ -1131,6 +1179,11 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
         instr->intrinsic == nir_intrinsic_load_barycentric_at_offset)
        return;
  
@@ -182,10 +201,10 @@ index acc6042..6df4591 100644
      * there in msl_emit_vertex_subgroup_helpers): A/B for the recovery */
     KK_DEBUG_NO_VERTEX_SUBGROUPS = 1ull << 8,
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
-index 50d12c4..05df951 100644
+index 50d12c4..277d213 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
-@@ -77,6 +77,13 @@ kk_get_device_extensions(const struct kk_instance *instance,
+@@ -77,6 +77,16 @@ kk_get_device_extensions(const struct kk_instance *instance,
        .KHR_imageless_framebuffer = true,
        .KHR_sampler_mirror_clamp_to_edge = true,
        .KHR_separate_depth_stencil_layouts = true,
@@ -193,21 +212,24 @@ index 50d12c4..05df951 100644
 +       * CAS, but a void atomic_max/min_explicit on device atomic_ulong, which
 +       * nir_to_msl.c lowers OpAtomicUMax/OpAtomicUMin to. Threadgroup 64-bit
 +       * atomics stay unsupported (MSL has no threadgroup 64-bit atomic at
-+       * all), so shaderSharedInt64Atomics stays false. */
-+      .KHR_shader_atomic_int64 = !KK_DEBUG(NO_INT64_ATOMICS),
++       * all), so shaderSharedInt64Atomics stays false. Apple8 and later only
++       * (kk_physical_device_has_int64_minmax_atomics). */
++      .KHR_shader_atomic_int64 =
++         kk_physical_device_has_int64_minmax_atomics(pdev) &&
++         !KK_DEBUG(NO_INT64_ATOMICS),
 +      .KHR_shader_float_controls = true,
        .KHR_shader_float16_int8 = true,
        .KHR_shader_subgroup_extended_types = true,
        .KHR_spirv_1_4 = true,
-@@ -306,6 +313,7 @@ kk_get_device_features(
+@@ -306,6 +316,7 @@ kk_get_device_features(
        .samplerMirrorClampToEdge = true,
        .scalarBlockLayout = true,
        .separateDepthStencilLayouts = true,
-+      .shaderBufferInt64Atomics = !KK_DEBUG(NO_INT64_ATOMICS),
++      .shaderBufferInt64Atomics = supported_extensions->KHR_shader_atomic_int64,
        .shaderFloat16 = true,
        .shaderInputAttachmentArrayDynamicIndexing = true,
        .shaderInputAttachmentArrayNonUniformIndexing = true,
-@@ -313,6 +321,7 @@ kk_get_device_features(
+@@ -313,6 +324,7 @@ kk_get_device_features(
        .shaderOutputLayer = true,
        .shaderOutputViewportIndex = true,
        .shaderSampledImageArrayNonUniformIndexing = true,
@@ -215,3 +237,30 @@ index 50d12c4..05df951 100644
        .shaderStorageBufferArrayNonUniformIndexing = true,
        .shaderStorageImageArrayNonUniformIndexing = true,
        .shaderStorageTexelBufferArrayDynamicIndexing = true,
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.h b/src/kosmickrisp/vulkan/kk_physical_device.h
+index b888eda..65eba8d 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.h
++++ b/src/kosmickrisp/vulkan/kk_physical_device.h
+@@ -84,6 +84,19 @@ struct kk_physical_device {
+    uint8_t queue_family_count;
+ };
+ 
++/* Metal's only 64-bit atomics are the void atomic_max/min_explicit on device
++ * atomic_ulong and the matching texture atomic_max/min on ulong textures, both
++ * from Apple8 on macOS (Metal feature set tables: "64-bit atomic min/max on
++ * buffers and textures"). Apple7 (M1) rejects them at pipeline creation
++ * ("Unsupported i64 atomic operation for given target"), so VK_KHR_shader_
++ * atomic_int64, VK_EXT_shader_image_atomic_int64 and the R64 storage formats
++ * are advertised only from Apple8. */
++static inline bool
++kk_physical_device_has_int64_minmax_atomics(const struct kk_physical_device *pdev)
++{
++   return pdev->info.gpu_apple_family >= 8;
++}
++
+ static inline uint32_t
+ kk_min_cbuf_alignment()
+ {
+-- 
+2.54.0 (Apple Git-157)
+

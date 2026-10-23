@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From b9e8f4d26346782d2403c2499519a03ff12e7e6a Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 15:00:00 +0200
 Subject: [PATCH] kk: support 64-bit image atomics
@@ -29,18 +29,25 @@ Tested with host/moltenvk/repro/image_atomic64.c: 32768 invocations racing on
 fetch result checked exactly. The Metal operation itself was verified on an
 M5 Max with steamac-dev/scripts/mtl_tex_atomic64.swift.
 
+Apple8 and later only, like the buffer atomics (0049): the extension and
+shaderImageInt64Atomics are gated on kk_physical_device_has_int64_minmax_atomics,
+and kk_get_image_plane_format_features reports no features at all for
+R64_UINT/R64_SINT where it is not advertised, so an application that checks
+format support never creates such an image on an M1 (Metal validation there:
+"This device does not support ulong texture atomics").
+
 Generated-by: LLM
 ---
- docs/drivers/kosmickrisp.rst                | 11 ++++-
+ docs/drivers/kosmickrisp.rst                | 11 +++-
  docs/features.txt                           |  2 +-
  docs/relnotes/new_features.txt              |  1 +
- src/kosmickrisp/compiler/nir_to_msl.c       | 73 +++++++++++++++++++++++++++--
+ src/kosmickrisp/compiler/nir_to_msl.c       | 73 ++++++++++++++++++++-
  src/kosmickrisp/vulkan/kk_debug.c           |  1 +
  src/kosmickrisp/vulkan/kk_debug.h           |  4 ++
- src/kosmickrisp/vulkan/kk_format.c          | 15 ++++++
- src/kosmickrisp/vulkan/kk_image.c           | 14 ++++++
- src/kosmickrisp/vulkan/kk_physical_device.c | 11 +++++
- 9 files changed, 127 insertions(+), 5 deletions(-)
+ src/kosmickrisp/vulkan/kk_format.c          | 15 +++++
+ src/kosmickrisp/vulkan/kk_image.c           | 18 +++++
+ src/kosmickrisp/vulkan/kk_physical_device.c | 15 +++++
+ 9 files changed, 135 insertions(+), 5 deletions(-)
 
 diff --git a/docs/drivers/kosmickrisp.rst b/docs/drivers/kosmickrisp.rst
 index ff09656..bbbea90 100644
@@ -94,7 +101,7 @@ index ddfcaae..85ded20 100644
  VK_KHR_shader_atomic_int64 on KosmicKrisp
 +VK_EXT_shader_image_atomic_int64 on KosmicKrisp
 diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
-index b19dd19..da6623b 100644
+index a26ac98..ed17ade 100644
 --- a/src/kosmickrisp/compiler/nir_to_msl.c
 +++ b/src/kosmickrisp/compiler/nir_to_msl.c
 @@ -716,6 +716,11 @@ tex_type_name(nir_alu_type ty)
@@ -141,7 +148,7 @@ index b19dd19..da6623b 100644
           case nir_intrinsic_shared_atomic:
           case nir_intrinsic_shared_atomic_swap:
              if (intrin->def.bit_size == 64)
-@@ -1055,6 +1071,52 @@ atomic_64bit_minmax_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *inst
+@@ -1059,6 +1075,52 @@ atomic_64bit_minmax_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *inst
     P(ctx, ", memory_order_relaxed);\n");
  }
  
@@ -194,7 +201,7 @@ index b19dd19..da6623b 100644
  static void
  atomic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
                const char *scope, bool shared)
-@@ -1231,6 +1293,11 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+@@ -1235,6 +1297,11 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
        return;
     }
  
@@ -274,19 +281,23 @@ index a13f541..7193b38 100644
        return NULL;
  
 diff --git a/src/kosmickrisp/vulkan/kk_image.c b/src/kosmickrisp/vulkan/kk_image.c
-index 74c7c0c..797fe83 100644
+index 74c7c0c..8d7c3a2 100644
 --- a/src/kosmickrisp/vulkan/kk_image.c
 +++ b/src/kosmickrisp/vulkan/kk_image.c
-@@ -47,6 +47,20 @@ kk_get_image_plane_format_features(struct kk_physical_device *pdev,
+@@ -47,6 +47,24 @@ kk_get_image_plane_format_features(struct kk_physical_device *pdev,
     if (va_format == NULL)
        return 0;
  
 +   /* R64 formats are R32G32_UINT to Metal (kk_format.c) and exist only for
 +    * VK_EXT_shader_image_atomic_int64's 64-bit storage-image atomics: expose
 +    * storage (atomic) and transfer, but not sampling, filtering, color
-+    * attachment or blending. Linear tiling stays unsupported. */
++    * attachment or blending. Linear tiling stays unsupported, and so is the
++    * format as a whole where the atomics are not advertised (before Apple8,
++    * or with MESA_KK_DEBUG=noimageint64atomics), so an application that checks
++    * format support never creates an R64 image there. */
 +   if (p_format == PIPE_FORMAT_R64_UINT || p_format == PIPE_FORMAT_R64_SINT) {
-+      if (tiling != VK_IMAGE_TILING_OPTIMAL)
++      if (tiling != VK_IMAGE_TILING_OPTIMAL ||
++          !pdev->vk.supported_extensions.EXT_shader_image_atomic_int64)
 +         return 0;
 +
 +      return VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
@@ -299,10 +310,10 @@ index 74c7c0c..797fe83 100644
     features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
     features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
-index 266e295..ce9b646 100644
+index 784d7fd..9dcee6b 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
-@@ -203,6 +203,12 @@ kk_get_device_extensions(const struct kk_instance *instance,
+@@ -206,6 +206,15 @@ kk_get_device_extensions(const struct kk_instance *instance,
        .EXT_robustness2 = true,
        .EXT_sample_locations = true,
        .EXT_shader_atomic_float = true,
@@ -310,20 +321,27 @@ index 266e295..ce9b646 100644
 +       * texture operations that the buffer path uses, which nir_to_msl.c lowers
 +       * OpAtomicUMax/OpAtomicUMin on R64_UINT storage images to. Signed 64-bit
 +       * image atomics and all other 64-bit image atomics stay unsupported, as
-+       * does sparseImageInt64Atomics. */
-+      .EXT_shader_image_atomic_int64 = !KK_DEBUG(NO_IMAGE_INT64_ATOMICS),
++       * does sparseImageInt64Atomics. Apple8 and later only, like the buffer
++       * path. */
++      .EXT_shader_image_atomic_int64 =
++         kk_physical_device_has_int64_minmax_atomics(pdev) &&
++         !KK_DEBUG(NO_IMAGE_INT64_ATOMICS),
        .EXT_shader_replicated_composites = true,
        .EXT_shader_subgroup_ballot = true,
        .EXT_shader_subgroup_vote = true,
-@@ -314,6 +320,11 @@ kk_get_device_features(
+@@ -317,6 +326,12 @@ kk_get_device_features(
        .scalarBlockLayout = true,
        .separateDepthStencilLayouts = true,
-       .shaderBufferInt64Atomics = !KK_DEBUG(NO_INT64_ATOMICS),
+       .shaderBufferInt64Atomics = supported_extensions->KHR_shader_atomic_int64,
 +      /* VK_EXT_shader_image_atomic_int64: 64-bit storage-image min/max with the
 +       * same lowering and the same racy fetch result as the buffer path. Sparse
 +       * 64-bit image atomics (sparseImageInt64Atomics) stay unsupported. */
-+      .shaderImageInt64Atomics = !KK_DEBUG(NO_IMAGE_INT64_ATOMICS),
++      .shaderImageInt64Atomics =
++         supported_extensions->EXT_shader_image_atomic_int64,
 +      .sparseImageInt64Atomics = false,
        .shaderFloat16 = true,
        .shaderInputAttachmentArrayDynamicIndexing = true,
        .shaderInputAttachmentArrayNonUniformIndexing = true,
+-- 
+2.54.0 (Apple Git-157)
+

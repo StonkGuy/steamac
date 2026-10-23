@@ -1,4 +1,4 @@
-From 05c469a40b98d769f416739061add0468c20a84d Mon Sep 17 00:00:00 2001
+From 89fa6c121aac2ab5098692ebea36c41d56cb8ec3 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 00:42:08 +0200
 Subject: [PATCH] kk: advertise and use subgroups in the vertex stage
@@ -208,3 +208,6 @@ index 9e99176..50d12c4 100644
        .subgroupSupportedOperations =
           VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
           VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
+-- 
+2.54.0 (Apple Git-157)
+

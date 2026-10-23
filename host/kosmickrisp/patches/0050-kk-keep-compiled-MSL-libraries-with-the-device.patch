@@ -1,4 +1,4 @@
-From 938aa0d92be1da4e9317e9a8babbf8ff23da1828 Mon Sep 17 00:00:00 2001
+From 0406b99365040af7d45086205bd2881711f8e061 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 02:31:45 +0200
 Subject: [PATCH] kk: keep compiled MSL libraries with the device
@@ -16,6 +16,11 @@ the source string. On a warm Dragon's Dogma 2 launch this cuts library compiles
 from 87,243 to 6,244, all compile requests from 131,636 to 34,051 and the total
 Metal time from 80 s to 14 s (measured with MESA_KK_DEBUG=compiles).
 
+_mesa_hash_table_create's first argument is a ralloc context, not
+VkAllocationCallbacks: the table is created with a NULL context (a debug build's
+ralloc canary assert fired in vkCreateDevice with &dev->vk.alloc, and release
+ralloc wrote its child link into the vk_object_base in front of it).
+
 Generated-by: LLM
 ---
  src/kosmickrisp/vulkan/kk_device.c | 12 ++++++++
@@ -24,7 +29,7 @@ Generated-by: LLM
  3 files changed, 54 insertions(+), 11 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
-index f726d89..3492790 100644
+index f726d89..2b2d170 100644
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
 @@ -392,6 +392,11 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
@@ -32,7 +37,7 @@ index f726d89..3492790 100644
     dev->vk.get_timestamp = kk_get_timestamp;
     simple_mtx_init(&dev->lazy_pipeline_lock, mtx_plain);
 +   dev->msl_libraries =
-+      _mesa_hash_table_create(&dev->vk.alloc, _mesa_hash_string,
++      _mesa_hash_table_create(NULL /* ralloc context, not vk.alloc */, _mesa_hash_string,
 +                              _mesa_key_string_equal);
 +   if (dev->msl_libraries == NULL)
 +      goto fail_init;
@@ -148,3 +153,6 @@ index 50c3f59..0de5fdc 100644
     if (fragment_library == NULL) {
        result = VK_ERROR_INVALID_SHADER_NV;
        goto destroy_vertex;
+-- 
+2.54.0 (Apple Git-157)
+

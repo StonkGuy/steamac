@@ -149,7 +149,9 @@
 #    its compile (crash reports show every thread's name).
 # 25. atomic64.c: 64-bit atomic min/max on a storage buffer (32768 invocations hammering
 #    OpAtomicUMax/UMin, with the CPU recomputing every expectation; the racy fetch results
-#    checked against the values written, and the fetch result checked exactly with one invocation) and
+#    checked against the values written, and the fetch result checked exactly with one invocation, through
+#    a descriptor and through a buffer device address: nir_to_msl's bounds-check `if` around the descriptor
+#    form hid a redeclared result temp that the pointer form rejected) and
 #    64-bit atomics in workgroup memory, with signed 64-bit min/max in a pipeline of its own because
 #    MSL has no atomic_long at all — Dragon's Dogma 2's first shader gap
 #    (VK_KHR_shader_atomic_int64: Metal has only a void min/max on device atomic_ulong, and nothing in

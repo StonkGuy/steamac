@@ -1,4 +1,4 @@
-From 3bc7668089272b0d1453264ddd811116e1baf7f9 Mon Sep 17 00:00:00 2001
+From d9099d59d03d6b851fa266ae4f16d471c3bd5546 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 08:54:56 +0200
 Subject: [PATCH] kk: compile a pipeline's programs on a thread pool
@@ -62,7 +62,7 @@ Generated-by: LLM
  8 files changed, 379 insertions(+), 114 deletions(-)
 
 diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
-index c9f1079..b19dd19 100644
+index c8d84b1..a26ac98 100644
 --- a/src/kosmickrisp/compiler/nir_to_msl.c
 +++ b/src/kosmickrisp/compiler/nir_to_msl.c
 @@ -982,6 +982,57 @@ atomic_is_64bit_unsigned_minmax(nir_intrinsic_instr *instr)
@@ -262,7 +262,7 @@ index a380ae6..4119f1c 100644
        kk_dispatch_draw(cmd, draw_data);
     }
 diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
-index 3492790..3832005 100644
+index 2b2d170..d542359 100644
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
 @@ -391,12 +391,14 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
@@ -272,7 +272,7 @@ index 3492790..3832005 100644
 -   simple_mtx_init(&dev->lazy_pipeline_lock, mtx_plain);
 +   simple_mtx_init(&dev->msl_libraries_lock, mtx_plain);
     dev->msl_libraries =
-       _mesa_hash_table_create(&dev->vk.alloc, _mesa_hash_string,
+       _mesa_hash_table_create(NULL /* ralloc context, not vk.alloc */, _mesa_hash_string,
                                _mesa_key_string_equal);
     if (dev->msl_libraries == NULL)
        goto fail_init;

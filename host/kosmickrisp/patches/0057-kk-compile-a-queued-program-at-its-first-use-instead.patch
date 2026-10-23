@@ -1,7 +1,8 @@
-From 3a607e059271caeed8b6902425faa550e10167d4 Mon Sep 17 00:00:00 2001
+From 1c8402fc0fd322b644ab2fa28b569ad3a55e8b44 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 12:27:10 +0200
-Subject: [PATCH] kk: compile a queued program at its first use instead of waiting for the queue
+Subject: [PATCH] kk: compile a queued program at its first use instead of
+ waiting for the queue
 
 The first use of a program (a bind or a draw) waited for the compile
 pool to reach it. With a title's whole pipeline set queued ahead, that is
@@ -24,10 +25,10 @@ Generated-by: LLM
  2 files changed, 35 insertions(+), 1 deletion(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 218345e..6aab85b 100644
+index 52c8362..f6047d5 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
-@@ -2487,7 +2487,8 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s,
+@@ -2499,7 +2499,8 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s,
   * compilation (Dragon's Dogma 2: ~1,100 programs and ~130,000 pipelines, which
   * measured 62 minutes of first-run compilation). Programs are queued at
   * creation and compiled here instead, on as many threads as the machine has
@@ -37,7 +38,7 @@ index 218345e..6aab85b 100644
   * The pool shares the Metal compiler (safe to use concurrently) and the
   * device's compiled-library table (`msl_libraries_lock`). */
  static int
-@@ -2507,6 +2508,7 @@ kk_compile_worker(void *data)
+@@ -2519,6 +2520,7 @@ kk_compile_worker(void *data)
        if (dev->compile_head == NULL)
           dev->compile_tail = NULL;
        s->compile_next = NULL;
@@ -45,7 +46,7 @@ index 218345e..6aab85b 100644
        /* Nothing will use a destroyed program once the device goes away */
        const bool skip = s->compile_orphaned && dev->compile_shutdown;
        mtx_unlock(&dev->compile_mtx);
-@@ -2609,6 +2611,36 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
+@@ -2621,6 +2623,36 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
        return VK_SUCCESS;
  
     mtx_lock(&dev->compile_mtx);

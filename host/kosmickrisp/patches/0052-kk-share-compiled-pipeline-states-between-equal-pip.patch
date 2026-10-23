@@ -1,4 +1,4 @@
-From c2bf05fbb134ee977ea649dec67e308fcda0b20a Mon Sep 17 00:00:00 2001
+From 71aa7ecf87684cf6995ddd5c540ed1879f5cd6f1 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 09:45:28 +0200
 Subject: [PATCH] kk: share compiled pipeline states between equal pipelines
@@ -33,6 +33,9 @@ table stops duplicate work only after the fact. Measured on the benchmark
 (MODULES=200 REPEAT=24 THREADS=8): 664 program compiles before, 453 after, with
 453 distinct - the duplicates are gone rather than merely cheap.
 
+The tables are created with a NULL ralloc context (_mesa_hash_table_create's
+first argument is not VkAllocationCallbacks; 0050 has the same fix).
+
 Generated-by: LLM
 ---
  src/kosmickrisp/vulkan/kk_device.c |  25 +-
@@ -42,7 +45,7 @@ Generated-by: LLM
  4 files changed, 468 insertions(+), 103 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
-index 3832005..65cab91 100644
+index d542359..891e590 100644
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
 @@ -391,12 +391,16 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
@@ -53,7 +56,7 @@ index 3832005..65cab91 100644
 +   mtx_init(&dev->msl_libraries_lock, mtx_plain);
 +   cnd_init(&dev->msl_libraries_cnd);
     dev->msl_libraries =
-       _mesa_hash_table_create(&dev->vk.alloc, _mesa_hash_string,
+       _mesa_hash_table_create(NULL /* ralloc context, not vk.alloc */, _mesa_hash_string,
                                _mesa_key_string_equal);
     if (dev->msl_libraries == NULL)
        goto fail_init;
@@ -147,7 +150,7 @@ index f447fbe..16426b0 100644
     /* os_time_get_nano() at creation (command queue error diagnostics) */
     int64_t created_ns;
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index b0ab43f..905205c 100644
+index b0ab43f..ac88fd7 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -1308,6 +1308,282 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
@@ -310,10 +313,10 @@ index b0ab43f..905205c 100644
 +   mtx_init(&dev->metal_pipelines_lock, mtx_plain);
 +   cnd_init(&dev->metal_pipelines_cnd);
 +   dev->metal_render_pipelines =
-+      _mesa_hash_table_create(&dev->vk.alloc, kk_metal_render_key_hash,
++      _mesa_hash_table_create(NULL /* ralloc context, not vk.alloc */, kk_metal_render_key_hash,
 +                              kk_metal_render_key_equal);
 +   dev->metal_compute_pipelines =
-+      _mesa_hash_table_create(&dev->vk.alloc, kk_metal_compute_key_hash,
++      _mesa_hash_table_create(NULL /* ralloc context, not vk.alloc */, kk_metal_compute_key_hash,
 +                              kk_metal_compute_key_equal);
 +}
 +
