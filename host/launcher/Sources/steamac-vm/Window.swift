@@ -142,6 +142,7 @@ final class WindowController: NSObject, NSWindowDelegate {
             self?.updateStallGate()
             self?.updatePill()
         }
+        stallView.onVisibilityChange = { [weak self] in self?.refreshHostCursor() }
         pauseView.frame = view.bounds
         view.addSubview(pauseView)
         sleepView.frame = view.bounds
@@ -320,6 +321,7 @@ final class WindowController: NSObject, NSWindowDelegate {
         }
         updateTitle()
         updateNoPictureGate()
+        refreshHostCursor()
     }
 
     /// SuspendController: the guest went to sleep (VM paused) / woke up. "Game paused" gives way
@@ -332,6 +334,7 @@ final class WindowController: NSObject, NSWindowDelegate {
         } else {
             sleepView.hide()
         }
+        refreshHostCursor()
         updateTitle()
         updateNoPictureGate()
     }
@@ -412,6 +415,7 @@ final class WindowController: NSObject, NSWindowDelegate {
         } else {
             pill.hide()
         }
+        refreshHostCursor()
     }
 
     /// Full overlay → pill (the progress stays on screen; input goes through). `sticky`: the menu
@@ -570,6 +574,7 @@ final class WindowController: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) { releaseAll() }
+    func windowDidBecomeKey(_ notification: Notification) { refreshHostCursor() }
     func windowDidMiniaturize(_ notification: Notification) { releaseAll() }
 
     // MARK: keyboard
@@ -847,13 +852,25 @@ extension WindowController {
     /// over a clickable overlay (pill, "Report…"), while booting, paused or asleep, and in
     /// `capture` mode, where the guest cursor does not follow until a click captures. While
     /// captured, grabPointer hides it on its own.
-    private func updateHostCursor(_ e: NSEvent) {
+    private func updateHostCursor(_ e: NSEvent) { updateHostCursor(at: e.locationInWindow) }
+
+    /// `location` in window coordinates. Also hidden only while this is the key window: a
+    /// non-key window gets no mouseMoved, and releaseAll showed the cursor when key was lost.
+    private func updateHostCursor(at location: NSPoint) {
         guard !captured else { return }
-        var hide = mouseMode != .capture && !bootOrShutdown && !pauseView.shown && !guestAsleep && inPicture(e)
+        var hide = mouseMode != .capture && !bootOrShutdown && !pauseView.shown && !guestAsleep
+            && window.isKeyWindow && inPicture(at: location)
         if hide, let sup = view.superview {
-            hide = view.hitTest(sup.convert(e.locationInWindow, from: nil)) === view
+            hide = view.hitTest(sup.convert(location, from: nil)) === view
         }
         setHostCursorHidden(hide)
+    }
+
+    /// What decides the cursor changed without the mouse moving: the progress phase, the pause
+    /// card, sleep, the pill, the overlay or the stall card ("Report…") fading in or out under a
+    /// still pointer, the window becoming key. Decided from where the pointer is now.
+    func refreshHostCursor() {
+        updateHostCursor(at: window.mouseLocationOutsideOfEventStream)
     }
 
     private func setHostCursorHidden(_ hide: Bool) {
@@ -879,8 +896,11 @@ extension WindowController {
         }
     }
 
-    private func inPicture(_ e: NSEvent) -> Bool {
-        (usesTablet ? view.fitRect : pointerMap.surfaceRect).contains(view.convert(e.locationInWindow, from: nil))
+    private func inPicture(_ e: NSEvent) -> Bool { inPicture(at: e.locationInWindow) }
+
+    /// `location` in window coordinates.
+    private func inPicture(at location: NSPoint) -> Bool {
+        (usesTablet ? view.fitRect : pointerMap.surfaceRect).contains(view.convert(location, from: nil))
     }
 
     /// Host pointer position in pixels of the focused surface, clamped to it.

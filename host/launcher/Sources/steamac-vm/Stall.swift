@@ -344,6 +344,9 @@ final class StallIndicatorView: NSView {
     private var detail = ""
     private(set) var shown = false
     private var fading = false
+    /// Shown or hidden (after the fade-out): the window hides the Mac cursor over the picture
+    /// and shows it over the card's "Report…" link, so it re-decides when the card comes or goes.
+    var onVisibilityChange: (() -> Void)?
 
     var currentTitle: String { title }
     var currentDetail: String { detail }
@@ -429,6 +432,7 @@ final class StallIndicatorView: NSView {
             ctx.duration = 0.25
             animator().alphaValue = 1
         }
+        onVisibilityChange?()
     }
 
     /// Fade out (0.2 s), then hide and drop every animation.
@@ -445,6 +449,7 @@ final class StallIndicatorView: NSView {
             guard !self.shown else { return }
             self.isHidden = true
             for l in [self.layer!, self.card, self.track, self.arc, self.titleLayer, self.detailLayer, self.linkLayer] { l.removeAllAnimations() }
+            self.onVisibilityChange?()
         })
     }
 
