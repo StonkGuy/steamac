@@ -1,7 +1,9 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "" : {},
+    "" : {
+
+    },
     "\"Still working\" card over the picture after 2 s without GPU work from SteamOS (loading, shader compiles)." : {
       "localizations" : {
         "ru" : {
@@ -2735,7 +2737,9 @@
         }
       }
     },
-    "H" : {},
+    "H" : {
+
+    },
     "Help" : {
       "comment" : "Application help menu",
       "localizations" : {
@@ -5026,6 +5030,9 @@
         }
       }
     },
+    "Show Metal Performance HUD" : {
+
+    },
     "Show Metal Performance HUD (Ctrl+Cmd+P)" : {
       "localizations" : {
         "ru" : {
@@ -7011,7 +7018,9 @@
         }
       }
     },
-    "W" : {},
+    "W" : {
+
+    },
     "Waiting for SteamOS to draw…" : {
       "localizations" : {
         "ru" : {

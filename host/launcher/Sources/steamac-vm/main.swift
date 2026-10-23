@@ -245,7 +245,11 @@ final class Lifecycle: NSObject, NSApplicationDelegate {
 
 extension Lifecycle: NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(menuMetalHUD) { item.state = LauncherSettings.shared.metalHUD ? .on : .off }
+        if item.action == #selector(menuMetalHUD) {
+            item.state = LauncherSettings.shared.metalHUD ? .on : .off
+            // libMTLHud's own item (MainMenu.adoptHUDMenuItems): one title, ticked like the View menu item.
+            if item.tag == MainMenu.adoptedHUDItemTag { item.title = String(localized: "Show Metal Performance HUD") }
+        }
         if item.action == #selector(menuCheckForUpdates) {
             item.title = UpdateChecker.shared.menuTitle
             item.badge = UpdateChecker.shared.available != nil ? NSMenuItemBadge(string: String(localized: "New", comment: "Badge on a menu item when an update is available")) : nil

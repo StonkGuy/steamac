@@ -1085,6 +1085,7 @@ enum MainMenu {
         viewMenu.addItem(item("Show Boot Progress", overlay, target))
         // Ticked by the target's validateMenuItem (follows Settings > Display and Ctrl+Cmd+P).
         viewMenu.addItem(item("Show Metal Performance HUD (Ctrl+Cmd+P)", metalHUD, target))
+        adoptHUDMenuItems(target: target, metalHUD: metalHUD)
         let help = NSMenu(title: String(localized: "Help", comment: "Application help menu"))
         help.addItem(item("Report a Problem…", report, target))
         let helpItem = NSMenuItem()
@@ -1129,6 +1130,29 @@ enum MainMenu {
         windowItem.submenu = window
         main.addItem(windowItem)
         NSApp.windowsMenu = window
+    }
+
+    /// libMTLHud (loaded by MTL_HUD_ENABLED=1, main.swift) adds a menu of its own once the HUD
+    /// attaches, with "Enable HUD" (Cmd-F9): that item flips the library's global switch, which
+    /// the HUD mode the launcher sets on each layer (VMView.applyHUD) overrides, so it did
+    /// nothing. It drives the launcher's setting instead (one HUD, one state, ticked by
+    /// validateMenuItem like the View menu item, which also fixes its title: the library renames
+    /// it "Hide HUD" from its own switch, which would contradict the tick); its Cmd-F9 never
+    /// worked (a function-key modifier macOS honours on system items only) and goes.
+    static let adoptedHUDItemTag = 0x4855
+    private static var hudMenuObserver: NSObjectProtocol?
+    private static func adoptHUDMenuItems(target: AnyObject, metalHUD: Selector) {
+        hudMenuObserver = NotificationCenter.default.addObserver(forName: NSMenu.didAddItemNotification, object: nil, queue: .main) { n in
+            guard let menu = n.object as? NSMenu else { return }
+            for i in menu.items where i.action == NSSelectorFromString("toggleEnabled:") && i.target.map({ "\(type(of: $0))".contains("HUD") }) == true {
+                i.target = target
+                i.action = metalHUD
+                i.tag = adoptedHUDItemTag
+                i.keyEquivalent = ""
+                i.keyEquivalentModifierMask = []
+                log("menu: libMTLHud's \"\(i.title)\" drives the Metal Performance HUD setting")
+            }
+        }
     }
 
     private static func item(_ title: LocalizedStringResource, _ action: Selector, _ target: AnyObject, key: String = "") -> NSMenuItem {
