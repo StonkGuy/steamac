@@ -12,18 +12,9 @@ set -euo pipefail
 gfx=${XDG_RUNTIME_DIR:?}/steam/env/gfx.txt
 [[ -f $gfx ]] || exit 0
 
-# KosmicKrisp's 64-bit atomics (VK_KHR_shader_atomic_int64, VK_EXT_shader_image_atomic_int64)
-# cover unsigned min/max only: Metal has no other 64-bit atomic, so a pipeline with a 64-bit
-# add, exchange or compare-exchange fails to compile, and as vkd3d-proton creates pipelines
-# asynchronously a title never sees the error - it silently loses those draws. vkd3d-proton
-# reports shader model 6.6 and the AtomicInt64 capabilities from these features, so they are
-# kept from every D3D12 title here, and a title whose shaders fit (Dragon's Dogma 2) gets them
-# back through its launch options (steam-title-defaults sets VKD3D_DISABLE_EXTENSIONS= there,
-# which wins over this file). Not written over a value already present.
-if ! grep -q '^VKD3D_DISABLE_EXTENSIONS=' "$gfx"; then
-    echo 'VKD3D_DISABLE_EXTENSIONS=VK_KHR_shader_atomic_int64,VK_EXT_shader_image_atomic_int64' >> "$gfx"
-    echo "steam-gfx-env: VKD3D_DISABLE_EXTENSIONS=VK_KHR_shader_atomic_int64,VK_EXT_shader_image_atomic_int64 (titles that need them opt in per title)" >&2
-fi
+# VKD3D_DISABLE_EXTENSIONS belongs in steam.service's inherited environment,
+# not gfx.txt: the launch wrapper overwrites inherited variables from this file.
+# Leave explicit stock/user lists alone, including their precedence over titles.
 budget=
 for word in $(cat /proc/cmdline); do
     case $word in steamac.gpu_mib=*) budget=${word#*=} ;; esac
@@ -34,7 +25,8 @@ case $budget in
 esac
 
 # Bounded: a wedged virtio-gpu fence must never block steam.service start.
-id=$(timeout -k 2 10 vulkaninfo --summary 2>/dev/null | awk '
+summary=$(timeout -k 2 10 vulkaninfo --summary 2>/dev/null) || summary=
+id=$(printf '%s\n' "$summary" | awk '
     $1 == "vendorID" { v = $3 }
     $1 == "deviceID" { d = $3 }
     $1 == "driverID" && $3 == "DRIVER_ID_MESA_VENUS" { print v ":" d; exit }')

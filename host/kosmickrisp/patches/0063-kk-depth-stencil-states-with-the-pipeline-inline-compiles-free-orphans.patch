@@ -1,4 +1,4 @@
-From 81a97e29a93e12a0c6dcb68e9bf08a733c77644f Mon Sep 17 00:00:00 2001
+From fd6655ad5fac3993f4e6f3b775986b0c657bd13c Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Fri, 23 Oct 2026 12:16:35 +0200
 Subject: [PATCH] kk: depth/stencil states with the pipeline; inline compiles
@@ -11,10 +11,12 @@ before Apple10 a bound reduction sampler then compiled the minmax program
 inline as well. When the compile had failed, a static depth/stencil state
 was taken for a dynamic one.
 
-Both programs' depth/stencil states (mtl_depth_stencil_state, cheap to
-build) are now created with the pipeline, in kk_compile_shaders and in
-the pipeline-cache path, and the bind reads them without waiting; draws
-and dispatches still wait for the Metal pipelines (kk_cmd_shader_pipeline).
+The depth/stencil state is independent of the selected program. Build it
+once on the plain VS, where bind reads it, at pipeline creation in
+kk_compile_shaders and kk_deserialize_shader, even if only minmax is queued.
+There is no fallback creation in the pool: binding reads immutable state
+without waiting or racing a worker. Draws and dispatches still wait for
+the selected Metal pipeline (kk_cmd_shader_pipeline).
 
 The inline compile at a program's first use (0057) now checks
 compile_orphaned afterwards: a program destroyed while that thread
@@ -23,34 +25,33 @@ leaking.
 
 Generated-by: LLM
 ---
- src/kosmickrisp/vulkan/kk_shader.c | 53 +++++++++++++++++++++---------
- 1 file changed, 38 insertions(+), 15 deletions(-)
+ src/kosmickrisp/vulkan/kk_shader.c | 38 ++++++++++++++++++++----------
+ 1 file changed, 25 insertions(+), 13 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 2880744..f241dda 100644
+index d7b3e7e..641d49f 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
-@@ -1849,6 +1849,19 @@ kk_compile_ds_state(struct kk_device *device, struct kk_shader_info *info)
+@@ -1852,6 +1852,18 @@ kk_compile_ds_state(struct kk_device *device, struct kk_shader_info *info)
     return state;
  }
  
-+/* The depth/stencil state of a program's VS, built when the pipeline is
-+ * created (kk_compile_shaders, kk_deserialize_shader) rather than with its
-+ * Metal pipelines: binding the pipeline needs it, and a bind that waited for
-+ * the program's compile ran on the ring thread under virglrenderer's
-+ * submission lock. Both of a pipeline's programs get one. */
++/* The depth/stencil state is independent of the selected program. Build it
++ * once on the plain VS at creation (kk_compile_shaders, kk_deserialize_shader),
++ * where binding reads it, even when only the minmax program is queued.
++ * Binding must not wait for Metal compilation under virglrenderer's shared
++ * submission lock, and pool threads must not write state that binding reads. */
 +static void
 +kk_create_ds_state(struct kk_device *dev, struct kk_shader *vs)
 +{
-+   if (vs->info.stage == MESA_SHADER_VERTEX && vs->info.vs.has_ds &&
-+       vs->pipeline.gfx.ds_handle == NULL)
++   if (vs->info.stage == MESA_SHADER_VERTEX && vs->info.vs.has_ds)
 +      vs->pipeline.gfx.ds_handle = kk_compile_ds_state(dev, &vs->info);
 +}
 +
  static void
  kk_gather_ds_info(const struct vk_depth_stencil_state *ds, bool has_depth,
                    bool has_stencil, struct kk_shader_info *info)
-@@ -2079,11 +2092,10 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
+@@ -2082,12 +2094,6 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
        return VK_ERROR_INVALID_SHADER_NV;
     }
  
@@ -59,14 +60,11 @@ index 2880744..f241dda 100644
 -   if (vs->info.vs.has_ds && pipe->gfx.ds_handle == NULL) {
 -      pipe->gfx.ds_handle = kk_compile_ds_state(device, &vs->info);
 -   }
-+   /* The depth/stencil state is built when the pipeline is created
-+    * (kk_create_ds_state), so that binding never waits for this compile; a
-+    * program created another way gets it here. */
-+   kk_create_ds_state(device, vs);
- 
+-
     /* A render pipeline built from the same two programs and state is the same
      * Metal pipeline (kk_metal_caches_init) */
-@@ -2692,7 +2704,12 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
+    struct kk_metal_render_key *key = kk_metal_render_key_create(
+@@ -2695,7 +2701,12 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
        s->compile_done = true;
        dev->compile_pending--;
        cnd_broadcast(&dev->compile_cnd);
@@ -78,40 +76,24 @@ index 2880744..f241dda 100644
 +         kk_shader_free(dev, s, &dev->vk.alloc);
        return result;
     }
-    while (!s->compile_done && s->compile_queued)
-@@ -2820,11 +2837,15 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
- 
-    /* Both programs go to the background pool: the ring thread returns instead
-     * of spending a title's whole shader compilation here, one pipeline at a
--    * time (kk_compile_pool_init). */
-+    * time (kk_compile_pool_init). Their depth/stencil states are built now:
-+    * binding needs them, and must not wait for the pool. */
+    while (!s->compile_done && (s->compile_queued || s->compile_running))
+@@ -2834,6 +2845,7 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+    /* Keep the unused variant out of the pool: descriptor heaps usually need
+     * minmax first, ordinary sampler layouts need the cheaper plain program. */
     if (result == VK_SUCCESS) {
 +      kk_create_ds_state(dev, s);
-       kk_compile_enqueue(dev, s);
--      if (s->minmax != NULL)
-+      if (s->minmax != NULL) {
-+         kk_create_ds_state(dev, s->minmax);
-          kk_compile_enqueue(dev, s->minmax);
-+      }
-    }
- 
-    /* The VS has the pipeline data now, so free the generated shaders. */
-@@ -3011,9 +3032,12 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
-     * reduction sampler means the emulating program is the one that gets used
-     * first, but the pool compiles them regardless (kk_compile_pool_init). */
+       const bool minmax_first =
+          s->minmax != NULL &&
+          kk_minmax_layouts_used(minmax_sets, infos[0].set_layout_count,
+@@ -3027,6 +3039,7 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+    /* Without set layouts, predict minmax once any set got a reduction sampler.
+     * The other program is never queued and compiles at its first use. */
     if (info.stage == MESA_SHADER_COMPUTE || info.stage == MESA_SHADER_VERTEX) {
 +      kk_create_ds_state(dev, shader);
-       kk_compile_enqueue(dev, shader);
--      if (shader->minmax != NULL)
-+      if (shader->minmax != NULL) {
-+         kk_create_ds_state(dev, shader->minmax);
-          kk_compile_enqueue(dev, shader->minmax);
-+      }
-    }
- 
-    if (result != VK_SUCCESS)
-@@ -3121,13 +3145,12 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
+       const bool minmax_first =
+          shader->minmax != NULL && p_atomic_read(&dev->reduction_sampler_sets);
+       if (minmax_first && KK_DEBUG(MINMAX))
+@@ -3142,13 +3155,12 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
     if (stage != MESA_SHADER_VERTEX)
        return;
  

@@ -1,4 +1,4 @@
-From f5ca3d40ad1143ea2aeff6e7e765798b018e8b21 Mon Sep 17 00:00:00 2001
+From c0bb4812e91415e07323d7c98a9a9602a24adbdd Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 12:02:52 +0200
 Subject: [PATCH] kk: hash all graphics state a pipeline's shaders are built
@@ -26,7 +26,7 @@ Generated-by: LLM
  1 file changed, 42 insertions(+), 1 deletion(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 10ac76c..84cbbdd 100644
+index 01747d9..c8b1710 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
 @@ -123,6 +123,12 @@ kk_populate_vs_key(struct kk_vs_key *key,

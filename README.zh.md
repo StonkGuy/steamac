@@ -81,6 +81,24 @@ background processing of Vulkan shaders）。
 启动器 1.4 把两项都关了（`"DisableShaderCache" "1"`、
 `"EnableShaderBackgroundProcessing" "0"`）；更新后首次启动 Steam 时，脚本一次性把两项改回开启，但仅当两处仍恰好是这两个值时。
 
+游戏需要驱动提供的环境变量是默认值，而不是代码：`/usr/lib/steamac/steam-title-defaults`（同样是
+`steam.service` 的 ExecStartPre）在游戏的 Steam 启动选项（`%command%`）前加上所需的 `VAR=value`。
+目前只有一项：Dragon's Dogma 2（2054970）要求 D3D 功能级别 12_1，vkd3d-proton 根据 ROV 和
+conservative rasterization 推出该级别——Metal 两者都没有（conservative rasterization 在 Metal 中没有
+API；ROV 需要把 Metal 的 raster order groups 映射为 `VK_EXT_fragment_shader_interlock`），而该游戏只检查
+级别，因此报告为 `VKD3D_FEATURE_LEVEL=12_1 VKD3D_SHADER_MODEL=6_6`，同时带上
+`VKD3D_DISABLE_EXTENSIONS=`（空）。KosmicKrisp 的 64 位原子操作只有无符号 min/max，所以
+`steam.service` 默认对所有 D3D12 游戏隐藏 `VK_KHR_shader_atomic_int64` 和
+`VK_EXT_shader_image_atomic_int64`（其 drop-in 中的 `Environment=VKD3D_DISABLE_EXTENSIONS=…`；着色器使用
+其他 64 位原子操作的游戏会悄悄丢失这些管线，而 vkd3d-proton 据此报告 shader model 6.6），合适的游戏
+通过自己的启动选项重新启用。该默认值是 Steam 继承的环境，而不是 `gfx.txt` 中的一行：
+`steam-launch-wrapper` 先后把 `$XDG_RUNTIME_DIR/steam/env/gfx.txt` 和 `~/.config/steam/env/gfx.txt`
+中的所有变量覆盖到游戏环境上（包括启动选项），所以写在那里的 `VKD3D_DISABLE_EXTENSIONS` 对所有游戏
+生效。条目仅在 Venus 设备公布其所需功能时应用（DD2：64 位原子操作，Apple8/M2 及更新），如果之后某次
+启动 Steam 时这些功能消失（驱动切换为 MoltenVK、磁盘移到 M1），则撤回并恢复原来的启动选项；探测失败
+时不做任何改动。已有的值只在前面追加、不会被替换，不含 `%command%` 的值不受影响，用户之后在 Steam
+中的修改优先（标记 `~/.config/steamac/title-defaults.json`，其中也保存原值）。
+
 SteamOS 采用 Mac 的时区和 12/24 小时制（设置 > 通用中
 **使用 Mac 的时区和时钟格式**，默认开启，下次启动生效）。
 每次启动时启动器追加 `steamac.tz=<IANA zone of the Mac>`（`TimeZone.current`）和
@@ -467,7 +485,7 @@ Metal 初始化前，启动器检查运行时编译器的模块缓存是否可�
 
 | 选项 | 是什么 | 利弊 |
 |---|---|---|
-| **KosmicKrisp** — Mesa on Metal 4 · macOS 26+（`kosmickrisp`，可用时默认） | `host/kosmickrisp/`：Mesa 主线 + 未合并 MR（几何着色器 !44786、transform feedback !44928、宿主指针内存中的平铺图像 !44929、device-local 内存类型 !44221、线性渲染目标 !44782/!44222）+ steamac 补丁（显式 LINEAR 行距、LINEAR 输入附件、DXVK 所需的 `fillModeNonSolid`、8 倍采样请求按 4 倍处理、vkd3d-proton 所需的 texel 缓冲单 texel 对齐与跨多个 Metal 计数器堆的时间戳池；R32G32B32 uniform texel 缓冲——vkd3d-proton 以此格式查看步长 12 字节的结构化缓冲（这样的视图曾在 The Witcher 3 中使 VM 崩溃，STEAMAC-2Z）；所有客户机设备共用一个 Metal 编译器，macOS 27 上也是如此（在其 beta 1–4 上每个设备各用一个编译器会在客户机会话启动时破坏堆，STEAMAC-31）；零个或超过 Metal 上限 2^28 个 texel 的 texel 缓冲视图返回 Vulkan 错误，而不是在 Metal 校验中使虚拟机中止（Spider-Man、Uncharted、Forza Horizon 6，STEAMAC-3J/3F/3S/3R）；基于缓冲的 texel 缓冲视图共用其缓冲的驻留（约 1M 个以上视图曾耗尽驻留集并中止，DOOM、Wolfenstein，STEAMAC-3V/3T）；遮挡查询可超出单个 32768 条目的可见性缓冲，时间戳池使用进程内所有客户机设备共享的计数器堆（Metal 每进程只允许 32 个），因此 Dota 2 / Counter-Strike 2 的查询池不再创建失败；基于 Metal 4 placement sparse resources 的稀疏绑定与驻留，在 Apple10 之前的 GPU 上用着色器模拟采样器 min/max reduction，为 vkd3d-proton 提供 Tiled Resources Tier 2，从而支持 D3D12 功能级别 12_0） | 更快：M1 Max 上 Stellar Blade 试玩版约 29 FPS，MoltenVK 约 18（分屏视频：`docs/media/stellar-blade-moltenvk-vs-kosmickrisp.mp4`）；Steam UI、DXVK 游戏和 Stellar Blade 试玩版（D3D12，vkd3d-proton）可运行，后者在 M1 Max 上首次运行需约 28 分钟编译着色器。仅 macOS 26+；构建机也必须运行 macOS 26+，否则使用 MoltenVK。已知缺口（宿主复现）：带条带几何着色器的 transform feedback 及其溢出计数器（草案 MR）；同一渲染通道内，对未映射图块的深度写入保留在图块内存中，后续绘制仍会用这些值做深度测试（Tiled Resources Tier 2 允许该缓存；vkd3d-proton 的 `test_sparse_depth_stencil_rendering` 则期望丢弃）；不支持稀疏 3D 纹理（Metal 的 3D 图块不符合 Vulkan 标准 3D 块布局），因此没有 Tiled Resources Tier 3 |
+| **KosmicKrisp** — Mesa on Metal 4 · macOS 26+（`kosmickrisp`，可用时默认） | `host/kosmickrisp/`：Mesa 主线 + 未合并 MR（几何着色器 !44786、transform feedback !44928、宿主指针内存中的平铺图像 !44929、device-local 内存类型 !44221、线性渲染目标 !44782/!44222）+ steamac 补丁（显式 LINEAR 行距、LINEAR 输入附件、DXVK 所需的 `fillModeNonSolid`、8 倍采样请求按 4 倍处理、vkd3d-proton 所需的 texel 缓冲单 texel 对齐与跨多个 Metal 计数器堆的时间戳池；R32G32B32 uniform texel 缓冲——vkd3d-proton 以此格式查看步长 12 字节的结构化缓冲（这样的视图曾在 The Witcher 3 中使 VM 崩溃，STEAMAC-2Z）；所有客户机设备共用一个 Metal 编译器，macOS 27 上也是如此（在其 beta 1–4 上每个设备各用一个编译器会在客户机会话启动时破坏堆，STEAMAC-31）；零元素 texel 缓冲视图成为 null 描述符，过大的视图按对齐前缀之后 Metal 对该格式的容量截断（2^28 个 texel，RGB32 每元素三个），而非保守的通告上限：无效宽度不会进入 Metal，Venus 异步创建错误也不会在首次使用时杀死客户机进程（Spider-Man、Uncharted、Forza Horizon 6、Dragon's Dogma 2，STEAMAC-3J/3F/3S/3R）；基于缓冲的 texel 缓冲视图共用其缓冲的驻留（约 1M 个以上视图曾耗尽驻留集并中止，DOOM、Wolfenstein，STEAMAC-3V/3T）；遮挡查询可超出单个 32768 条目的可见性缓冲，时间戳池使用进程内所有客户机设备共享的计数器堆（Metal 每进程只允许 32 个），因此 Dota 2 / Counter-Strike 2 的查询池不再创建失败；基于 Metal 4 placement sparse resources 的稀疏绑定与驻留，在 Apple10 之前的 GPU 上用着色器模拟采样器 min/max reduction，为 vkd3d-proton 提供 Tiled Resources Tier 2，从而支持 D3D12 功能级别 12_0；编译池仅排队预测会使用的 plain/minmax 程序，另一程序首次使用时编译；depth/stencil 状态在创建时独立于程序选择只构建一次，因此绑定不等待编译；翻译后着色器缓存包含 `force_robustness` 等代码生成设置，已编译 Metal 对象使用有界 LRU 表并在发布时检查所有权） | 更快：M1 Max 上 Stellar Blade 试玩版约 29 FPS，MoltenVK 约 18（分屏视频：`docs/media/stellar-blade-moltenvk-vs-kosmickrisp.mp4`）；Steam UI、DXVK 游戏和 Stellar Blade 试玩版（D3D12，vkd3d-proton）可运行，后者在 M1 Max 上首次运行需约 28 分钟编译着色器。仅 macOS 26+；构建机也必须运行 macOS 26+，否则使用 MoltenVK。已知缺口（宿主复现）：带条带几何着色器的 transform feedback 及其溢出计数器（草案 MR）；同一渲染通道内，对未映射图块的深度写入保留在图块内存中，后续绘制仍会用这些值做深度测试（Tiled Resources Tier 2 允许该缓存；vkd3d-proton 的 `test_sparse_depth_stencil_rendering` 则期望丢弃）；不支持稀疏 3D 纹理（Metal 的 3D 图块不符合 Vulkan 标准 3D 块布局），因此没有 Tiled Resources Tier 3 |
 | **MoltenVK** — Metal 3 · macOS 15+（`moltenvk`） | `host/moltenvk/`：UTM 分支 + steamac 补丁 | 所有受支持 Mac；macOS 15 默认，无 KosmicKrisp 的构建也默认（macOS 15 源码构建；1.7 起发布 DMG 含 KosmicKrisp） |
 
 切换改变 Venus 驱动身份（管线缓存 UUID），Steam 与游戏重建着色器缓存。宿主驱动建不出的管线在 virglrenderer 中是占位：其绘制与派发被丢弃，驱动永远见不到 `VK_NULL_HANDLE`。

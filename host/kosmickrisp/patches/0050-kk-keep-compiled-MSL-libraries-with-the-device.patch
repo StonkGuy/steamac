@@ -1,4 +1,4 @@
-From 3bdd51ed3c7dac54ac5af2d4d447c15f55778c43 Mon Sep 17 00:00:00 2001
+From b1cce9c0811d1fc51b8220fa943c06ed5e1822d3 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 02:31:45 +0200
 Subject: [PATCH] kk: keep compiled MSL libraries with the device
@@ -18,28 +18,47 @@ Metal time from 80 s to 14 s (measured with MESA_KK_DEBUG=compiles).
 
 Generated-by: LLM
 ---
- src/kosmickrisp/vulkan/kk_device.c | 12 ++++++++
+ src/kosmickrisp/vulkan/kk_device.c | 20 +++++++++++++-
  src/kosmickrisp/vulkan/kk_device.h |  9 ++++++
  src/kosmickrisp/vulkan/kk_shader.c | 44 ++++++++++++++++++++++--------
- 3 files changed, 54 insertions(+), 11 deletions(-)
+ 3 files changed, 61 insertions(+), 12 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
-index f726d89..2b2d170 100644
+index f726d89..493d4bb 100644
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
-@@ -392,6 +392,11 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+@@ -392,11 +392,20 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
     dev->vk.command_dispatch_table = &dev->vk.dispatch_table;
     dev->vk.get_timestamp = kk_get_timestamp;
     simple_mtx_init(&dev->lazy_pipeline_lock, mtx_plain);
 +   dev->msl_libraries =
 +      _mesa_hash_table_create(NULL /* ralloc context, not vk.alloc */, _mesa_hash_string,
 +                              _mesa_key_string_equal);
-+   if (dev->msl_libraries == NULL)
-+      goto fail_init;
++   if (dev->msl_libraries == NULL) {
++      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      goto fail_device;
++   }
  
     /* Create a new Metal pipeline compiler for the device */
     dev->mtl_compiler_handle = kk_acquire_compiler(dev);
-@@ -501,6 +506,13 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+-   if (dev->mtl_compiler_handle == NULL)
++   if (dev->mtl_compiler_handle == NULL) {
++      result = VK_ERROR_INITIALIZATION_FAILED;
+       goto fail_init;
++   }
+ 
+    /* We need to initialize the device residency set before any bo is created. */
+    simple_mtx_init(&dev->residency_set.mutex, mtx_plain);
+@@ -458,6 +467,8 @@ fail_vab_memory:
+ fail_compiler:
+    kk_release_compiler(dev);
+ fail_init:
++   _mesa_hash_table_destroy(dev->msl_libraries, NULL);
++fail_device:
+    simple_mtx_destroy(&dev->lazy_pipeline_lock);
+    vk_device_finish(&dev->vk);
+ fail_alloc:
+@@ -501,6 +512,13 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
     mtl_release(dev->residency_set.handle);
     simple_mtx_destroy(&dev->residency_set.mutex);
  

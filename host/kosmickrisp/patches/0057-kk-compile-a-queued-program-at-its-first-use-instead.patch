@@ -1,4 +1,4 @@
-From 5e6246b4182b723b61377331c0b458f2e4cecba1 Mon Sep 17 00:00:00 2001
+From 3aab98a4fb2c7942df2f14d4df600837cc731dfb Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 12:27:10 +0200
 Subject: [PATCH] kk: compile a queued program at its first use instead of
@@ -21,14 +21,14 @@ gameplay without a stall, ~9 minutes after launch.
 Generated-by: LLM
 ---
  src/kosmickrisp/vulkan/kk_shader.c | 34 +++++++++++++++++++++++++++++-
- src/kosmickrisp/vulkan/kk_shader.h |  2 ++
- 2 files changed, 35 insertions(+), 1 deletion(-)
+ src/kosmickrisp/vulkan/kk_shader.h |  1 +
+ 2 files changed, 34 insertions(+), 1 deletion(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 84cbbdd..a714ca5 100644
+index 9f5eaa5..6719982 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
-@@ -2499,7 +2499,8 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s,
+@@ -2502,7 +2502,8 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s,
   * compilation (Dragon's Dogma 2: ~1,100 programs and ~130,000 pipelines, which
   * measured 62 minutes of first-run compilation). Programs are queued at
   * creation and compiled here instead, on as many threads as the machine has
@@ -38,7 +38,7 @@ index 84cbbdd..a714ca5 100644
   * The pool shares the Metal compiler (safe to use concurrently) and the
   * device's compiled-library table (`msl_libraries_lock`). */
  static int
-@@ -2519,6 +2520,7 @@ kk_compile_worker(void *data)
+@@ -2522,6 +2523,7 @@ kk_compile_worker(void *data)
        if (dev->compile_head == NULL)
           dev->compile_tail = NULL;
        s->compile_next = NULL;
@@ -46,7 +46,7 @@ index 84cbbdd..a714ca5 100644
        /* Nothing will use a destroyed program once the device goes away */
        const bool skip = s->compile_orphaned && dev->compile_shutdown;
        mtx_unlock(&dev->compile_mtx);
-@@ -2623,6 +2625,36 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
+@@ -2626,6 +2628,36 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
        return VK_SUCCESS;
  
     mtx_lock(&dev->compile_mtx);
@@ -80,22 +80,21 @@ index 84cbbdd..a714ca5 100644
 +      mtx_unlock(&dev->compile_mtx);
 +      return result;
 +   }
-    while (!s->compile_done && s->compile_queued)
+    while (!s->compile_done && (s->compile_queued || s->compile_running))
        cnd_wait(&dev->compile_cnd, &dev->compile_mtx);
-    const bool done = s->compile_done;
+    if (s->compile_done) {
 diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
-index 7ce33d2..0efb9d6 100644
+index e4eee50..0efb9d6 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.h
 +++ b/src/kosmickrisp/vulkan/kk_shader.h
-@@ -179,6 +179,8 @@ struct kk_shader {
+@@ -179,6 +179,7 @@ struct kk_shader {
      * for compile_done; destruction does not (compile_orphaned). */
     struct kk_shader *compile_next;
     bool compile_queued;
 +   /* A worker (or a thread that needed it first) is compiling it */
-+   bool compile_running;
+    bool compile_running;
     bool compile_done;
     VkResult compile_result;
-    /* Destroyed while queued or compiling: the worker that compiles it frees
 -- 
 2.54.0 (Apple Git-157)
 

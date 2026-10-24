@@ -400,7 +400,8 @@ build d3d12_caps
 "$work/d3d12_caps"
 
 if [ "$driver" = kosmickrisp ]; then
-	build texture_descriptors
+	glslangValidator -V --quiet -x "$here/shaders/texture_descriptors.comp" -o "$work/texture_descriptors.comp.inc"
+	build texture_descriptors -I"$work"
 	"$work/texture_descriptors"
 
 	build sparse

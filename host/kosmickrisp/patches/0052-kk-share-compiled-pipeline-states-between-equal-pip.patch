@@ -1,4 +1,4 @@
-From 4c618c64d20185ed56cb5ceb38b278762024c875 Mon Sep 17 00:00:00 2001
+From 9d335582238bc4b10396c64b2658de8af89921df Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 09:45:28 +0200
 Subject: [PATCH] kk: share compiled pipeline states between equal pipelines
@@ -42,10 +42,10 @@ Generated-by: LLM
  4 files changed, 468 insertions(+), 103 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
-index d542359..891e590 100644
+index 5bbdf79..67ed26f 100644
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
-@@ -391,12 +391,16 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+@@ -391,7 +391,8 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
     dev->vk.command_buffer_ops = &kk_cmd_buffer_ops;
     dev->vk.command_dispatch_table = &dev->vk.dispatch_table;
     dev->vk.get_timestamp = kk_get_timestamp;
@@ -55,28 +55,30 @@ index d542359..891e590 100644
     dev->msl_libraries =
        _mesa_hash_table_create(NULL /* ralloc context, not vk.alloc */, _mesa_hash_string,
                                _mesa_key_string_equal);
-    if (dev->msl_libraries == NULL)
-       goto fail_init;
+@@ -399,6 +400,9 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+       result = VK_ERROR_OUT_OF_HOST_MEMORY;
+       goto fail_device;
+    }
 +   /* Metal pipeline states are shared between equal pipelines and the pool
 +    * compiles into them; both are set up before any pipeline is created. */
 +   kk_metal_pipelines_init(dev);
     /* Programs are compiled by a pool of threads, not on the ring thread */
     kk_compile_pool_init(dev);
  
-@@ -466,9 +470,11 @@ fail_compiler:
+@@ -470,9 +474,11 @@ fail_compiler:
     kk_release_compiler(dev);
  fail_init:
     kk_compile_pool_finish(dev);
 +   kk_metal_pipelines_finish(dev);
-    if (dev->msl_libraries != NULL)
-       _mesa_hash_table_destroy(dev->msl_libraries, NULL);
+    _mesa_hash_table_destroy(dev->msl_libraries, NULL);
+ fail_device:
 -   simple_mtx_destroy(&dev->msl_libraries_lock);
 +   cnd_destroy(&dev->msl_libraries_cnd);
 +   mtx_destroy(&dev->msl_libraries_lock);
     vk_device_finish(&dev->vk);
  fail_alloc:
     vk_free(&dev->vk.alloc, dev);
-@@ -511,18 +517,23 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+@@ -515,18 +521,23 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
     mtl_release(dev->residency_set.handle);
     simple_mtx_destroy(&dev->residency_set.mutex);
  
@@ -147,10 +149,10 @@ index f447fbe..16426b0 100644
     /* os_time_get_nano() at creation (command queue error diagnostics) */
     int64_t created_ns;
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 4c2723a..b15df7c 100644
+index 4064d85..c0c2e13 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
-@@ -1308,6 +1308,282 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
+@@ -1311,6 +1311,282 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
     return nir;
  }
  
@@ -381,7 +383,7 @@ index 4c2723a..b15df7c 100644
 +      if (state != NULL)
 +         entry->data = mtl_retain(state);
 +      else {
-+         free((char *)entry->key);
++         kk_metal_render_key_free((struct kk_metal_render_key *)entry->key);
 +         _mesa_hash_table_remove(dev->metal_render_pipelines, entry);
 +      }
 +   }
@@ -422,7 +424,7 @@ index 4c2723a..b15df7c 100644
 +      if (state != NULL)
 +         entry->data = mtl_retain(state);
 +      else {
-+         free((char *)entry->key);
++         kk_metal_compute_key_free((struct kk_metal_compute_key *)entry->key);
 +         _mesa_hash_table_remove(dev->metal_compute_pipelines, entry);
 +      }
 +   }
@@ -433,7 +435,7 @@ index 4c2723a..b15df7c 100644
  /* The compiled library of an MSL source, kept for the device's lifetime: a title
   * asks for the same program once per pipeline (Dragon's Dogma 2: ~100 times per
   * program), and while Metal's own cache answers each request in fractions of a
-@@ -1320,11 +1596,28 @@ kk_get_msl_library(struct kk_device *device, const char *source)
+@@ -1323,11 +1599,28 @@ kk_get_msl_library(struct kk_device *device, const char *source)
     /* The compile pool shares this table, and the lock guards the table only.
      * Holding it across mtl_new_library would make the pool compile one library
      * at a time, which is exactly what the pool exists to avoid. */
@@ -466,7 +468,7 @@ index 4c2723a..b15df7c 100644
     if (cached != NULL)
        return cached;
  
-@@ -1332,35 +1625,27 @@ kk_get_msl_library(struct kk_device *device, const char *source)
+@@ -1335,35 +1628,27 @@ kk_get_msl_library(struct kk_device *device, const char *source)
     mtl_library *library = mtl_new_library(
        device->mtl_compiler_handle, source, pdev->info.msl_version,
        MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
@@ -516,7 +518,7 @@ index 4c2723a..b15df7c 100644
                              const struct msl_compile_data *data,
                              uint32_t local_size_threads,
                              mtl_compute_pipeline_state **pipe)
-@@ -1369,15 +1654,31 @@ kk_compile_compute_pipeline(struct kk_device *device,
+@@ -1372,15 +1657,31 @@ kk_compile_compute_pipeline(struct kk_device *device,
     if (library == NULL)
        return VK_ERROR_INVALID_SHADER_NV;
  
@@ -556,7 +558,7 @@ index 4c2723a..b15df7c 100644
  
     *pipe = pipeline;
  
-@@ -1600,7 +1901,8 @@ gather_graphics_pipeline_create_info(
+@@ -1603,7 +1904,8 @@ gather_graphics_pipeline_create_info(
  }
  
  static VkResult
@@ -566,7 +568,7 @@ index 4c2723a..b15df7c 100644
  {
     struct kk_physical_device *pdev = kk_device_physical(device);
  
-@@ -1618,7 +1920,8 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+@@ -1621,7 +1923,8 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
        uint32_t local_thread_size = vs_stage == MESA_SHADER_TESS_CTRL
                                        ? vs->info.vs.tess_local_thread_size
                                        : KK_POLY_WG_SIZE;
@@ -576,7 +578,7 @@ index 4c2723a..b15df7c 100644
                                             local_thread_size,
                                             &pipe->gfx.pre_render[i]);
  
-@@ -1632,21 +1935,22 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+@@ -1635,21 +1938,22 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
     if (vs->info.vs.additional_stages_bits &
         BITFIELD_BIT(MESA_SHADER_GEOMETRY)) {
        result = kk_compile_compute_pipeline(
@@ -603,7 +605,7 @@ index 4c2723a..b15df7c 100644
           if (result != VK_SUCCESS)
              return VK_ERROR_INVALID_SHADER_NV;
        }
-@@ -1657,70 +1961,92 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
+@@ -1660,70 +1964,92 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
     if (vertex_library == NULL)
        return VK_ERROR_INVALID_SHADER_NV;
  
@@ -744,7 +746,7 @@ index 4c2723a..b15df7c 100644
  }
  
  static bool
-@@ -2074,7 +2400,8 @@ kk_digest_program(struct kk_shader *s)
+@@ -2077,7 +2403,8 @@ kk_digest_program(struct kk_shader *s)
  
  /* Creates the Metal pipelines of a program (its VS or CS). */
  static VkResult
@@ -754,7 +756,7 @@ index 4c2723a..b15df7c 100644
  {
     VkResult result;
     if (s->info.stage == MESA_SHADER_COMPUTE) {
-@@ -2082,10 +2409,11 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s)
+@@ -2085,10 +2412,11 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s)
                                      s->info.cs.local_size.y *
                                      s->info.cs.local_size.z;
        result =
@@ -768,7 +770,7 @@ index 4c2723a..b15df7c 100644
     }
     if (result == VK_SUCCESS) {
        kk_digest_program(s);
-@@ -2123,7 +2451,12 @@ kk_compile_worker(void *data)
+@@ -2126,7 +2454,12 @@ kk_compile_worker(void *data)
        s->compile_next = NULL;
        mtx_unlock(&dev->compile_mtx);
  
@@ -782,20 +784,20 @@ index 4c2723a..b15df7c 100644
  
        mtx_lock(&dev->compile_mtx);
        s->compile_result = result;
-@@ -2223,7 +2556,7 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
-       return result;
- 
-    /* Never queued, or the pool has no worker: compile it here. */
--   return kk_compile_program(dev, s);
-+   return kk_compile_program(dev, s, dev->mtl_compiler_handle);
- }
- 
- /* Graphics pipeline state the VS of a program holds. */
+@@ -2228,7 +2561,7 @@ kk_compile_wait(struct kk_device *dev, struct kk_shader *s)
+     * destruction knows that this thread still owns the program's handles. */
+    s->compile_running = true;
+    mtx_unlock(&dev->compile_mtx);
+-   const VkResult result = kk_compile_program(dev, s);
++   const VkResult result = kk_compile_program(dev, s, dev->mtl_compiler_handle);
+    mtx_lock(&dev->compile_mtx);
+    s->compile_result = result;
+    s->compile_done = true;
 diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
-index 5dea9d6..1ade194 100644
+index f051033..16ee249 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.h
 +++ b/src/kosmickrisp/vulkan/kk_shader.h
-@@ -242,6 +242,10 @@ VkResult kk_compile_nir_shader(struct kk_device *dev, nir_shader *nir,
+@@ -243,6 +243,10 @@ VkResult kk_compile_nir_shader(struct kk_device *dev, nir_shader *nir,
                                 const VkAllocationCallbacks *alloc,
                                 struct kk_shader **shader_out);
  

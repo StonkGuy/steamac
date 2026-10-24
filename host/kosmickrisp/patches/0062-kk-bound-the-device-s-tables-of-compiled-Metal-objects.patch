@@ -1,4 +1,4 @@
-From eb3f81db8b8c394ab0df0786d1f3638b1a40e1f2 Mon Sep 17 00:00:00 2001
+From b721e7d83c316533d27510d0ef606ec90dcbf52e Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Fri, 23 Oct 2026 12:16:35 +0200
 Subject: [PATCH] kk: bound the device's tables of compiled Metal objects
@@ -20,29 +20,30 @@ by the same digests rather than by address, since a library may have been
 dropped and another compiled at its address. The single-flight behaviour
 is unchanged: an entry without an object is a compile in flight that
 other callers wait for, and a failed compile drops the entry (its key is
-freed by the table's key destructor, not by free() as before, which leaked
-the entry-point names of a pipeline key).
+freed by the table's key destructor). Publishing requires the reservation's
+exact key pointer as well as an empty object: if allocation in find failed,
+another thread may have reserved an equal key while this caller compiled.
+It must not publish into that thread's reservation or free its live key.
 
 kk_CreateDevice sets up the three tables in one step
 (kk_metal_caches_init) before the compile pool and returns
 VK_ERROR_OUT_OF_HOST_MEMORY when it fails, tearing down only what was
-initialised (0050 reached fail_init with VK_SUCCESS and finished mutexes
-that were never initialised); a missing Metal compiler is
+initialised, preserving 0050's failure cleanup; a missing Metal compiler is
 VK_ERROR_INITIALIZATION_FAILED.
 
 Generated-by: LLM
 ---
- src/kosmickrisp/vulkan/kk_device.c |  40 +--
+ src/kosmickrisp/vulkan/kk_device.c |  30 +-
  src/kosmickrisp/vulkan/kk_device.h |  60 ++--
  src/kosmickrisp/vulkan/kk_shader.c | 442 ++++++++++++++++-------------
  src/kosmickrisp/vulkan/kk_shader.h |   6 +-
- 4 files changed, 290 insertions(+), 258 deletions(-)
+ 4 files changed, 283 insertions(+), 255 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
-index 19a9277..c3541fc 100644
+index 70a4a19..c3541fc 100644
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
-@@ -391,23 +391,22 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+@@ -391,18 +391,13 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
     dev->vk.command_buffer_ops = &kk_cmd_buffer_ops;
     dev->vk.command_dispatch_table = &dev->vk.dispatch_table;
     dev->vk.get_timestamp = kk_get_timestamp;
@@ -51,46 +52,34 @@ index 19a9277..c3541fc 100644
 -   dev->msl_libraries =
 -      _mesa_hash_table_create(NULL /* ralloc context, not vk.alloc */, _mesa_hash_string,
 -                              _mesa_key_string_equal);
--   if (dev->msl_libraries == NULL)
--      goto fail_init;
--   /* Metal pipeline states are shared between equal pipelines and the pool
--    * compiles into them; both are set up before any pipeline is created. */
--   kk_metal_pipelines_init(dev);
+-   if (dev->msl_libraries == NULL) {
 +   /* Compiled MSL libraries and Metal pipeline states are shared between equal
 +    * pipelines and the pool compiles into them: both are set up before any
 +    * pipeline is created. */
 +   if (!kk_metal_caches_init(dev)) {
-+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
-+      goto fail_device;
-+   }
+       result = VK_ERROR_OUT_OF_HOST_MEMORY;
+       goto fail_device;
+    }
+-   /* Metal pipeline states are shared between equal pipelines and the pool
+-    * compiles into them; both are set up before any pipeline is created. */
+-   kk_metal_pipelines_init(dev);
     /* Programs are compiled by a pool of threads, not on the ring thread */
     kk_compile_pool_init(dev);
  
-    /* Create a new Metal pipeline compiler for the device */
-    dev->mtl_compiler_handle = kk_acquire_compiler(dev);
--   if (dev->mtl_compiler_handle == NULL)
-+   if (dev->mtl_compiler_handle == NULL) {
-+      result = VK_ERROR_INITIALIZATION_FAILED;
-       goto fail_init;
-+   }
- 
-    /* We need to initialize the device residency set before any bo is created. */
-    simple_mtx_init(&dev->residency_set.mutex, mtx_plain);
-@@ -484,11 +483,8 @@ fail_compiler:
+@@ -488,11 +483,8 @@ fail_compiler:
     kk_release_compiler(dev);
  fail_init:
     kk_compile_pool_finish(dev);
 -   kk_metal_pipelines_finish(dev);
--   if (dev->msl_libraries != NULL)
--      _mesa_hash_table_destroy(dev->msl_libraries, NULL);
+-   _mesa_hash_table_destroy(dev->msl_libraries, NULL);
++   kk_metal_caches_finish(dev);
+ fail_device:
 -   cnd_destroy(&dev->msl_libraries_cnd);
 -   mtx_destroy(&dev->msl_libraries_lock);
-+   kk_metal_caches_finish(dev);
-+fail_device:
     vk_device_finish(&dev->vk);
  fail_alloc:
     vk_free(&dev->vk.alloc, dev);
-@@ -539,18 +535,10 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+@@ -543,18 +535,10 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
      * afterwards either) and the compiler goes away last. */
     kk_compile_pool_finish(dev);
  
@@ -196,10 +185,10 @@ index 16426b0..0eba6fc 100644
     int64_t created_ns;
     /* In the process' list of devices alive (kk_device_foreach) */
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index a714ca5..2880744 100644
+index 6719982..d7b3e7e 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
-@@ -1393,9 +1393,166 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
+@@ -1396,9 +1396,166 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
   * hashing or holding the MSL again. The entry-point names are copied into the
   * key, because the shader owns its own and outlives nothing here.
   */
@@ -317,7 +306,7 @@ index a714ca5..2880744 100644
 +   mtx_lock(&c->lock);
 +   struct hash_entry *entry = _mesa_hash_table_search(c->table, key);
 +   struct kk_metal_cache_entry *e = entry != NULL ? entry->data : NULL;
-+   if (e != NULL && e->object == NULL) {
++   if (e != NULL && e->object == NULL && e->key == key) {
 +      if (object != NULL) {
 +         e->object = mtl_retain(object);
 +         list_del(&e->lru_link);
@@ -368,7 +357,7 @@ index a714ca5..2880744 100644
     char *vs_entrypoint;
     char *fs_entrypoint;
     enum mtl_primitive_topology_class topology;
-@@ -1405,14 +1562,15 @@ struct kk_metal_render_key {
+@@ -1408,14 +1565,15 @@ struct kk_metal_render_key {
  };
  
  struct kk_metal_compute_key {
@@ -386,7 +375,7 @@ index a714ca5..2880744 100644
     free(key->vs_entrypoint);
     free(key->fs_entrypoint);
     free(key);
-@@ -1422,14 +1580,15 @@ static struct kk_metal_render_key *
+@@ -1425,14 +1583,15 @@ static struct kk_metal_render_key *
  kk_metal_render_key_create(struct kk_shader *vs,
                             const struct msl_compile_data *vs_data,
                             const struct msl_compile_data *fs_data,
@@ -405,7 +394,7 @@ index a714ca5..2880744 100644
     key->vs_entrypoint = strdup(vs_data->entrypoint_name);
     key->fs_entrypoint = strdup(fs_data->entrypoint_name);
     /* What kk_compile_graphics_pipeline puts on the Metal descriptor */
-@@ -1451,10 +1610,10 @@ static uint32_t
+@@ -1454,10 +1613,10 @@ static uint32_t
  kk_metal_render_key_hash(const void *key)
  {
     const struct kk_metal_render_key *k = key;
@@ -418,7 +407,7 @@ index a714ca5..2880744 100644
     hash = _mesa_hash_data_with_seed(k->fs_entrypoint,
                                      strlen(k->fs_entrypoint), hash);
     hash = _mesa_hash_data_with_seed(&k->topology, sizeof(k->topology), hash);
-@@ -1471,8 +1630,8 @@ kk_metal_render_key_equal(const void *a, const void *b)
+@@ -1474,8 +1633,8 @@ kk_metal_render_key_equal(const void *a, const void *b)
  {
     const struct kk_metal_render_key *x = a;
     const struct kk_metal_render_key *y = b;
@@ -429,7 +418,7 @@ index a714ca5..2880744 100644
            x->topology == y->topology &&
            x->raster_sample_count == y->raster_sample_count &&
            x->max_amplification == y->max_amplification &&
-@@ -1482,21 +1641,22 @@ kk_metal_render_key_equal(const void *a, const void *b)
+@@ -1485,21 +1644,22 @@ kk_metal_render_key_equal(const void *a, const void *b)
  }
  
  static void
@@ -455,7 +444,7 @@ index a714ca5..2880744 100644
     key->entrypoint = strdup(entrypoint);
     key->max_total_threads = max_total_threads;
     if (key->entrypoint == NULL) {
-@@ -1510,7 +1670,7 @@ static uint32_t
+@@ -1513,7 +1673,7 @@ static uint32_t
  kk_metal_compute_key_hash(const void *key)
  {
     const struct kk_metal_compute_key *k = key;
@@ -464,7 +453,7 @@ index a714ca5..2880744 100644
     hash = _mesa_hash_data_with_seed(k->entrypoint, strlen(k->entrypoint), hash);
     return _mesa_hash_data_with_seed(&k->max_total_threads,
                                      sizeof(k->max_total_threads), hash);
-@@ -1521,196 +1681,73 @@ kk_metal_compute_key_equal(const void *a, const void *b)
+@@ -1524,196 +1684,73 @@ kk_metal_compute_key_equal(const void *a, const void *b)
  {
     const struct kk_metal_compute_key *x = a;
     const struct kk_metal_compute_key *y = b;
@@ -573,7 +562,7 @@ index a714ca5..2880744 100644
 -      if (state != NULL)
 -         entry->data = mtl_retain(state);
 -      else {
--         free((char *)entry->key);
+-         kk_metal_render_key_free((struct kk_metal_render_key *)entry->key);
 -         _mesa_hash_table_remove(dev->metal_render_pipelines, entry);
 -      }
 -   }
@@ -630,7 +619,7 @@ index a714ca5..2880744 100644
 -      if (state != NULL)
 -         entry->data = mtl_retain(state);
 -      else {
--         free((char *)entry->key);
+-         kk_metal_compute_key_free((struct kk_metal_compute_key *)entry->key);
 -         _mesa_hash_table_remove(dev->metal_compute_pipelines, entry);
 -      }
 -   }
@@ -710,7 +699,7 @@ index a714ca5..2880744 100644
     return library;
  }
  
-@@ -1720,21 +1757,22 @@ kk_compile_compute_pipeline(struct kk_device *device, mtl_compiler *compiler,
+@@ -1723,21 +1760,22 @@ kk_compile_compute_pipeline(struct kk_device *device, mtl_compiler *compiler,
                              uint32_t local_size_threads,
                              mtl_compute_pipeline_state **pipe)
  {
@@ -737,7 +726,7 @@ index a714ca5..2880744 100644
     if (pipeline == NULL) {
        mtl_function_descriptor *function =
           mtl_new_library_function_descriptor(library, data->entrypoint_name);
-@@ -1742,7 +1780,7 @@ kk_compile_compute_pipeline(struct kk_device *device, mtl_compiler *compiler,
+@@ -1745,7 +1783,7 @@ kk_compile_compute_pipeline(struct kk_device *device, mtl_compiler *compiler,
                                                  local_size_threads);
        mtl_release(function);
        /* Takes the key, which this caller no longer owns */
@@ -746,7 +735,7 @@ index a714ca5..2880744 100644
        if (pipeline == NULL) {
           mtl_release(library);
           return VK_ERROR_INVALID_SHADER_NV;
-@@ -2027,12 +2065,15 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
+@@ -2030,12 +2068,15 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
     }
  
     const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
@@ -764,7 +753,7 @@ index a714ca5..2880744 100644
     if (fragment_library == NULL) {
        mtl_release(vertex_library);
        return VK_ERROR_INVALID_SHADER_NV;
-@@ -2045,10 +2086,9 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
+@@ -2048,10 +2089,9 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
     }
  
     /* A render pipeline built from the same two programs and state is the same
@@ -778,7 +767,7 @@ index a714ca5..2880744 100644
     if (key == NULL) {
        mtl_release(fragment_library);
        mtl_release(vertex_library);
-@@ -2056,7 +2096,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
+@@ -2059,7 +2099,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
     }
  
     mtl_render_pipeline_state *render =
@@ -787,7 +776,7 @@ index a714ca5..2880744 100644
     if (render == NULL) {
        mtl_function_descriptor *vertex_function =
           mtl_new_library_function_descriptor(vertex_library,
-@@ -2104,7 +2144,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
+@@ -2107,7 +2147,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, mtl_compiler *compiler,
        mtl_release(vertex_function);
  
        /* Takes the key, which this caller no longer owns */
@@ -796,7 +785,7 @@ index a714ca5..2880744 100644
        if (render == NULL) {
           mtl_release(fragment_library);
           mtl_release(vertex_library);
-@@ -2502,7 +2542,7 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s,
+@@ -2505,7 +2545,7 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s,
   * cores. The first use of a program compiles it if it is still queued, or waits
   * for the worker compiling it; its destruction leaves it to that worker.
   * The pool shares the Metal compiler (safe to use concurrently) and the

@@ -198,17 +198,21 @@
 #              (Metal's ulong min/max atomics; an M1 rejects them). Repro: atomic64.c.
 #   0050       steamac: the device keeps compiled MSL libraries, keyed by the source (a title asks for the same
 #              program ~100 times: Dragon's Dogma 2 87,243 -> 6,244 library compiles in a warm launch).
-#   0051       steamac: a pipeline's programs are compiled on a pool of threads (MESA_KK_COMPILE_THREADS, at most 64)
-#              instead of the ring thread; draws and dispatches compile or wait for them.
+#   0051       steamac: only the program predicted by 0036 (plain or minmax) is queued on a thread pool
+#              (MESA_KK_COMPILE_THREADS, at most 64); the other compiles at first use, tracked under the same
+#              lock so concurrent users wait. Creation keeps the minmax log; waiting for a queued creation
+#              compile is not logged as a lazy first-use compile.
 #   0052       steamac: equal pipelines share their compiled Metal pipeline states (single-flight tables per device).
-#   0053       steamac: destroying a shader whose program is still queued or compiling no longer waits for it; the
-#              worker frees it. Dragon's Dogma 2's pipeline ring thread spent 73% of its time in vkDestroyPipeline
-#              waiting for compiles, which kept Metal at ~2 compiles in flight.
+#   0053       steamac: destroying a shader whose program is queued or compiling no longer waits for it; the
+#              compiling thread frees it (also for a never-queued first-use compile). Dragon's Dogma 2's
+#              pipeline ring thread spent 73% of its time in vkDestroyPipeline waiting for compiles,
+#              which kept Metal at ~2 compiles in flight.
 #   0054       steamac: the graphics state hash covers the depth/stencil formats, the color attachment count and
 #              location map and the depth clip/clamp lowering (pipelines that differed only there shared shaders
 #              through a VkPipelineCache).
 #   0055       steamac: the device's in-memory pipeline cache and Mesa's disk cache (translated MSL), so a pipeline is
-#              translated SPIR-V -> NIR -> MSL once, not on every creation and every launch.
+#              translated SPIR-V -> NIR -> MSL once, not on every creation and every launch. The identity includes
+#              codegen settings, including MESA_KK_DEBUG=force_robustness and disabled workarounds.
 #   0056       steamac: MESA_KK_DEBUG=compiles lines carry start and end times ("[t <start> <end>]", ms).
 #   0057       steamac: the first use of a program that is still queued compiles it right away instead of waiting
 #              for the queue ahead of it (a draw under virglrenderer's shared submission lock froze the guest).
@@ -221,11 +225,12 @@
 #              Needed by UE5's D3D12 SM6 path (Nanite) through vkd3d-proton; Apple8 and later only, and R64
 #              reports no format features below that; MESA_KK_DEBUG=noimageint64atomics turns it off.
 #              Repro case 27 (image_atomic64.c).
-#   0059       steamac: reject zero/oversized texel buffer views before Metal (STEAMAC-3S/3Z/3J/3F/4B/3K/3G/3R).
-#              VK_WHOLE_SIZE may round down to zero texels or exceed Metal's 2^28 texture-buffer width; both ordinary
-#              and placement sparse texture constructors abort on those descriptors. maxTexelBufferElements reserves
-#              space for the alignment prefix and RGB32 expansion, so valid maximum-size views remain representable.
-#              Repro: host/moltenvk/repro texture_descriptors.c (invalid widths, valid boundaries, partial last texel).
+#   0059       steamac: zero-element texel buffer views are null descriptors; oversized views are clamped after
+#              their alignment prefix to Metal's per-format capacity (2^28 texels, three per RGB32 element),
+#              not the conservative RGB32-derived advertised limit. Neither invalid width reaches Metal, whose
+#              constructors abort (STEAMAC-3S/3Z/3J/3F/4B/3K/3G/3R). Venus creates views asynchronously, so a
+#              Vulkan failure kills the guest at first use (Dragon's Dogma 2 loading a save).
+#              Repro: texture_descriptors.c (zero/oversized widths, valid boundaries, partial texel, full R32 capacity).
 #   0061       steamac: non-sparse texture-buffer views inherit their buffer's residency (STEAMAC-3V/4H/3T).
 #              Registering each shared-storage view separately exhausted IOGPU's residency-set hash table
 #              (1,048,576 slots on M1 Max), which aborts rather than returning an error. Sparse texture buffers
@@ -234,15 +239,13 @@
 #   0062       steamac: the device's tables of compiled MSL libraries and Metal pipeline states (0050/0052) are
 #              bounded: least recently used entries past 4096 per table (MESA_KK_METAL_CACHE_MAX) are dropped, and
 #              libraries are keyed by the blake3 digest of their source rather than the source itself (the pipeline
-#              keys name their libraries by the same digests, not by address).
-#   0063       steamac: a pipeline's depth/stencil states (both programs) are built when it is created, so binding
-#              never waits for a Metal compile (0051 waited there under virglrenderer's submission lock, and took a
-#              static state for dynamic when the compile had failed); a program destroyed during the inline compile
-#              of its first use (0057) is freed by that thread instead of leaking.
-#   0064       steamac: a texel buffer view of zero elements or past maxTexelBufferElements is created as a null
-#              descriptor or narrowed to the limit instead of failing (0059 failed it): under Venus vkCreateBufferView is
-#              asynchronous, so a failure is a command-stream error at the view's first use that kills the guest process
-#              (Dragon's Dogma 2 at the end of loading a save). Repro: texture_descriptors.c (every case created).
+#              keys name their libraries by the same digests, not by address). A publish must own the exact
+#              key reservation, even when allocation failed and another thread reserved an equal key.
+#   0063       steamac: a pipeline's program-independent depth/stencil state is built once on the plain VS
+#              at creation, even if only minmax is queued; no pool thread writes it, and binding never waits
+#              for a Metal compile (0051 waited under virglrenderer's submission lock, and took static state
+#              for dynamic when the compile failed). A program destroyed during the inline compile of its first
+#              use (0057) is freed by that thread instead of leaking.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -428,7 +431,7 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0045 = steamac: no per-device occlusion / per-process timestamp pool ceilings; vkCreateQueryPool failures logged"
 	echo "  0046 = steamac: Metal command buffers of their own only for render passes with pre_gfx work (blits, clears: none)"
 	echo "  0047 = steamac: KK_WORKAROUND_11 (one shared MTL4Compiler) kept on macOS 27; compiling threads named after their compile"
-	echo "  0059 = steamac: texel-buffer widths checked before Metal; advertised limit includes alignment and RGB32 expansion"
+	echo "  0059 = steamac: zero texel-buffer widths are null; oversized views clamp to Metal's per-format capacity after alignment"
 	echo "  0061 = steamac: buffer-backed texture-buffer views inherit buffer residency, avoiding IOGPU's per-set entry limit"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"

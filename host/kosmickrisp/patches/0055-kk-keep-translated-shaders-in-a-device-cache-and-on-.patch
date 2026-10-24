@@ -1,4 +1,4 @@
-From 0b8ac402aee1a991824531f79201548bed09607c Mon Sep 17 00:00:00 2001
+From be56e0e183f5c83e8424004cba021fe1a7263804 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 12:02:52 +0200
 Subject: [PATCH] kk: keep translated shaders in a device cache and on disk
@@ -23,17 +23,23 @@ The cache UUID and the disk cache key include what the emitted MSL
 depends on besides the build: the GPU family, the MSL version and the
 workarounds in effect (MESA_KK_DISABLE_WORKAROUNDS and the OS version).
 
+Include force_robustness in the pipeline/shader identity and per-shader key:
+it changes SPIR-V translation and NIR lowering. Other KK debug flags only
+change logging or advertised capabilities; feature-dependent lowering is
+already keyed by the enabled Vulkan features, and workarounds by their mask.
+
 Generated-by: LLM
 ---
- src/kosmickrisp/vulkan/kk_device.c          | 17 ++++++++++++
- src/kosmickrisp/vulkan/kk_physical_device.c | 29 +++++++++++++++++++++
- 2 files changed, 46 insertions(+)
+ src/kosmickrisp/vulkan/kk_device.c          | 17 +++++++++++
+ src/kosmickrisp/vulkan/kk_physical_device.c | 34 +++++++++++++++++++++
+ src/kosmickrisp/vulkan/kk_shader.c          |  3 ++
+ 3 files changed, 54 insertions(+)
 
 diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
-index 891e590..19a9277 100644
+index 67ed26f..70a4a19 100644
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
-@@ -423,6 +423,18 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+@@ -427,6 +427,18 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
        dev->has_queue = true;
     }
  
@@ -52,7 +58,7 @@ index 891e590..19a9277 100644
     result = kk_device_init_meta(dev);
     if (result != VK_SUCCESS)
        goto fail_mem_cache;
-@@ -459,6 +471,8 @@ fail_query_table:
+@@ -463,6 +475,8 @@ fail_query_table:
  fail_meta:
     kk_device_finish_meta(dev);
  fail_mem_cache:
@@ -61,7 +67,7 @@ index 891e590..19a9277 100644
     if (dev->has_queue) {
        kk_queue_finish(dev, &dev->queue);
        dev->has_queue = false;
-@@ -504,6 +518,9 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+@@ -508,6 +522,9 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
     kk_oq_heap_finish(dev, &dev->occlusion_queries);
     kk_destroy_sampler_heap(dev, &dev->samplers);
  
@@ -72,7 +78,7 @@ index 891e590..19a9277 100644
     if (dev->heap)
        kk_destroy_bo(dev, dev->heap);
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
-index 277d213..784d7fd 100644
+index 277d213..b4778fa 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
 @@ -998,6 +998,13 @@ kk_get_device_properties(
@@ -89,7 +95,7 @@ index 277d213..784d7fd 100644
  static void
  kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
  {
-@@ -1009,12 +1016,34 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
+@@ -1009,12 +1016,39 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
     _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
                         sizeof(instance->driver_build_sha));
  
@@ -100,6 +106,11 @@ index 277d213..784d7fd 100644
 +   _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
 +   _mesa_blake3_update(&blake3_ctx, &pdev->settings.disabled_workarounds,
 +                       sizeof(pdev->settings.disabled_workarounds));
++   /* The other debug flags only affect logging or advertised capabilities.
++    * force_robustness changes both SPIR-V translation and NIR lowering. */
++   const bool force_robustness = KK_DEBUG(FORCE_ROBUSTNESS);
++   _mesa_blake3_update(&blake3_ctx, &force_robustness,
++                       sizeof(force_robustness));
 +
     unsigned char blake3[BLAKE3_KEY_LEN];
     _mesa_blake3_final(&blake3_ctx, blake3);
@@ -124,6 +135,20 @@ index 277d213..784d7fd 100644
  }
  
  static void
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index c8b1710..9f5eaa5 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -267,6 +267,9 @@ kk_hash_graphics_state(struct vk_physical_device *device,
+ 
+    enum kk_feature_key feature_key = kk_make_feature_key(enabled_features);
+    _mesa_blake3_update(&blake3_ctx, &feature_key, sizeof(feature_key));
++   const bool force_robustness = KK_DEBUG(FORCE_ROBUSTNESS);
++   _mesa_blake3_update(&blake3_ctx, &force_robustness,
++                       sizeof(force_robustness));
+ 
+    _mesa_blake3_final(&blake3_ctx, blake3_out);
+ }
 -- 
 2.54.0 (Apple Git-157)
 

@@ -84,20 +84,26 @@ both back on once, but only if both are still exactly those values.
 
 Per-title environment that a game needs from the driver it runs on is a default, not code:
 `/usr/lib/steamac/steam-title-defaults` (also an ExecStartPre of `steam.service`) puts the required
-`VAR=value` words in front of a title's Steam launch options (`%command%`), which
-`steam-launch-wrapper` exports for the game. It ships one entry: Dragon's Dogma 2 (2054970) asks for
-D3D feature level 12_1, which vkd3d-proton derives from ROVs and conservative rasterization — on
-Metal neither exists (conservative rasterization has no Metal API; ROVs would need Metal's raster
-order groups mapped to `VK_EXT_fragment_shader_interlock`), and the title only checks the level, so
-it is reported as `VKD3D_FEATURE_LEVEL=12_1 VKD3D_SHADER_MODEL=6_6`, together with
-`VKD3D_DISABLE_EXTENSIONS=` (empty): KosmicKrisp's 64-bit atomics cover unsigned min/max only, so
-`steam-gfx-env` keeps `VK_KHR_shader_atomic_int64` and `VK_EXT_shader_image_atomic_int64` from every
-D3D12 title by default (a title whose shaders use another 64-bit atomic would silently lose those
-pipelines, and vkd3d-proton reports shader model 6.6 from them), and a title that fits gets them back
-in its own launch options. An entry applies only where the Venus device advertises the features it
-needs (DD2's: the 64-bit atomics, Apple8/M2 and later), an existing value is only prefixed, never
-replaced, a value without `%command%` is left alone, and an edit made in Steam after ours wins
-(marker `~/.config/steamac/title-defaults.json`).
+`VAR=value` words in front of a title's Steam launch options (`%command%`). It ships one entry:
+Dragon's Dogma 2 (2054970) asks for D3D feature level 12_1, which vkd3d-proton derives from ROVs and
+conservative rasterization — on Metal neither exists (conservative rasterization has no Metal API;
+ROVs would need Metal's raster order groups mapped to `VK_EXT_fragment_shader_interlock`), and the
+title only checks the level, so it is reported as `VKD3D_FEATURE_LEVEL=12_1 VKD3D_SHADER_MODEL=6_6`,
+together with `VKD3D_DISABLE_EXTENSIONS=` (empty). KosmicKrisp's 64-bit atomics cover unsigned
+min/max only, so `steam.service` keeps `VK_KHR_shader_atomic_int64` and
+`VK_EXT_shader_image_atomic_int64` from every D3D12 title by default
+(`Environment=VKD3D_DISABLE_EXTENSIONS=…` in its drop-in; a title whose shaders use another 64-bit
+atomic would silently lose those pipelines, and vkd3d-proton reports shader model 6.6 from them), and
+a title that fits gets them back in its own launch options. The default is Steam's inherited
+environment, not a `gfx.txt` line: `steam-launch-wrapper` sets every variable of
+`$XDG_RUNTIME_DIR/steam/env/gfx.txt` and then `~/.config/steam/env/gfx.txt` over the game's
+environment, launch options included, so a `VKD3D_DISABLE_EXTENSIONS` written there wins for every
+title. An entry applies only where the Venus device advertises the features it needs (DD2's: the
+64-bit atomics, Apple8/M2 and later) and is taken back, restoring the previous launch options, when
+a later Steam start finds them gone (driver switched to MoltenVK, disk moved to an M1); a failed
+probe changes nothing. An existing value is only prefixed, never replaced, a value without
+`%command%` is left alone, and an edit made in Steam after ours wins (marker
+`~/.config/steamac/title-defaults.json`, which also keeps the previous value).
 
 SteamOS takes the Mac's time zone and 12/24-hour clock format (Settings > General
 **Use the Mac's time zone and clock format**, on by default, applies on the next start).
@@ -675,7 +681,7 @@ verifies actual Metal source compilation with the replacement (no VM or Sentry e
 
 | Option | What it is | Pros and cons |
 |---|---|---|
-| **KosmicKrisp** — Mesa on Metal 4 · macOS 26+ (`kosmickrisp`, default where available) | `host/kosmickrisp/`: Mesa main + open MRs (geometry shaders !44786, transform feedback !44928, tiled images in host-pointer memory !44929, device-local memory type !44221, linear render targets !44782/!44222) + steamac's patches (explicit LINEAR row pitch, LINEAR input attachments, `fillModeNonSolid`, which DXVK requires, 8-sample requests as 4, single texel alignment for texel buffers and timestamp pools over several Metal counter heaps, which vkd3d-proton requires; R32G32B32 uniform texel buffers, as which vkd3d-proton views 12-byte structured buffers (such a view crashed the VM in The Witcher 3, STEAMAC-2Z); one Metal compiler shared by all guest devices, also on macOS 27 (on its betas 1–4 a compiler per device corrupted the heap when a guest session started, STEAMAC-31); texel buffer views of zero or more than Metal's 2^28 texels fail with a Vulkan error instead of aborting the VM in Metal validation (Spider-Man, Uncharted, Forza Horizon 6, STEAMAC-3J/3F/3S/3R), and buffer-backed texel buffer views share their buffer's residency (over ~1M views exhausted the residency set and aborted, DOOM, Wolfenstein, STEAMAC-3V/3T); occlusion queries past one 32768-entry visibility buffer and timestamp pools on counter heaps shared by every guest device of the process (Metal allows 32 per process), so query pools of Dota 2 / Counter-Strike 2 no longer fail to create; sparse binding/residency on Metal 4 placement sparse resources and sampler min/max reduction emulated in shaders before Apple10, which give vkd3d-proton Tiled Resources Tier 2 and so D3D12 feature level 12_0) | faster: Stellar Blade Demo ~29 FPS against ~18 on MoltenVK on an M1 Max (split-screen video: `docs/media/stellar-blade-moltenvk-vs-kosmickrisp.mp4`); Steam UI, DXVK games and Stellar Blade Demo (D3D12, vkd3d-proton) run, its first run spends ~28 min compiling shaders on an M1 Max. macOS 26+ only; built only when the build host runs macOS 26+, otherwise MoltenVK is used. Known gaps (host repros): transform feedback with strip geometry shaders and its overflow counter (draft MR); within one render pass, depth writes to unmapped tiles stay in tile memory and later draws of the pass test against them (Tiled Resources Tier 2 allows this cache; vkd3d-proton's `test_sparse_depth_stencil_rendering` expects them dropped); no sparse 3D textures (Metal's 3D tiles are not Vulkan's standard 3D blocks), hence no Tiled Resources Tier 3 |
+| **KosmicKrisp** — Mesa on Metal 4 · macOS 26+ (`kosmickrisp`, default where available) | `host/kosmickrisp/`: Mesa main + open MRs (geometry shaders !44786, transform feedback !44928, tiled images in host-pointer memory !44929, device-local memory type !44221, linear render targets !44782/!44222) + steamac's patches (explicit LINEAR row pitch, LINEAR input attachments, `fillModeNonSolid`, which DXVK requires, 8-sample requests as 4, single texel alignment for texel buffers and timestamp pools over several Metal counter heaps, which vkd3d-proton requires; R32G32B32 uniform texel buffers, as which vkd3d-proton views 12-byte structured buffers (such a view crashed the VM in The Witcher 3, STEAMAC-2Z); one Metal compiler shared by all guest devices, also on macOS 27 (on its betas 1–4 a compiler per device corrupted the heap when a guest session started, STEAMAC-31); zero-element texel buffer views become null descriptors and oversized views are clamped to Metal's per-format capacity after alignment (2^28 texels, three per RGB32 element), not to the conservative advertised limit: no invalid width reaches Metal and no asynchronous Venus creation failure kills the guest at first use (Spider-Man, Uncharted, Forza Horizon 6, Dragon's Dogma 2, STEAMAC-3J/3F/3S/3R); buffer-backed texel buffer views share their buffer's residency (over ~1M views exhausted the residency set and aborted, DOOM, Wolfenstein, STEAMAC-3V/3T); occlusion queries past one 32768-entry visibility buffer and timestamp pools on counter heaps shared by every guest device of the process (Metal allows 32 per process), so query pools of Dota 2 / Counter-Strike 2 no longer fail to create; sparse binding/residency on Metal 4 placement sparse resources and sampler min/max reduction emulated in shaders before Apple10, which give vkd3d-proton Tiled Resources Tier 2 and so D3D12 feature level 12_0; a compile pool queues only the predicted plain/minmax program and compiles the other at first use; depth/stencil state is built once at creation independently of that choice, so bind never waits; translated shader caches include codegen settings such as `force_robustness`, and compiled Metal objects use bounded LRU tables with ownership-checked publication) | faster: Stellar Blade Demo ~29 FPS against ~18 on MoltenVK on an M1 Max (split-screen video: `docs/media/stellar-blade-moltenvk-vs-kosmickrisp.mp4`); Steam UI, DXVK games and Stellar Blade Demo (D3D12, vkd3d-proton) run, its first run spends ~28 min compiling shaders on an M1 Max. macOS 26+ only; built only when the build host runs macOS 26+, otherwise MoltenVK is used. Known gaps (host repros): transform feedback with strip geometry shaders and its overflow counter (draft MR); within one render pass, depth writes to unmapped tiles stay in tile memory and later draws of the pass test against them (Tiled Resources Tier 2 allows this cache; vkd3d-proton's `test_sparse_depth_stencil_rendering` expects them dropped); no sparse 3D textures (Metal's 3D tiles are not Vulkan's standard 3D blocks), hence no Tiled Resources Tier 3 |
 | **MoltenVK** — Metal 3 · macOS 15+ (`moltenvk`) | `host/moltenvk/`: the UTM fork + steamac's patches | every supported Mac; the default on macOS 15 and in builds without KosmicKrisp (source builds on macOS 15; the release DMG includes KosmicKrisp since 1.7) |
 
 Switching changes the Venus driver identity (pipeline cache UUID), so Steam and games rebuild their

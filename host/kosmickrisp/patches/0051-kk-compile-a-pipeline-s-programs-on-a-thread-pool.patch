@@ -1,4 +1,4 @@
-From 2a21be2e59d25dc2d2d1e5b94b77bf6ce84c3e70 Mon Sep 17 00:00:00 2001
+From 86eb4f2a313c0c14cf5ea9be9da00875317e9ce4 Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 08:54:56 +0200
 Subject: [PATCH] kk: compile a pipeline's programs on a thread pool
@@ -15,14 +15,22 @@ shaders" screen.
 Queue a program at creation and compile it on a pool of threads instead, and
 wait where its Metal pipeline is first used:
 
-  - kk_compile_shaders() and kk_deserialize_shader() enqueue programs
-    (kk_compile_enqueue). min(16, cores - 2) threads take them and call
+  - kk_compile_shaders() and kk_deserialize_shader() enqueue only the program
+    predicted by 0036: minmax when the relevant layouts already hold reduction
+    samplers (any set when deserializing), plain otherwise. The other program
+    is never queued and kk_compile_wait compiles it at first use. Keep the
+    minmax "compiled at creation" log for this choice. Waiting for a queued
+    creation compile is not logged as a lazy first-use compile.
+    With kk_compile_enqueue, min(16, cores - 2) threads take them and call
     kk_compile_program (kk_compile_pool_init, kk_compile_worker); the count
     can be set with MESA_KK_COMPILE_THREADS.
   - kk_cmd_shader_pipeline() waits for the program a draw or dispatch uses and
     kk_cmd_bind_graphics_shader() for the vertex program whose depth/stencil
     state a bind reads (kk_compile_wait), so a draw that needs a program still
     being compiled waits for it instead of drawing nothing.
+  - Never-queued first-use compiles claim compile_running under compile_mtx,
+    publish their result and wake concurrent users; destruction tracks them
+    just like queued jobs.
   - kk_shader_destroy() waits for a compile that is still writing into the
     shader before releasing its pipeline handles.
   - The device's compiled-library table is now shared by the pool: its lock
@@ -59,11 +67,11 @@ Generated-by: LLM
  src/kosmickrisp/compiler/nir_to_msl.h    |   5 +
  src/kosmickrisp/vulkan/kk_cmd_dispatch.c |  21 +-
  src/kosmickrisp/vulkan/kk_cmd_draw.c     |  17 +-
- src/kosmickrisp/vulkan/kk_device.c       |  14 +-
+ src/kosmickrisp/vulkan/kk_device.c       |  12 +-
  src/kosmickrisp/vulkan/kk_device.h       |  27 +-
- src/kosmickrisp/vulkan/kk_shader.c       | 342 ++++++++++++++++-------
- src/kosmickrisp/vulkan/kk_shader.h       |  18 ++
- 8 files changed, 381 insertions(+), 114 deletions(-)
+ src/kosmickrisp/vulkan/kk_shader.c       | 366 ++++++++++++++++-------
+ src/kosmickrisp/vulkan/kk_shader.h       |  19 ++
+ 8 files changed, 401 insertions(+), 117 deletions(-)
 
 diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
 index 47687c3..d89c8f4 100644
@@ -266,10 +274,10 @@ index a380ae6..4119f1c 100644
        kk_dispatch_draw(cmd, draw_data);
     }
 diff --git a/src/kosmickrisp/vulkan/kk_device.c b/src/kosmickrisp/vulkan/kk_device.c
-index 2b2d170..d542359 100644
+index 493d4bb..5bbdf79 100644
 --- a/src/kosmickrisp/vulkan/kk_device.c
 +++ b/src/kosmickrisp/vulkan/kk_device.c
-@@ -391,12 +391,14 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+@@ -391,7 +391,7 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
     dev->vk.command_buffer_ops = &kk_cmd_buffer_ops;
     dev->vk.command_dispatch_table = &dev->vk.dispatch_table;
     dev->vk.get_timestamp = kk_get_timestamp;
@@ -278,26 +286,28 @@ index 2b2d170..d542359 100644
     dev->msl_libraries =
        _mesa_hash_table_create(NULL /* ralloc context, not vk.alloc */, _mesa_hash_string,
                                _mesa_key_string_equal);
-    if (dev->msl_libraries == NULL)
-       goto fail_init;
+@@ -399,6 +399,8 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
+       result = VK_ERROR_OUT_OF_HOST_MEMORY;
+       goto fail_device;
+    }
 +   /* Programs are compiled by a pool of threads, not on the ring thread */
 +   kk_compile_pool_init(dev);
  
     /* Create a new Metal pipeline compiler for the device */
     dev->mtl_compiler_handle = kk_acquire_compiler(dev);
-@@ -463,7 +465,10 @@ fail_vab_memory:
+@@ -467,9 +469,10 @@ fail_vab_memory:
  fail_compiler:
     kk_release_compiler(dev);
  fail_init:
--   simple_mtx_destroy(&dev->lazy_pipeline_lock);
 +   kk_compile_pool_finish(dev);
-+   if (dev->msl_libraries != NULL)
-+      _mesa_hash_table_destroy(dev->msl_libraries, NULL);
+    _mesa_hash_table_destroy(dev->msl_libraries, NULL);
+ fail_device:
+-   simple_mtx_destroy(&dev->lazy_pipeline_lock);
 +   simple_mtx_destroy(&dev->msl_libraries_lock);
     vk_device_finish(&dev->vk);
  fail_alloc:
     vk_free(&dev->vk.alloc, dev);
-@@ -513,8 +518,11 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
+@@ -519,8 +522,11 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
     }
     _mesa_hash_table_destroy(dev->msl_libraries, NULL);
  
@@ -356,22 +366,25 @@ index 03d919a..f447fbe 100644
     /* os_time_get_nano() at creation (command queue error diagnostics) */
     int64_t created_ns;
 diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
-index 0de5fdc..4c2723a 100644
+index 0de5fdc..4064d85 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.c
 +++ b/src/kosmickrisp/vulkan/kk_shader.c
-@@ -850,6 +850,11 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
+@@ -850,6 +850,14 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
  {
     struct kk_device *dev = container_of(vk_dev, struct kk_device, vk);
  
-+   /* A background compile may still be running for it: the pool writes into the
-+    * shader's pipeline handles (kk_compile_pool_init) */
-+   if (shader->compile_queued && !shader->compile_done)
++   /* Both pool jobs and never-queued first-use compiles write the handles. */
++   mtx_lock(&dev->compile_mtx);
++   const bool compiling =
++      (shader->compile_queued || shader->compile_running) && !shader->compile_done;
++   mtx_unlock(&dev->compile_mtx);
++   if (compiling)
 +      (void) kk_compile_wait(dev, shader);
 +
     struct kk_pipeline_handles *pipe = &shader->pipeline;
  
     if (shader->info.stage == MESA_SHADER_COMPUTE) {
-@@ -1082,6 +1087,15 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
+@@ -1082,6 +1090,15 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
     assert(nir->info.io_lowered && "nir must have lowered io");
     struct kk_physical_device *pdev = kk_device_physical(dev);
  
@@ -387,7 +400,7 @@ index 0de5fdc..4c2723a 100644
     struct kk_shader *shader;
     VkResult result = VK_SUCCESS;
  
-@@ -1303,10 +1317,16 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
+@@ -1303,10 +1320,16 @@ get_empty_nir(struct kk_device *dev, mesa_shader_stage stage,
  static mtl_library *
  kk_get_msl_library(struct kk_device *device, const char *source)
  {
@@ -406,7 +419,7 @@ index 0de5fdc..4c2723a 100644
  
     struct kk_physical_device *pdev = kk_device_physical(device);
     mtl_library *library = mtl_new_library(
-@@ -1320,7 +1340,22 @@ kk_get_msl_library(struct kk_device *device, const char *source)
+@@ -1320,7 +1343,22 @@ kk_get_msl_library(struct kk_device *device, const char *source)
        mtl_release(library);
        return NULL;
     }
@@ -429,7 +442,7 @@ index 0de5fdc..4c2723a 100644
     return library;
  }
  
-@@ -2059,6 +2094,138 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s)
+@@ -2059,6 +2097,146 @@ kk_compile_program(struct kk_device *dev, struct kk_shader *s)
     return result;
  }
  
@@ -531,7 +544,7 @@ index 0de5fdc..4c2723a 100644
 +kk_compile_enqueue(struct kk_device *dev, struct kk_shader *s)
 +{
 +   mtx_lock(&dev->compile_mtx);
-+   if (!s->compile_queued && !s->compile_done) {
++   if (!s->compile_queued && !s->compile_running && !s->compile_done) {
 +      s->compile_queued = true;
 +      s->compile_next = NULL;
 +      if (dev->compile_tail != NULL)
@@ -552,23 +565,43 @@ index 0de5fdc..4c2723a 100644
 +      return VK_SUCCESS;
 +
 +   mtx_lock(&dev->compile_mtx);
-+   while (!s->compile_done && s->compile_queued)
++   while (!s->compile_done && (s->compile_queued || s->compile_running))
 +      cnd_wait(&dev->compile_cnd, &dev->compile_mtx);
-+   const bool done = s->compile_done;
-+   const VkResult result = s->compile_result;
-+   mtx_unlock(&dev->compile_mtx);
-+
-+   if (done)
++   if (s->compile_done) {
++      const VkResult result = s->compile_result;
++      mtx_unlock(&dev->compile_mtx);
 +      return result;
++   }
 +
-+   /* Never queued, or the pool has no worker: compile it here. */
-+   return kk_compile_program(dev, s);
++   /* Never queued: claim it before unlocking so another first use waits and
++    * destruction knows that this thread still owns the program's handles. */
++   s->compile_running = true;
++   mtx_unlock(&dev->compile_mtx);
++   const VkResult result = kk_compile_program(dev, s);
++   mtx_lock(&dev->compile_mtx);
++   s->compile_result = result;
++   s->compile_done = true;
++   cnd_broadcast(&dev->compile_cnd);
++   mtx_unlock(&dev->compile_mtx);
++   return result;
 +}
 +
  /* Graphics pipeline state the VS of a program holds. */
  static void
  kk_gather_program(struct kk_device *dev,
-@@ -2105,38 +2272,6 @@ kk_minmax_layouts_used(uint32_t minmax_sets, uint32_t set_layout_count,
+@@ -2087,9 +2265,8 @@ kk_gather_program(struct kk_device *dev,
+  * one of those sets' layouts already got a reduction sampler (descriptor
+  * heaps: vkd3d-proton's sampler heap is then bound with every draw; for
+  * pipelines read from a pipeline cache, any set); the program not compiled at
+- * creation is compiled on first use. While Metal compiles the program without
+- * emulation at creation (another thread), the minmax program's MSL is built
+- * (kk_compile_shaders). */
++ * creation is compiled on first use. Both programs' MSL is built at creation,
++ * but only the predicted program is queued for Metal compilation. */
+ static bool
+ kk_minmax_layouts_used(uint32_t minmax_sets, uint32_t set_layout_count,
+                        struct vk_descriptor_set_layout *const *set_layouts)
+@@ -2105,38 +2282,6 @@ kk_minmax_layouts_used(uint32_t minmax_sets, uint32_t set_layout_count,
     return false;
  }
  
@@ -607,7 +640,7 @@ index 0de5fdc..4c2723a 100644
  static VkResult
  kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
                     struct vk_shader_compile_info *infos,
-@@ -2183,18 +2318,6 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+@@ -2183,18 +2328,6 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
     if (s->vk.stage != MESA_SHADER_COMPUTE)
        kk_gather_program(dev, state, shaders, total_shaders);
  
@@ -626,7 +659,7 @@ index 0de5fdc..4c2723a 100644
     if (minmax_sets) {
        struct kk_shader *minmax_shaders[shader_count + 2u];
        bool minmax_generated[shader_count + 2u];
-@@ -2213,12 +2336,13 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
+@@ -2213,12 +2346,17 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
        }
     }
  
@@ -636,17 +669,21 @@ index 0de5fdc..4c2723a 100644
 -         result = job.result;
 -   } else if (result == VK_SUCCESS) {
 -      result = kk_compile_programs(dev, s, minmax_first);
-+   /* Both programs go to the background pool: the ring thread returns instead
-+    * of spending a title's whole shader compilation here, one pipeline at a
-+    * time (kk_compile_pool_init). */
++   /* Keep the unused variant out of the pool: descriptor heaps usually need
++    * minmax first, ordinary sampler layouts need the cheaper plain program. */
 +   if (result == VK_SUCCESS) {
-+      kk_compile_enqueue(dev, s);
-+      if (s->minmax != NULL)
-+         kk_compile_enqueue(dev, s->minmax);
++      const bool minmax_first =
++         s->minmax != NULL &&
++         kk_minmax_layouts_used(minmax_sets, infos[0].set_layout_count,
++                               infos[0].set_layouts);
++      if (minmax_first && KK_DEBUG(MINMAX))
++         mesa_logi("kk: min/max emulating program of a pipeline compiled at "
++                   "creation (a set has a reduction sampler)");
++      kk_compile_enqueue(dev, minmax_first ? s->minmax : s);
     }
  
     /* The VS has the pipeline data now, so free the generated shaders. */
-@@ -2401,11 +2525,14 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+@@ -2401,11 +2539,16 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
           goto fail;
     }
  
@@ -655,18 +692,20 @@ index 0de5fdc..4c2723a 100644
 -   if (info.stage == MESA_SHADER_COMPUTE || info.stage == MESA_SHADER_VERTEX)
 -      result = kk_compile_programs(
 -         dev, shader, p_atomic_read(&dev->reduction_sampler_sets));
-+   /* Both programs go to the background pool; a set that already holds a
-+    * reduction sampler means the emulating program is the one that gets used
-+    * first, but the pool compiles them regardless (kk_compile_pool_init). */
++   /* Without set layouts, predict minmax once any set got a reduction sampler.
++    * The other program is never queued and compiles at its first use. */
 +   if (info.stage == MESA_SHADER_COMPUTE || info.stage == MESA_SHADER_VERTEX) {
-+      kk_compile_enqueue(dev, shader);
-+      if (shader->minmax != NULL)
-+         kk_compile_enqueue(dev, shader->minmax);
++      const bool minmax_first =
++         shader->minmax != NULL && p_atomic_read(&dev->reduction_sampler_sets);
++      if (minmax_first && KK_DEBUG(MINMAX))
++         mesa_logi("kk: min/max emulating program of a pipeline compiled at "
++                   "creation (a set has a reduction sampler)");
++      kk_compile_enqueue(dev, minmax_first ? shader->minmax : shader);
 +   }
  
     if (result != VK_SUCCESS)
        goto fail;
-@@ -2431,60 +2558,70 @@ kk_cmd_bind_compute_shader(struct kk_cmd_buffer *cmd, struct kk_shader *shader)
+@@ -2431,60 +2574,72 @@ kk_cmd_bind_compute_shader(struct kk_cmd_buffer *cmd, struct kk_shader *shader)
   * update-after-bind set may get one after recording, before submission: such
   * sets are recorded for kk_queue_submit, which then re-records the command
   * buffer from its command queue. One-time-submit command buffers have no
@@ -761,7 +800,9 @@ index 0de5fdc..4c2723a 100644
 +       * has no Metal pipeline to bind: report it on the command buffer and let
 +       * the caller drop its draw or dispatch, instead of binding a nil pipeline
 +       * (Metal validation asserts on that). */
-+      if (KK_DEBUG(MINMAX))
++      /* A queued creation compile may still be running: waiting for it is
++       * not a lazy compile of the other program (and must not be logged as one). */
++      if (KK_DEBUG(MINMAX) && !program->compile_queued)
 +         mesa_logi("kk: %s program of a pipeline compiled on first use",
 +                   program != shader ? "min/max emulating" : "plain");
 +      VkResult result = kk_compile_wait(dev, program);
@@ -779,7 +820,7 @@ index 0de5fdc..4c2723a 100644
        }
     }
     return &program->pipeline;
-@@ -2502,6 +2639,13 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
+@@ -2502,6 +2657,13 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
     if (stage != MESA_SHADER_VERTEX)
        return;
  
@@ -794,10 +835,10 @@ index 0de5fdc..4c2723a 100644
     if (cmd->state.gfx.is_depth_stencil_dynamic) {
        /* If we are switching from dynamic to static, we need to clean up
 diff --git a/src/kosmickrisp/vulkan/kk_shader.h b/src/kosmickrisp/vulkan/kk_shader.h
-index e502672..5dea9d6 100644
+index e502672..f051033 100644
 --- a/src/kosmickrisp/vulkan/kk_shader.h
 +++ b/src/kosmickrisp/vulkan/kk_shader.h
-@@ -172,6 +172,15 @@ struct kk_shader {
+@@ -172,6 +172,16 @@ struct kk_shader {
     /* Metal pipelines created, when minmax isn't NULL (one of the two
      * programs is compiled on first use) */
     bool pipeline_ready;
@@ -808,12 +849,13 @@ index e502672..5dea9d6 100644
 +    * destruction wait for compile_done. */
 +   struct kk_shader *compile_next;
 +   bool compile_queued;
++   bool compile_running;
 +   bool compile_done;
 +   VkResult compile_result;
  };
  
  VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
-@@ -179,6 +188,15 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
+@@ -179,6 +189,15 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
  
  extern const struct vk_device_shader_ops kk_device_shader_ops;
  

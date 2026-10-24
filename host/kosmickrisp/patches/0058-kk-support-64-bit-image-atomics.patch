@@ -1,4 +1,4 @@
-From 33af29e9421f5aac2c0f60c75175d23ea22d771a Mon Sep 17 00:00:00 2001
+From 19652c5faa66848ddc587335ab93c8c7ef204cec Mon Sep 17 00:00:00 2001
 From: steamac <steamac@local>
 Date: Wed, 14 Oct 2026 15:00:00 +0200
 Subject: [PATCH] kk: support 64-bit image atomics
@@ -303,7 +303,7 @@ index 74c7c0c..8d7c3a2 100644
     features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
     features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
 diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
-index 784d7fd..9dcee6b 100644
+index b4778fa..918877b 100644
 --- a/src/kosmickrisp/vulkan/kk_physical_device.c
 +++ b/src/kosmickrisp/vulkan/kk_physical_device.c
 @@ -206,6 +206,15 @@ kk_get_device_extensions(const struct kk_instance *instance,
