@@ -76,9 +76,9 @@ impl Port {
             lines.push(String::from_utf8_lossy(&self.rx[..nl]).to_string());
             self.rx.drain(..=nl);
         }
-        // An incomplete line this long is garbage (the longest, fx.pad's `hid-create`, is
-        // under 8.3 KB with a maximal 4 KiB report descriptor).
-        if self.rx.len() > 16 * 1024 {
+        // Profile sets contain all games, not just one title. Bound incomplete input
+        // without cutting off the normal multi-game snapshot at the old HID limit.
+        if self.rx.len() > 1024 * 1024 {
             self.rx.clear();
         }
         lines

@@ -9,16 +9,16 @@ import os
 /// games start and how fast they run on which Mac (the public page docs/games.html).
 ///
 /// GameSessionTracker (VM process, main thread) turns the guest agent's game lifecycle
-/// (`game-start` / `game-mem` / `game-proton` / `game-exit`, games.rs), its focus lines and the
-/// guest's scanout flushes (FrameMeter) into one GameSessionReport per game run: how long it ran
-/// and had focus, whether a window ever appeared, frame rate, memory peaks, the Vulkan driver and
-/// the Mac's chip and memory. GameStatsStore keeps every report on this Mac (Settings > Games
-/// lists them, with the player's optional rating and a per-game sharing switch) and, only while
+/// (`game-start` / `game-mem` / `game-proton` / `game-gfx` / `game-exit`, games.rs), its focus lines
+/// and the guest's scanout flushes (FrameMeter) into one GameSessionReport per game run: how long
+/// it ran and had focus, whether a window ever appeared, frame rate, memory peaks, the graphics
+/// configuration and the Mac's chip and memory. GameStatsStore keeps every report on this Mac
+/// (Settings > Games lists them, with the player's optional rating and a per-game sharing switch) and, only while
 /// Settings `shareGameStats` is on, uploads them to the statistics service (Cloudflare Worker,
 /// services/game-stats). Never sent: names, Steam account, IP address (the service does not
-/// store it), files, anything typed.
+/// store it), files, or text other than sanitized graphics launch settings.
 
-// MARK: - report (schema v1, services/game-stats)
+// MARK: - reports (schema v2; persisted v1 sessions remain readable, services/game-stats)
 
 /// The player's own verdict on a game (Settings > Games), optional.
 enum GameRating: String, Codable, CaseIterable, Identifiable {
@@ -117,7 +117,7 @@ struct GameSessionReport: Codable, Equatable {
         case replaced
     }
 
-    var v = 1
+    var v = 2
     var sid: String
     var install: String
     var launcher: String
@@ -125,6 +125,10 @@ struct GameSessionReport: Codable, Equatable {
     var game: String?
     var mac: GameStatsMac
     var vm: GameStatsVM
+    /// Actual graphics path reported by the guest, nil for an older agent.
+    var gfx: String?
+    /// Sanitized profile environment captured when this session started; nil when empty.
+    var env: String?
     /// A window of the game had the guest's focus at least once.
     var launched: Bool
     var end: End
@@ -137,14 +141,14 @@ struct GameSessionReport: Codable, Equatable {
     var mem: Memory?
 
     enum CodingKeys: String, CodingKey {
-        case v, sid, install, launcher, appid, game, mac, vm, launched, end, runS = "run_s", playS = "play_s",
+        case v, sid, install, launcher, appid, game, mac, vm, gfx, env, launched, end, runS = "run_s", playS = "play_s",
              firstWindowS = "first_window_s", proton, res, fps, mem
     }
 }
 
 /// The player's rating of a game: POST /v1/ratings (`none` clears it on the service).
 struct GameRatingReport: Encodable {
-    var v = 1
+    var v = 2
     var install: String
     var launcher: String
     var appid: Int
@@ -152,6 +156,8 @@ struct GameRatingReport: Encodable {
     var rating: String
     var mac: GameStatsMac
     var vm: GameStatsVM
+    var gfx: String?
+    var env: String?
 }
 
 // MARK: - frame meter
@@ -259,14 +265,23 @@ final class GameSessionTracker {
         let started = Date()
         /// Opened by `game-start` (else by the first focus).
         var fromGameStart: Bool
+        let env: String?
         var firstWindow: Date?
         var playS = 0.0
         var proton: String?
+        var gfx: String?
         var res: String?
         var frames = FrameHistogram()
         var anonPeakKiB = 0
         var guestPeakKiB = 0
         var hostPeak: UInt64 = 0
+
+        init(appid: Int, fromGameStart: Bool) {
+            self.appid = appid
+            self.fromGameStart = fromGameStart
+            let env = GameProfile.sanitizedEnv(LauncherSettings.shared.profile(for: appid).env)
+            self.env = env.isEmpty ? nil : env
+        }
     }
 
     /// The SteamOS build the initramfs announced on hvc0 (`steamac-init: rootfs-… BUILD_ID=…`).
@@ -363,6 +378,8 @@ final class GameSessionTracker {
             live[id] = s
         case .proton(let id, let version):
             live[id]?.proton = String(version.prefix(64))
+        case .gfx(let id, let gfx):
+            live[id]?.gfx = gfx
         case .exit(let id):
             end(id, .exit)
         }
@@ -410,6 +427,7 @@ final class GameSessionTracker {
             game: LauncherSettings.shared.gameName(s.appid), mac: .current,
             vm: GameStatsVM(cpus: options.cpus, memMiB: options.memMiB, driver: options.vulkanDriver.rawValue,
                             wmtr: options.wmtrLibrary != nil, hz: options.refreshRate, steamos: GameSessionTracker.steamosBuild),
+            gfx: s.gfx, env: s.env,
             launched: s.firstWindow != nil, end: end, runS: max(0, Int(Date().timeIntervalSince(s.started).rounded())),
             playS: Int(s.playS.rounded()), firstWindowS: firstWindow, proton: s.proton, res: s.res, fps: s.frames.fps,
             mem: mem.gameMiB == nil && mem.guestMiB == nil && mem.hostMiB == nil ? nil : mem)

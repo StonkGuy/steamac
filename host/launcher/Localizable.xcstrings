@@ -566,6 +566,86 @@
         }
       }
     },
+    "Allow DXMT" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить DXMT"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许 DXMT"
+          }
+        }
+      }
+    },
+    "Allow DXMT (D3D11 on the Mac's Metal)" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить DXMT (D3D11 через Metal на Mac)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许 DXMT（通过 Mac 的 Metal 运行 D3D11）"
+          }
+        }
+      }
+    },
+    "Allow DXMT applies on the next VM start." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешение DXMT действует со следующего запуска ВМ."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“允许 DXMT”将在下次启动虚拟机时生效。"
+          }
+        }
+      }
+    },
+    "Allow DXMT?" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить DXMT?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许 DXMT？"
+          }
+        }
+      }
+    },
+    "Allow DXMT…" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить DXMT…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许 DXMT…"
+          }
+        }
+      }
+    },
     "Always included: app, macOS and library versions, Mac model, GPU, disk sizes and the launcher settings (never passwords or Keychain items)." : {
       "localizations" : {
         "ru" : {
@@ -659,6 +739,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "在窗口右上角显示 Apple 的帧率叠加层：FPS、帧间隔、GPU 时间和内存（Ctrl+Cmd+P，“显示”菜单）。"
+          }
+        }
+      }
+    },
+    "Apply" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Применить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用"
           }
         }
       }
@@ -1593,22 +1689,6 @@
         }
       }
     },
-    "D3D11 on the Mac's Metal (wmtr)" : {
-      "localizations" : {
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "D3D11 на Metal этого Mac (wmtr)"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "在 Mac 的 Metal 上运行 D3D11（wmtr）"
-          }
-        }
-      }
-    },
     "DPI: %lld" : {
       "localizations" : {
         "ru" : {
@@ -1621,6 +1701,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "DPI：%lld"
+          }
+        }
+      }
+    },
+    "DXMT is not in effect while Allow DXMT is off." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DXMT не действует, пока выключено «Разрешить DXMT»."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭“允许 DXMT”时，DXMT 不会生效。"
+          }
+        }
+      }
+    },
+    "Default" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По умолчанию"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "默认"
           }
         }
       }
@@ -1962,18 +2074,18 @@
         }
       }
     },
-    "Each game session: the game's Steam app ID and name, how long it ran and was played, whether its window appeared, frame rate, memory use, Proton version and resolution." : {
+    "Each game session: the game's Steam app ID and name, how long it ran and was played, whether its window appeared, frame rate, memory use, Proton version, resolution, graphics path and sanitized graphics launch settings." : {
       "localizations" : {
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Каждая игровая сессия: Steam App ID и название игры, сколько она работала и сколько в неё играли, появилось ли её окно, частота кадров, расход памяти, версия Proton и разрешение."
+            "value" : "Каждый игровой сеанс: Steam app ID и название игры, длительность работы и игры, появилось ли окно, частота кадров, использование памяти, версия Proton, разрешение, графический путь и отфильтрованные графические параметры запуска."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "每次游戏会话：游戏的 Steam App ID 和名称、运行和游玩时长、窗口是否出现、帧率、内存占用、Proton 版本和分辨率。"
+            "value" : "每次游戏会话：游戏的 Steam 应用 ID 和名称、运行及游玩时长、窗口是否出现、帧率、内存使用、Proton 版本、分辨率、图形路径以及经过筛选的图形启动设置。"
           }
         }
       }
@@ -2510,6 +2622,22 @@
         }
       }
     },
+    "Game profiles" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Профили игр"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "游戏配置"
+          }
+        }
+      }
+    },
     "Games" : {
       "comment" : "Settings tab: game statistics",
       "localizations" : {
@@ -2555,6 +2683,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "当前游戏分区的容量为 %@ GiB。请输入更大的 home 分区容量，单位为 GiB（最大 4096）。此操作不会缩小或删除磁盘。APFS / Mac OS Extended 仅在 SteamOS 写入数据时占用空间；exFAT 会立即占用全部新增空间，因此需要相应的可用空间。"
+          }
+        }
+      }
+    },
+    "Games use DXMT only when their profile selects it. Their D3D11 and D3D10 draw through DXMT directly with the Mac's Metal using Proton 10.0 (x86-64); games with Default graphics stay on Vulkan. DXMT has compatibility gaps, including no D3D11 stream output. Allowing DXMT takes effect on the next VM start. Security risk: while on, programs in SteamOS can run code on the Mac with your user's rights. The executor runs inside the VM process and trusts the guest; a fault can stop the VM." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Игры используют DXMT, только если он выбран в их профиле. D3D11 и D3D10 выводятся через DXMT напрямую в Metal на Mac с Proton 10.0 (x86-64); игры с графикой по умолчанию остаются на Vulkan. У DXMT есть ограничения совместимости, в том числе отсутствие D3D11 stream output. Разрешение DXMT действует со следующего запуска ВМ. Риск безопасности: пока он включён, программы в SteamOS могут выполнять код на Mac с правами вашего пользователя. Исполнитель работает внутри процесса ВМ и доверяет гостю; ошибка может остановить ВМ."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "游戏仅在其配置选择 DXMT 时才会使用它。D3D11 和 D3D10 通过 Proton 10.0（x86-64）的 DXMT 直接使用 Mac 的 Metal 绘制；图形设为“默认”的游戏仍使用 Vulkan。DXMT 存在兼容性限制，包括不支持 D3D11 流输出。允许 DXMT 将在下次启动虚拟机时生效。安全风险：启用后，SteamOS 中的程序可以使用您的用户权限在 Mac 上执行代码。执行器运行于虚拟机进程内并信任客户机；故障可能导致虚拟机停止。"
           }
         }
       }
@@ -2619,6 +2763,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "捕获指针（Ctrl+Cmd+G；Ctrl+Option 释放）"
+          }
+        }
+      }
+    },
+    "Graphics" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Графика"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "图形"
           }
         }
       }
@@ -2990,6 +3150,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "上次会话：窗口未出现"
+          }
+        }
+      }
+    },
+    "Later" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Позже"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "稍后"
+          }
+        }
+      }
+    },
+    "Launch options" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Параметры запуска"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启动选项"
           }
         }
       }
@@ -3451,18 +3643,18 @@
         }
       }
     },
-    "Never: your name, user or computer name, IP address, Steam account, files or anything you type." : {
+    "Never: your name, user or computer name, IP address, Steam account, files or other text you type." : {
       "localizations" : {
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Никогда: ваше имя, имя пользователя или компьютера, IP-адрес, аккаунт Steam, файлы и всё, что вы вводите."
+            "value" : "Никогда: ваше имя, имя пользователя или компьютера, IP-адрес, учётная запись Steam, файлы или другой вводимый вами текст."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "绝不发送：你的姓名、用户名或电脑名称、IP 地址、Steam 账户、文件或你输入的任何内容。"
+            "value" : "绝不发送：您的姓名、用户名或电脑名称、IP 地址、Steam 账号、文件或您输入的其他文本。"
           }
         }
       }
@@ -3624,6 +3816,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此处不可用：%@；将使用 MoltenVK。"
+          }
+        }
+      }
+    },
+    "Not now" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не сейчас"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暂不"
           }
         }
       }
@@ -4189,6 +4397,54 @@
         }
       }
     },
+    "Recommended: %@" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Рекомендуется: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "推荐：%@"
+          }
+        }
+      }
+    },
+    "Recommended: loading…" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Рекомендация: загрузка…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "推荐：正在加载…"
+          }
+        }
+      }
+    },
+    "Recommended: unavailable" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Рекомендация недоступна"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "推荐：暂不可用"
+          }
+        }
+      }
+    },
     "Recorded sessions kept on this Mac: %lld." : {
       "localizations" : {
         "ru" : {
@@ -4478,6 +4734,54 @@
         }
       }
     },
+    "Restart" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Перезапустить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重启"
+          }
+        }
+      }
+    },
+    "Restart Steam" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Перезапустить Steam"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重启 Steam"
+          }
+        }
+      }
+    },
+    "Restart Steam to apply the game profiles?" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Перезапустить Steam, чтобы применить профили игр?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重启 Steam 以应用游戏配置？"
+          }
+        }
+      }
+    },
     "Restart VM" : {
       "localizations" : {
         "ru" : {
@@ -4506,6 +4810,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重启虚拟机以应用"
+          }
+        }
+      }
+    },
+    "Restart the VM with %@ for %@?" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restart the VM with %1$@ for %2$@?"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Перезапустить ВМ с драйвером %@ для %@?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用 %@ 重启虚拟机以运行 %@？"
           }
         }
       }
@@ -6738,6 +7064,22 @@
         }
       }
     },
+    "Use NAME=value words (up to 256 characters). Names must start with VKD3D_, DXVK_, PROTON_, WINE_, MESA_, RADV_, VK_, DXMT_, MTL_ or STEAMAC_; values may contain letters, digits and _.,:;+- only." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Используйте слова ИМЯ=значение (до 256 символов). Имена должны начинаться с VKD3D_, DXVK_, PROTON_, WINE_, MESA_, RADV_, VK_, DXMT_, MTL_ или STEAMAC_; значения могут содержать только латинские буквы, цифры и _.,:;+-."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请使用 NAME=value 格式的词（最多 256 个字符）。名称必须以 VKD3D_、DXVK_、PROTON_、WINE_、MESA_、RADV_、VK_、DXMT_、MTL_ 或 STEAMAC_ 开头；值只能包含英文字母、数字和 _.,:;+-。"
+          }
+        }
+      }
+    },
     "Use the Mac's time zone and clock format" : {
       "localizations" : {
         "ru" : {
@@ -6995,6 +7337,22 @@
         }
       }
     },
+    "Vulkan driver applies on the next start of this game (VM restart required)." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Драйвер Vulkan сменится при следующем запуске игры (нужен перезапуск ВМ)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vulkan 驱动将在下次启动此游戏时生效（需要重启虚拟机）。"
+          }
+        }
+      }
+    },
     "Vulkan on Metal 3 through MoltenVK with steamac's patches (macOS 15 or newer)." : {
       "localizations" : {
         "ru" : {
@@ -7153,22 +7511,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "关闭窗口时"
-          }
-        }
-      }
-    },
-    "When on, installed Windows games without a compatibility tool of their own run on Proton 10.0 (x86-64; Steam downloads it the first time) instead of Proton 11.0 (ARM64), and their D3D11 and D3D10 draw through DXMT directly with the Mac's Metal. D3D12 and Vulkan stay on the usual Vulkan path, emulated a little more. A game installed while Steam runs switches at Steam's next start. Switching off restores Proton's own files and the games' tools. DXMT has compatibility gaps, including no D3D11 stream output. Security risk: while on, programs in SteamOS can run code on the Mac with your user's rights. The executor runs inside the VM process and trusts the guest; a fault can stop the VM." : {
-      "localizations" : {
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Когда включено, установленные Windows-игры без собственного инструмента совместимости запускаются на Proton 10.0 (x86-64; Steam скачает его при первом запуске) вместо Proton 11.0 (ARM64), а их D3D11 и D3D10 рисуют через DXMT прямо на Metal этого Mac. D3D12 и Vulkan остаются на обычном пути Vulkan, с чуть большей эмуляцией. Игра, установленная при работающем Steam, переключится при следующем запуске Steam. Выключение возвращает собственные файлы Proton и инструменты игр. В DXMT есть пробелы совместимости, в том числе нет D3D11 stream output. Риск безопасности: пока включено, программы в SteamOS могут выполнять код на Mac с правами вашего пользователя. Исполнитель работает внутри процесса ВМ и доверяет гостю; сбой может остановить ВМ."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "开启后，没有自选兼容性工具的已安装 Windows 游戏改用 Proton 10.0（x86-64；首次使用时由 Steam 下载）而非 Proton 11.0 (ARM64) 运行，其 D3D11 与 D3D10 经 DXMT 直接用 Mac 的 Metal 绘制。D3D12 与 Vulkan 仍走常规 Vulkan 路径，模拟开销略多。Steam 运行期间安装的游戏会在 Steam 下次启动时切换。关闭后恢复 Proton 自身的文件和游戏的工具。DXMT 存在兼容性缺口，包括不支持 D3D11 流输出。安全风险：开启期间，SteamOS 中的程序可以以你的用户权限在 Mac 上运行代码。执行器运行在虚拟机进程内并信任客户机；其故障可能使虚拟机停止。"
           }
         }
       }

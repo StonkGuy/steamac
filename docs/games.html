@@ -48,6 +48,7 @@
   .stats-table td:first-child a { display: block; max-width: 260px; white-space: normal; font-weight: 600; }
   .stats-summary { display: flex; flex-wrap: wrap; gap: 12px 28px; color: #b6c4d4; }
   .stats-summary strong { color: var(--text); }
+  #recommended-profile { padding: 16px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere; }
   .stats-status { padding: 24px 0; color: var(--muted); }
   .stats-retry { cursor: pointer; margin-left: 12px; }
   .rating-bar { display: flex; height: 8px; min-width: 120px; max-width: 220px; overflow: hidden; border-radius: 5px; background: rgba(255,255,255,.08); margin: 4px 0; }
@@ -107,6 +108,9 @@
     <div id="detail-status" class="stats-status" role="status" aria-live="polite"></div>
     <div id="detail-content" hidden>
       <div id="detail-summary" class="stats-summary"></div>
+      <h3><span lang="en">Recommended profile</span><span lang="ru">Рекомендуемый профиль</span><span lang="zh">推荐配置</span></h3>
+      <div id="recommended-profile" class="stats-summary"></div>
+      <p class="stats-note"><span lang="en">Based on the same My Mac limits: (runs well + half of playable with issues) / all ratings, then launch success and fewer early exits. Requires at least two players. Unknown graphics paths cannot be recommended. Recommendations are not applied automatically.</span><span lang="ru">С теми же ограничениями «Моего Mac»: (работает хорошо + половина оценок «есть проблемы») / все оценки, затем успешные запуски и меньше ранних выходов. Нужно минимум два игрока. Неизвестный графический путь не рекомендуется. Рекомендации не применяются автоматически.</span><span lang="zh">使用相同的「我的 Mac」限制：(运行良好 + 可玩但有问题的一半) / 全部评分，再比较启动成功率和较少的提前退出。至少需要两位玩家。不推荐未知图形路径，不会自动应用推荐配置。</span></p>
       <h3><span lang="en">Mac configurations</span><span lang="ru">Конфигурации Mac</span><span lang="zh">Mac 配置</span></h3>
       <p class="stats-note"><span lang="en">Early exit: a launched game that ended normally in under 60 seconds. This is not necessarily a crash. Memory is the median session peak, in MiB. Ratings count players, not sessions.</span><span lang="ru">Ранний выход: запущенная игра завершилась обычным выходом менее чем за 60 секунд. Это не обязательно сбой. Память — медиана пиков за сеанс, МиБ. Оценки считаются по игрокам, а не сеансам.</span><span lang="zh">提前退出：已启动的游戏在 60 秒内正常结束，并不一定是崩溃。内存为会话峰值的中位数，单位 MiB。评分按玩家统计，而非会话数。</span></p>
       <div class="stats-scroll"><table class="stats-table" id="configs-table"><thead></thead><tbody></tbody></table></div>

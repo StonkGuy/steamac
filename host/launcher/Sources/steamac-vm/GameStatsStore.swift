@@ -210,10 +210,13 @@ final class GameStatsStore: ObservableObject {
         }
         for g in games where wantedRating(g) != g.sentRating {
             let wanted = wantedRating(g)
+            let last = g.sessions.first?.report
             let report = GameRatingReport(
                 install: install, launcher: GameStatsStore.launcherVersion, appid: g.appid, game: g.name,
                 rating: wanted?.rawValue ?? "none", mac: .current,
-                vm: GameStatsVM(driver: LauncherSettings.shared.vulkanDriver.rawValue, wmtr: LauncherSettings.shared.wmtr))
+                vm: GameStatsVM(driver: last?.vm.driver ?? LauncherSettings.shared.vulkanDriver.rawValue,
+                                wmtr: last?.vm.wmtr ?? LauncherSettings.shared.wmtr),
+                gfx: last?.gfx, env: last?.env)
             if let body = try? GameStatsStore.encoder.encode(report) { return .rating(appid: g.appid, rating: wanted, body: body) }
         }
         return nil
@@ -394,11 +397,11 @@ final class GameStatsConsentPanel {
 enum GameStatsText {
     static let summary = String(localized: "How your games run in SteamOS goes to the public game statistics, so every Mac player can see which games start and how fast they run on which Mac.")
     static let whatIsSent = [
-        String(localized: "Each game session: the game's Steam app ID and name, how long it ran and was played, whether its window appeared, frame rate, memory use, Proton version and resolution."),
+        String(localized: "Each game session: the game's Steam app ID and name, how long it ran and was played, whether its window appeared, frame rate, memory use, Proton version, resolution, graphics path and sanitized graphics launch settings."),
         String(localized: "This Mac: model, chip, CPU and GPU cores, memory, macOS version; the VM's size, Vulkan driver and SteamOS build; the launcher version."),
         String(localized: "Your rating of a game, if you set one in Settings > Games."),
         String(localized: "A random install ID (not linked to you or to crash reports) to count Macs."),
-        String(localized: "Never: your name, user or computer name, IP address, Steam account, files or anything you type."),
+        String(localized: "Never: your name, user or computer name, IP address, Steam account, files or other text you type."),
     ]
 }
 

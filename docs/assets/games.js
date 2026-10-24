@@ -11,6 +11,10 @@
     ratings: ["Player ratings", "Оценки игроков", "玩家评分"], well: ["Runs well", "Работает хорошо", "运行良好"],
     issues: ["Playable with issues", "Есть проблемы", "可玩但有问题"], unplayable: ["Unplayable", "Неиграбельно", "无法游玩"], no_start: ["Does not start", "Не запускается", "无法启动"],
     chip: ["Chip", "Чип", "芯片"], ram: ["RAM", "ОЗУ", "内存"], driver: ["Driver", "Драйвер", "驱动"],
+    gfx: ["Graphics path", "Графический путь", "图形路径"], env: ["Launch words", "Параметры запуска", "启动参数"],
+    no_recommendation: ["No profile has enough reports yet.", "Пока недостаточно отчётов для рекомендации.", "暂无报告充足的推荐配置。"],
+    players: ["Players", "Игроки", "玩家"], unknown: ["Unknown", "Неизвестно", "未知"],
+    no_env: ["None", "Нет", "无"], vulkan: ["Vulkan", "Vulkan", "Vulkan"], dxmt: ["DXMT", "DXMT", "DXMT"],
     early: ["Early exit", "Ранний выход", "提前退出"], low1: ["1% low FPS", "1% low FPS", "1% 低帧率"],
     game_mem: ["Game MiB", "Игра МиБ", "游戏 MiB"], host_mem: ["VM process MiB", "Процесс ВМ МиБ", "虚拟机进程 MiB"],
     loading: ["Loading statistics…", "Загрузка статистики…", "正在加载统计…"], empty: ["No sessions or ratings have been shared yet.", "Сеансы и оценки пока не опубликованы.", "暂无分享的会话或评分。"],
@@ -175,9 +179,21 @@
       strong.textContent = `${value} `; item.append(strong, translated(key)); summary.append(item);
     }
     summary.append(ratingBar(game.ratings));
-    headings("configs-table", ["chip", "ram", "driver", "WMTR", "sessions", "installs", "launch_rate", "early", "fps_avg_median", "low1", "game_mem", "host_mem", "play_hours", "ratings"]);
+    const recommendation = $("recommended-profile"); recommendation.replaceChildren();
+    const profile = game.recommended;
+    if (!profile) recommendation.append(translated("no_recommendation"));
+    else {
+      for (const [key, value] of [["driver", profile.driver], ["gfx", translated(profile.gfx)], ["env", profile.env || translated("no_env")], ["players", number(profile.installs)], ["sessions", number(profile.sessions)], ["launch_rate", percent(profile.launch_rate)], ["fps_avg_median", number(profile.fps_avg_median, 1)]]) {
+        const item = document.createElement("span"), strong = document.createElement("strong");
+        item.append(translated(key), ": ");
+        if (value instanceof Node) strong.append(value); else strong.textContent = value;
+        item.append(strong); recommendation.append(item);
+      }
+      const ratings = document.createElement("span"); ratings.append(translated("ratings"), ratingBar(profile.ratings)); recommendation.append(ratings);
+    }
+    headings("configs-table", ["chip", "ram", "driver", "gfx", "env", "WMTR", "sessions", "installs", "launch_rate", "early", "fps_avg_median", "low1", "game_mem", "host_mem", "play_hours", "ratings"]);
     const configs = $("configs-table").querySelector("tbody"); configs.replaceChildren();
-    for (const c of game.configs) row(configs, [c.chip, `${number(c.ram_gb)} GB`, c.driver, translated(c.wmtr ? "yes" : "no"), number(c.sessions), number(c.installs), percent(c.launch_rate), percent(c.early_exit_rate), number(c.fps_avg_median, 1), number(c.fps_low1_median, 1), number(c.game_mib_median), number(c.host_mib_median), number(c.play_hours, 1), ratingBar(c.ratings)]);
+    for (const c of game.configs) row(configs, [c.chip, `${number(c.ram_gb)} GB`, c.driver, translated(c.gfx || "unknown"), c.env || translated("no_env"), translated(c.wmtr ? "yes" : "no"), number(c.sessions), number(c.installs), percent(c.launch_rate), percent(c.early_exit_rate), number(c.fps_avg_median, 1), number(c.fps_low1_median, 1), number(c.game_mib_median), number(c.host_mib_median), number(c.play_hours, 1), ratingBar(c.ratings)]);
     $("detail-status").hidden = true; $("detail-content").hidden = false;
   }
   async function route(scroll = true) {

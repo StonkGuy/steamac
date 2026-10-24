@@ -16,6 +16,7 @@ _loader = importlib.machinery.SourceFileLoader("steam_compat_default", str(SCRIP
 _spec = importlib.util.spec_from_loader(_loader.name, _loader)
 assert _spec is not None
 compat = importlib.util.module_from_spec(_spec)
+sys.dont_write_bytecode = True
 _loader.exec_module(compat)
 
 CONFIG = '''"InstallConfigStore"
@@ -92,7 +93,11 @@ class CompatDefaultTests(unittest.TestCase):
         self.steam = root / "Steam"
         self.config = self.steam / "config/config.vdf"
         self.marker = root / "state/compat-default.json"
-        self.env = dict(os.environ, STEAMAC_STEAM_ROOT=str(self.steam), STEAMAC_GFX_STATE=str(root / "state"))
+        self.profiles = root / ".config/steamac/game-profiles.json"
+        self.profiles.parent.mkdir(parents=True)
+        self.profiles.write_text(json.dumps({"v": 1, "games": {a: {"gfx": "dxmt"} for a in APPS}}))
+        self.env = dict(os.environ, HOME=str(root), XDG_RUNTIME_DIR=str(root / "runtime"),
+                        STEAMAC_STEAM_ROOT=str(self.steam), STEAMAC_GFX_STATE=str(root / "state"))
         (self.steam / "appcache").mkdir(parents=True)
         (self.steam / "appcache/appinfo.vdf").write_bytes(appinfo_v29(APPS))
         (self.steam / "steamapps").mkdir()
@@ -156,6 +161,45 @@ class CompatDefaultTests(unittest.TestCase):
         self.assertFalse(self.config.exists())
         self.assertFalse(self.marker.exists())
 
+
+    def test_profile_subset_removes_old_blanket_entries(self):
+        self.write(CONFIG % USER_TOOL)
+        # An old guest mapped every eligible Windows game. Its existing marker
+        # is the authority for cleaning those entries during the new cutover.
+        self.run_mode("dxmt")
+        self.profiles.write_text(json.dumps({"v": 1, "games": {
+            "894020": {"gfx": "dxmt"}, "3564860": {"gfx": "vulkan"},
+            "883710": {"gfx": "dxmt"}, "270880": {"gfx": "dxmt"},
+        }}))
+        self.run_mode("dxmt")
+        self.assertEqual(self.mapped(), {
+            "894020": compat.OURS,
+            "883710": {"name": "proton_9", "config": "", "priority": "250"},
+        })
+        self.assertEqual(json.loads(self.marker.read_text())["mapped"], ["894020"])
+        self.profiles.write_text('{"v":1,"games":{}}')
+        self.run_mode("dxmt")
+        self.assertEqual(set(self.mapped()), {"883710"})
+        self.assertFalse(self.marker.exists())
+
+    def test_no_profiles_never_blanket_maps(self):
+        self.profiles.unlink()
+        self.write(CONFIG % "")
+        self.run_mode("dxmt")
+        self.assertEqual(self.mapped(), {})
+
+    def test_non_dxmt_boot_never_maps_dxmt_profiles(self):
+        self.write(CONFIG % "")
+        self.run_mode("vulkan")
+        self.assertEqual(self.mapped(), {})
+
+    def test_steam_start_snapshot_wins_over_new_host_edit(self):
+        self.write(CONFIG % "")
+        snapshot = Path(self.env["XDG_RUNTIME_DIR"]) / "steamac/game-profiles.json"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text('{"v":1,"games":{"3564860":{"gfx":"dxmt"}}}')
+        self.run_mode("dxmt")
+        self.assertEqual(self.mapped(), {"3564860": compat.OURS})
 
 if __name__ == "__main__":
     unittest.main()

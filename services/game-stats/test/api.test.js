@@ -24,7 +24,24 @@ async function request(path, body, options = {}) {
   await waitOnExecutionContext(ctx);
   return response;
 }
-beforeAll(() => applyD1Migrations(env.DB, env.TEST_MIGRATIONS));
+let migrated;
+beforeAll(async () => {
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.slice(0, 1));
+  // Exercise 0002 against real v1 data, including the quota and name triggers.
+  for (const rating of [false, true]) {
+    const row = validate({ ...sample(), rating: "well" }, rating);
+    delete row.gfx; delete row.env;
+    await env.DB.prepare(`INSERT INTO ${rating ? "ratings" : "sessions"} (${Object.keys(row).join(",")}) VALUES (${Object.keys(row).map(() => "?").join(",")})`).bind(...Object.values(row)).run();
+  }
+  const quota = await env.DB.prepare("SELECT sum(requests) AS n FROM daily_usage").first("n");
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS.slice(1));
+  migrated = {
+    session: await env.DB.prepare("SELECT v, gfx, env FROM sessions").first(),
+    rating: await env.DB.prepare("SELECT v, gfx, env FROM ratings").first(),
+    quotaBefore: quota, quotaAfter: await env.DB.prepare("SELECT sum(requests) AS n FROM daily_usage").first("n"),
+    game: await env.DB.prepare("SELECT game FROM game_names").first("game"),
+  };
+});
 beforeEach(async () => {
   host++;
   // Delete ratings before resetting the quota because clearing is itself a write.
@@ -51,7 +68,7 @@ describe("schema validation", () => {
     expect(row).not.toHaveProperty("extra");
   });
   it.each([
-    ["schema", (b) => { b.v = 2; }], ["UUID", (b) => { b.sid = "bad"; }],
+    ["schema", (b) => { b.v = 3; }], ["UUID", (b) => { b.sid = "bad"; }],
     ["appid zero", (b) => { b.appid = 0; }], ["non-Steam shortcut appid", (b) => { b.appid = 3103058971; }],
     ["boolean type", (b) => { b.launched = 1; }], ["driver", (b) => { b.vm.driver = "other"; }],
     ["end", (b) => { b.end = "crash"; }], ["duration", (b) => { b.run_s = 604801; }],
@@ -283,4 +300,154 @@ it("separates hardware caches and normalizes parameter order and leading zeroes"
   expect(detail.sessions).toBe(2);
   const detailUnfiltered = await (await request("/v1/games/1091500")).json();
   expect(detailUnfiltered.sessions).toBe(4);
+});
+
+describe("per-game profile statistics", () => {
+  it("preserves v1 data, names and quotas while applying 0002", () => {
+    expect(migrated).toEqual({
+      session: { v: 1, gfx: null, env: null }, rating: { v: 1, gfx: null, env: null },
+      quotaBefore: 2, quotaAfter: 2, game: "Cyberpunk 2077",
+    });
+  });
+  it("accepts v2 for both reports and canonicalizes safe assignments", async () => {
+    const body = sample({ v: 2, gfx: "dxmt", env: "WINE_A=old DXVK_A=1 WINE_A=new VK_= MTL_0=.,:;+-" });
+    for (const rating of [false, true]) {
+      expect((await request(rating ? "/v1/ratings" : "/v1/sessions", { ...body, rating: "well" })).status).toBe(rating ? 200 : 201);
+      expect(await env.DB.prepare(`SELECT v, gfx, env FROM ${rating ? "ratings" : "sessions"}`).first()).toEqual({
+        v: 2, gfx: "dxmt", env: "DXVK_A=1 MTL_0=.,:;+- VK_= WINE_A=new",
+      });
+    }
+    const names = ["VKD3D", "DXVK", "PROTON", "WINE", "MESA", "RADV", "VK", "DXMT", "MTL", "STEAMAC"];
+    expect(validate(sample({ v: 2, env: names.map((name) => `${name}_A=1`).join(" ") })).env.split(" ")).toHaveLength(names.length);
+    expect(validate(sample({ v: 2, env: "" }))).toMatchObject({ gfx: null, env: null });
+    expect(validate(sample({ v: 2, env: `WINE_A=${"x".repeat(249)}` })).env).toHaveLength(256);
+  });
+  it.each([
+    ["gfx", null], ["gfx", "default"], ["gfx", "DXMT"], ["gfx", 1],
+    ["env", null], ["env", 1], ["env", " WINE_A=1"], ["env", "WINE_A=1 "], ["env", "WINE_A=1  DXVK_A=2"],
+    ["env", "WINE_A=1\tDXVK_A=2"], ["env", "WINE_A=1\n"], ["env", "HOME=x"], ["env", "WINE=1"],
+    ["env", "WINE_lower=1"], ["env", "WINE_A"], ["env", "WINE_A=a=b"], ["env", "WINE_A=$HOME"],
+    ["env", "WINE_A='x'"], ["env", "WINE_A=/tmp/x"], ["env", "WINE_A=hello world"], ["env", "WINE_A=你好"],
+    ["env", `WINE_A=${"x".repeat(250)}`],
+  ])("rejects v2 %s=%j for sessions and ratings", async (key, value) => {
+    const body = sample({ v: 2, [key]: value });
+    expect((await request("/v1/sessions", body)).status).toBe(400);
+    expect((await request("/v1/ratings", { ...body, rating: "well" })).status).toBe(400);
+  });
+  it("keeps v1 profiles null and maps only legacy non-wmtr reports to Vulkan", async () => {
+    for (const wmtr of [false, true]) {
+      const body = sample({ gfx: "dxmt", env: "HOME=ignored" }); body.vm.wmtr = wmtr;
+      expect((await request("/v1/sessions", body)).status).toBe(201);
+      expect((await request("/v1/ratings", { ...body, rating: "well" })).status).toBe(200);
+    }
+    expect((await env.DB.prepare("SELECT gfx, env FROM sessions").all()).results).toEqual([{ gfx: null, env: null }, { gfx: null, env: null }]);
+    const game = await (await request("/v1/games/1091500")).json();
+    expect(game.configs).toHaveLength(2);
+    expect(game.configs.find((c) => !c.wmtr)).toMatchObject({ gfx: "vulkan", env: null, sessions: 1, ratings: { well: 1 } });
+    expect(game.configs.find((c) => c.wmtr)).toMatchObject({ gfx: null, env: null, sessions: 1, ratings: { well: 1 } });
+    expect(game.recommended).toBeNull();
+  });
+  it("groups by chip, RAM, driver, effective gfx and canonical env, not wmtr", async () => {
+    for (const [gfx, envWords, wmtr, chip, ram, driver] of [
+      ["vulkan", "WINE_A=1 DXVK_A=2", false, "Apple M3 Max", 64, "kosmickrisp"],
+      ["vulkan", "DXVK_A=2 WINE_A=1", true, "Apple M3 Max", 64, "kosmickrisp"],
+      ["dxmt", "WINE_A=1 DXVK_A=2", true, "Apple M3 Max", 64, "kosmickrisp"],
+      ["vulkan", "WINE_A=2", false, "Apple M3 Max", 64, "kosmickrisp"],
+      ["vulkan", "WINE_A=2", false, "Apple M1", 64, "kosmickrisp"],
+      ["vulkan", "WINE_A=2", false, "Apple M3 Max", 32, "kosmickrisp"],
+      ["vulkan", "WINE_A=2", false, "Apple M3 Max", 64, "moltenvk"],
+    ]) {
+      const body = sample({ v: 2, gfx, env: envWords }); Object.assign(body.mac, { chip, ram_gb: ram }); Object.assign(body.vm, { driver, wmtr });
+      expect((await request("/v1/sessions", body)).status).toBe(201);
+      expect((await request("/v1/ratings", { ...body, rating: "well" })).status).toBe(200);
+    }
+    const game = await (await request("/v1/games/1091500")).json();
+    expect(game.configs).toHaveLength(6);
+    expect(game.configs.find((c) => c.sessions === 2)).toMatchObject({ gfx: "vulkan", env: "DXVK_A=2 WINE_A=1", wmtr: true, ratings: { well: 2 } });
+  });
+  async function reports({ gfx = "vulkan", driver = "kosmickrisp", envWords = "", ratings = ["well", "well"], session = true, launched = true, early = false, ram = 64, chips = ["Apple M1", "Apple M3 Max"], installs } = {}) {
+    for (const [index, rating] of ratings.entries()) {
+      const body = sample({ v: 2, gfx, env: envWords, launched, ...(installs ? { install: installs[index] } : {}) });
+      body.vm.driver = driver; Object.assign(body.mac, { chip: chips[index % chips.length], ram_gb: ram });
+      if (early) Object.assign(body, { run_s: 30, play_s: 20, first_window_s: 1 });
+      body.fps.avg = 20 + index * 20;
+      if (session) expect((await request("/v1/sessions", body)).status).toBe(201);
+      if (rating) expect((await request("/v1/ratings", { ...body, rating })).status).toBe(200);
+    }
+  }
+  it("ranks weighted ratings across chips and returns exactly the recommendation fields", async () => {
+    await reports({ gfx: "dxmt", ratings: ["well", "no_start"] });
+    await reports({ gfx: "vulkan", envWords: "WINE_A=1", ratings: ["well", "issues"] });
+    const game = await (await request("/v1/games/1091500")).json();
+    expect(game.recommended).toEqual({
+      driver: "kosmickrisp", gfx: "vulkan", env: "WINE_A=1", installs: 2, sessions: 2,
+      ratings: { well: 1, issues: 1, unplayable: 0, no_start: 0 }, fps_avg_median: 30, launch_rate: 1,
+    });
+  });
+  it("requires two distinct installs across sessions or ratings, not two reports", async () => {
+    const install = crypto.randomUUID();
+    await reports({ installs: [install, install], ratings: ["well", "well"] });
+    const first = await (await request("/v1/games/1091500")).json();
+    expect(first.recommended).toBeNull();
+    await reports({ session: false, ratings: ["issues"] });
+    host++;
+    const second = await (await request("/v1/games/1091500")).json();
+    expect(second.recommended).toMatchObject({ installs: 2, sessions: 2, ratings: { well: 1, issues: 1 } });
+  });
+  it("allows rating-only and session-only recommendations", async () => {
+    await reports({ session: false });
+    let game = await (await request("/v1/games/1091500")).json();
+    expect(game.recommended).toMatchObject({ installs: 2, sessions: 0, launch_rate: null, fps_avg_median: null });
+    await reports({ gfx: "dxmt", ratings: [null, null] });
+    await env.DB.prepare("DELETE FROM ratings").run(); host++;
+    game = await (await request("/v1/games/1091500")).json();
+    expect(game.recommended).toMatchObject({ gfx: "dxmt", installs: 2, sessions: 2, ratings: { well: 0, issues: 0, unplayable: 0, no_start: 0 } });
+  });
+  it("breaks score ties by launch success before early exits", async () => {
+    await reports({ gfx: "dxmt", launched: false });
+    await reports({ gfx: "vulkan", early: true });
+    expect((await (await request("/v1/games/1091500")).json()).recommended.gfx).toBe("vulkan");
+  });
+  it("breaks equal scores and launch rates by fewer early exits", async () => {
+    await reports({ gfx: "dxmt", early: true });
+    await reports({ gfx: "vulkan" });
+    expect((await (await request("/v1/games/1091500")).json()).recommended.gfx).toBe("vulkan");
+  });
+  it("puts missing rates last and breaks complete ties deterministically", async () => {
+    await reports({ gfx: "dxmt", session: false });
+    await reports({ gfx: "vulkan" });
+    expect((await (await request("/v1/games/1091500")).json()).recommended.gfx).toBe("vulkan");
+    await reports({ gfx: "dxmt" }); host++;
+    expect((await (await request("/v1/games/1091500")).json()).recommended.gfx).toBe("dxmt");
+  });
+  it("never recommends unknown graphics even with a better score", async () => {
+    for (let i = 0; i < 2; i++) {
+      const body = sample(); body.vm.wmtr = true;
+      expect((await request("/v1/ratings", { ...body, rating: "well" })).status).toBe(200);
+    }
+    expect((await (await request("/v1/games/1091500")).json()).recommended).toBeNull();
+    await reports({ ratings: ["issues", "issues"] }); host++;
+    expect((await (await request("/v1/games/1091500")).json()).recommended.gfx).toBe("vulkan");
+  });
+  it("applies the same My Mac scope to recommendation scores and install thresholds", async () => {
+    await reports({ gfx: "dxmt", ram: 64 });
+    await reports({ gfx: "vulkan", ram: 16, ratings: ["issues", "issues"] });
+    expect((await (await request("/v1/games/1091500")).json()).recommended.gfx).toBe("dxmt");
+    expect((await (await request("/v1/games/1091500?max_ram_gb=16")).json()).recommended.gfx).toBe("vulkan");
+    await env.DB.prepare("UPDATE sessions SET mac_ram_gb = 64 WHERE gfx = 'vulkan' AND mac_chip = 'Apple M1'").run();
+    await env.DB.prepare("UPDATE ratings SET mac_ram_gb = 64 WHERE gfx = 'vulkan' AND mac_chip = 'Apple M1'").run(); host++;
+    expect((await (await request("/v1/games/1091500?max_ram_gb=16")).json()).recommended).toBeNull();
+  });
+  it("separates profile responses from v3 aggregate caches for list and detail", async () => {
+    await reports();
+    for (const path of ["/v1/games", "/v1/games/1091500"]) {
+      await caches.default.put(new Request(`https://case${host}.example${path}?aggregates=3`),
+        Response.json({ stale: true }, { headers: { "Cache-Control": "public, max-age=300" } }));
+      const result = await (await request(path)).json();
+      expect(result).not.toHaveProperty("stale");
+      const cached = await caches.default.match(new Request(`https://case${host}.example${path}?aggregates=4`));
+      expect(cached).toBeDefined();
+      if (path.endsWith("1091500")) expect(result.recommended).not.toBeNull();
+    }
+  });
 });

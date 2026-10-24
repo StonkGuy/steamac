@@ -31,13 +31,16 @@
 //!                                 memory and MemTotal - MemAvailable, both in KiB
 //!   game-proton <appid> <version>  once per run when compatdata version is readable:
 //!                                 first token of the first line, printable ASCII, <= 64 chars
+//!   game-gfx <appid> dxmt|vulkan  immediately after game-proton, from that Proton's DXMT marker
+//!   profiles-ok <sha256> applied|pending  exact received JSON digest; pending needs a Steam restart
 //!   game-exit <appid>             last Steam scope disappeared (games.rs);
-//!                                 app ids 0 and 769 are excluded from all four lines
+//!                                 app ids 0 and 769 are excluded from per-game statistics
 //!
 //! Host -> guest (same port): `collect-logs <id>`, served at any point of the
 //! lifecycle below (worker thread; the bundle goes out from the main loop);
 //! `freeze-game <appid>` / `thaw-game` / `still-background` (freeze.rs: pause
-//! the focused game while the launcher is in the background).
+//! the focused game while the launcher is in the background); `profiles <base64-json>`,
+//! `launch <appid>`, `restart-steam` (profiles.rs: serialized background worker).
 //!
 //! Lifecycle
 //!   1. port missing (older launcher) -> exit 0 quietly.
@@ -104,6 +107,7 @@ mod ui;
 mod uhid;
 mod freeze;
 mod games;
+mod profiles;
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
@@ -315,12 +319,13 @@ fn ready_marker() -> String {
 
 /// Host -> guest requests on the port: `<command> [args]`, one per line,
 /// never blocking (each handler only starts work or answers right away).
-fn serve_host(port: &mut Port, collector: &mut collect::Collector, freezer: &mut freeze::Freezer, focus: &focus::Focus) {
+fn serve_host(port: &mut Port, collector: &mut collect::Collector, freezer: &mut freeze::Freezer, focus: &focus::Focus, profiles: &profiles::Requests) {
     for line in port.read_lines() {
         let line = line.trim();
         let (cmd, arg) = line.split_once(' ').map_or((line, ""), |(c, a)| (c, a.trim()));
         match cmd {
             "collect-logs" => collector.request(arg, port),
+            "profiles" | "launch" | "restart-steam" => profiles.request(cmd, arg),
             "freeze-game" => match arg.parse::<u32>() {
                 // Only the game that has the focus (the host may be a step behind).
                 Ok(id) if focus.game() == Some(id) => freezer.freeze(id),
@@ -335,6 +340,7 @@ fn serve_host(port: &mut Port, collector: &mut collect::Collector, freezer: &mut
     }
     freezer.pump(focus.game());
     freezer.send_replies(port);
+    profiles.pump(port);
 }
 
 /// Boot progress until `ready` (or give-up / SIGTERM); focus changes are
@@ -347,6 +353,7 @@ fn report_boot(
     freezer: &mut freeze::Freezer,
     games: &mut games::Games,
     names: &mut appname::Names,
+    profiles: &profiles::Requests,
 ) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/steamos".into());
     let log_path = std::env::var("FX_PROGRESS_STEAM_LOG")
@@ -403,7 +410,7 @@ fn report_boot(
             }
         }
         rep.port.flush();
-        serve_host(&mut rep.port, collector, freezer, focus);
+        serve_host(&mut rep.port, collector, freezer, focus, profiles);
         collector.pump(&mut rep.port);
         focus.pump(&mut rep.port, false, names);
         if let Some(hb) = heartbeat {
@@ -458,6 +465,7 @@ fn main() {
     let mut collector = collect::Collector::new();
     let mut freezer = freeze::Freezer::new();
     let mut games = games::Games::new();
+    let profiles = profiles::Requests::new();
     let mut names = appname::Names::new(appname::steam_root(),
         format!("/tmp/.fx-progress-named-{}", unsafe { libc::getuid() }).into());
     let force = std::env::var("FX_PROGRESS_FORCE").map_or(false, |v| v == "1");
@@ -471,7 +479,7 @@ fn main() {
         rep.stage(Stage::Session, 100, "Session started");
         desktop_ready_pending = true;
     } else {
-        report_boot(&mut rep, &mut focus, heartbeat.as_ref(), &mut collector, &mut freezer, &mut games, &mut names);
+        report_boot(&mut rep, &mut focus, heartbeat.as_ref(), &mut collector, &mut freezer, &mut games, &mut names, &profiles);
     }
     // Once after `ready` (or at agent start on a later session): current focus.
     focus.pump(&mut rep.port, true, &mut names);
@@ -492,7 +500,7 @@ fn main() {
         libc::sigprocmask(libc::SIG_BLOCK, &block, &mut old);
         while !terminated() {
             rep.port.flush();
-            serve_host(&mut rep.port, &mut collector, &mut freezer, &focus);
+            serve_host(&mut rep.port, &mut collector, &mut freezer, &focus, &profiles);
             collector.pump(&mut rep.port);
             focus.pump(&mut rep.port, false, &mut names);
             if desktop_ready_pending && focus.desktop_shown() {
@@ -511,6 +519,7 @@ fn main() {
                 libc::pollfd { fd: heartbeat.as_ref().map_or(-1, |h| h.fd()), events: libc::POLLIN, revents: 0 },
                 libc::pollfd { fd: rep.port.read_fd().unwrap_or(-1), events: libc::POLLIN, revents: 0 },
                 libc::pollfd { fd: collector.wake_fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: profiles.wake_fd(), events: libc::POLLIN, revents: 0 },
             ];
             let wait_ms: i64 = if rep.port.has_pending() {
                 TICK_MS as i64

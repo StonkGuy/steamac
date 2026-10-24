@@ -25,11 +25,15 @@ An observed user edit wins: the value we last wrote is remembered per account in
 ~/.config/steamac/title-defaults.json; if a title's LaunchOptions changed since, this script leaves
 it alone from then on (the marker file itself is the only state it keeps). Launch options that
 already carry the words are recorded as ours too, so removing them later is an edit that wins.
+
+Profile env words override TITLES; profile removal restores the prior launch options
+(or the built-in default). Each Steam start uses steam-profiles-wait's snapshot.
 """
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -207,10 +211,33 @@ def load_state(path):
         return {}
 
 
+def profile_titles():
+    persisted = Path.home() / ".config/steamac/game-profiles.json"
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/" + str(os.getuid())) / "steamac/game-profiles.json"
+    path = runtime if runtime.exists() else persisted
+    if not path.exists() or not path.stat().st_size:
+        return {}
+    profiles = json.loads(path.read_text())
+    result = {}
+    for appid, profile in profiles["games"].items():
+        if "env" not in profile:
+            continue
+        words = []
+        for word in profile["env"].split():
+            name, value = word.split("=", 1)
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError("invalid profile environment name")
+            # Values are data, not shell code (including telemetry's allowed ';').
+            words.append(name + "=" + (shlex.quote(value) if value else ""))
+        result[appid] = (tuple(words), ())
+    return result
+
+
 def main():
     home = Path.home()
     marker_path = home / ".config/steamac/title-defaults.json"
     state = load_state(marker_path)
+    sources = dict(TITLES, **profile_titles())
     for config in sorted((home / ".local/share/Steam/userdata").glob("[0-9]*/config/localconfig.vdf")):
         account = config.parent.parent.name
         if not account.isdecimal():
@@ -220,7 +247,8 @@ def main():
             values, _ = vdf_entries(text)
             accounts = state.setdefault("accounts", {})
             written, pending = {}, {}
-            for appid, (needed, needs) in TITLES.items():
+            for appid in sorted(set(sources) | set(accounts.get(account, {}))):
+                needed, needs = sources.get(appid, ((), ()))
                 path = (*VDF_PATH, appid, "LaunchOptions")
                 stored = values.get(tuple(part.lower() for part in path))
                 current = stored[0] if stored else None
@@ -232,26 +260,29 @@ def main():
                         print("steam-title-defaults: keeping " + appid + " launch options (user edit)", file=sys.stderr)
                     continue
                 owned = "last" in marker and marker.get("active", True)
-                wanted = want_launch_options(current, needed)
+                wanted = want_launch_options(current, needed) if needed else None
                 if not owned and wanted is None:
-                    if not current or "%command%" not in current:
+                    if not needed or not current or "%command%" not in current:
                         continue
                     # Hand-added defaults become ours, too: removing them later is a user edit.
                     owned = True
-                backed = device_backs(needs)
+                backed = device_backs(needs) if needed else False
                 if backed is None:
                     # A failed probe is not evidence that the driver lost a feature.
                     continue
                 if owned:
-                    previous = marker.get("previous", without_defaults(current, needed))
+                    previous = marker.get("previous", without_defaults(current, marker.get("words", needed)))
                     if not backed:
                         wanted = previous
                         next_marker = dict(marker, previous=previous, last=wanted, active=False)
                     else:
-                        wanted = wanted if wanted is not None else current
-                        next_marker = dict(marker, previous=previous, last=wanted, active=True)
+                        # Rebuild from the baseline, not our old words: a changed
+                        # profile replaces its assignments instead of accumulating them.
+                        wanted = want_launch_options(previous, needed)
+                        wanted = previous if wanted is None else wanted
+                        next_marker = dict(marker, previous=previous, last=wanted, active=True, words=needed)
                 elif backed:
-                    next_marker = dict(marker, previous=current, last=wanted, active=True)
+                    next_marker = dict(marker, previous=current, last=wanted, active=True, words=needed)
                 else:
                     continue
                 if wanted != current:

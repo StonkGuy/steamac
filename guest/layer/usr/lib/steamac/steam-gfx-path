@@ -10,8 +10,8 @@
 #   vulkan  (or no steamac.gfx=) restores Proton's own files byte for byte and removes everything added,
 #           also the winemetal.dll placeholder in prefixes; Proton puts its DXVK back into each prefix.
 # The DXMT files ship in the steamac layer ($PAYLOAD, read-only). DXMT's dlls are x86-64, so only an x86-64
-# Proton can use them: before Steam starts, steam-compat-default sets each installed Windows game without a
-# tool of its own to Proton 10.0 while dxmt is on and removes those entries for vulkan (see that script).
+# Proton can use them: before Steam starts, steam-compat-default sets only installed Windows games
+# with a DXMT profile and no tool of their own to Proton 10.0 (see that script).
 # Idempotent; run as an ExecStartPre of steam.service (Steam is not running then) and, with --watch, while
 # the session runs (Steam downloading Proton 10.0 is followed there).
 # Usage: steam-gfx-path [--watch]

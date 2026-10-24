@@ -292,6 +292,10 @@ final class LauncherSettings: ObservableObject {
     /// Next-start values this VM booted with (Restart VM to apply when they differ).
     private var bootSnapshot: [Key: String] = [:]
     private var loading = false
+    @Published private(set) var profiles: [Int: GameProfile] = [:]
+    /// The effective boot driver, including a one-shot profile restart override.
+    var bootedDriver: VulkanDriver?
+    var bootedDXMT: Bool?
 
     // General
     @Published var showOverlay = true { didSet { save(.showOverlay, showOverlay) } }
@@ -548,7 +552,7 @@ final class LauncherSettings: ObservableObject {
     /// Restore every preference to its default (per-game entries included).
     func resetAll() {
         for k in defaults.dictionaryRepresentation().keys
-        where Key(rawValue: k) != nil || k.hasPrefix("autoCapture.") {
+        where Key(rawValue: k) != nil || k.hasPrefix("autoCapture.") || k.hasPrefix("profile.") {
             defaults.removeObject(forKey: k)
         }
         let fresh = LauncherSettings(blank: ())
@@ -623,6 +627,19 @@ final class LauncherSettings: ObservableObject {
             || now[.windowSizePreset] != bootSnapshot[.windowSizePreset]
     }
 
+    // MARK: per-game profiles
+
+    func profile(for appid: Int) -> GameProfile { profiles[appid] ?? GameProfile() }
+
+    func setProfile(_ profile: GameProfile, for appid: Int) {
+        guard appid > 0 else { return }
+        var value = profile
+        value.env = GameProfile.sanitizedEnv(value.env)
+        if value.isDefault { defaults.removeObject(forKey: "profile.\(appid)") }
+        else if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: "profile.\(appid)") }
+        reloadGames()
+    }
+
     // MARK: mouse auto-capture
 
     /// Global auto-capture in games for this run (`--auto-capture` wins over the saved value).
@@ -661,6 +678,7 @@ final class LauncherSettings: ObservableObject {
     /// Forget a game (name and per-game setting).
     func removeGame(_ appid: Int) {
         defaults.removeObject(forKey: "autoCapture.\(appid)")
+        defaults.removeObject(forKey: "profile.\(appid)")
         var names = defaults.dictionary(forKey: Key.gameNames.rawValue) as? [String: String] ?? [:]
         names.removeValue(forKey: String(appid))
         defaults.set(names, forKey: Key.gameNames.rawValue)
@@ -673,6 +691,13 @@ final class LauncherSettings: ObservableObject {
 
     private func reloadGames() {
         let names = defaults.dictionary(forKey: Key.gameNames.rawValue) as? [String: String] ?? [:]
+        var loadedProfiles: [Int: GameProfile] = [:]
+        for (key, value) in defaults.dictionaryRepresentation() where key.hasPrefix("profile.") {
+            guard let id = Int(key.dropFirst("profile.".count)), id > 0, let data = value as? Data,
+                  let profile = try? JSONDecoder().decode(GameProfile.self, from: data) else { continue }
+            loadedProfiles[id] = profile
+        }
+        if loadedProfiles != profiles { profiles = loadedProfiles }
         var byId: [Int: Game] = [:]
         for (k, v) in names { if let id = Int(k) { byId[id] = Game(appid: id, name: v, autoCapture: nil) } }
         for (k, v) in defaults.dictionaryRepresentation() where k.hasPrefix("autoCapture.") {

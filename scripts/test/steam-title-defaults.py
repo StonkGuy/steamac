@@ -36,7 +36,8 @@ class TitleDefaultsTests(unittest.TestCase):
         probe.write_text('#!' + sys.executable + '\nfrom pathlib import Path\nimport os, sys\nhome = Path(os.environ["HOME"])\nwith (home / "calls").open("a") as out: out.write("probe\\n")\nmode = (home / "mode").read_text()\nif mode == "fail": sys.exit(1)\nprint("GPU0:\\n driverID = DRIVER_ID_MESA_LLVMPIPE\\n shaderBufferInt64Atomics = true\\n shaderImageInt64Atomics = true")\nprint("GPU1:\\n driverID = DRIVER_ID_MESA_VENUS\\n shaderBufferInt64Atomics = " + mode + "\\n shaderImageInt64Atomics = " + mode)\n')
         probe.chmod(0o755)
         (self.home / "mode").write_text("true")
-        self.env = dict(os.environ, HOME=str(self.home), PATH=str(self.bin) + os.pathsep + os.environ["PATH"])
+        self.env = dict(os.environ, HOME=str(self.home), XDG_RUNTIME_DIR=str(self.home / "runtime"),
+                        PATH=str(self.bin) + os.pathsep + os.environ["PATH"])
         self.set_options(None)
 
     def set_options(self, value):
@@ -162,6 +163,78 @@ class TitleDefaultsTests(unittest.TestCase):
             titles.main()
         self.assertIsNone(self.options())
         self.assertNotIn("last", self.state())
+
+    def profiles(self, games):
+        path = self.home / ".config/steamac/game-profiles.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"v": 1, "games": games}))
+
+    def app_options(self, appid):
+        values, _ = titles.vdf_entries(self.config.read_text())
+        stored = values.get(tuple(part.lower() for part in (*titles.VDF_PATH, appid, "LaunchOptions")))
+        return stored[0] if stored else None
+
+    def test_profile_apply_change_remove_restores_baseline(self):
+        key = (*titles.VDF_PATH, "570", "LaunchOptions")
+        baseline = "USER=1 %command% --custom"
+        self.config.write_text(titles.vdf_set(self.config.read_text(), key, baseline))
+        self.profiles({"570": {"env": "PROTON_LOG=1 DXVK_HUD=fps"}})
+        self.run_script()
+        self.assertEqual(self.app_options("570"), "PROTON_LOG=1 DXVK_HUD=fps " + baseline)
+        self.profiles({"570": {"env": "PROTON_LOG=0"}})
+        self.run_script()
+        self.assertEqual(self.app_options("570"), "PROTON_LOG=0 " + baseline)
+        self.profiles({})
+        self.run_script()
+        self.assertEqual(self.app_options("570"), baseline)
+        self.run_script()
+        self.assertEqual(self.app_options("570"), baseline)
+
+    def test_profile_removal_restores_absent_value(self):
+        self.profiles({"570": {"env": "PROTON_LOG=1"}})
+        self.run_script()
+        self.assertEqual(self.app_options("570"), "PROTON_LOG=1 %command%")
+        self.profiles({})
+        self.run_script()
+        self.assertIsNone(self.app_options("570"))
+
+    def test_profile_user_edit_wins_after_change_and_removal(self):
+        self.profiles({"570": {"env": "PROTON_LOG=1"}})
+        self.run_script()
+        key = (*titles.VDF_PATH, "570", "LaunchOptions")
+        self.config.write_text(titles.vdf_set(self.config.read_text(), key, "USER=1 %command%"))
+        self.profiles({"570": {"env": "PROTON_LOG=0"}})
+        self.run_script()
+        self.assertEqual(self.app_options("570"), "USER=1 %command%")
+        self.profiles({})
+        self.run_script()
+        self.assertEqual(self.app_options("570"), "USER=1 %command%")
+
+    def test_profile_overrides_builtin_without_feature_gate(self):
+        (self.home / "mode").write_text("false")
+        self.profiles({"2054970": {"env": "PROTON_LOG=1"}})
+        self.run_script()
+        self.assertEqual(self.options(), "PROTON_LOG=1 %command%")
+        self.assertFalse((self.home / "calls").exists())
+        self.profiles({})
+        self.run_script()
+        self.assertIsNone(self.options())
+        (self.home / "mode").write_text("true")
+        self.run_script()
+        self.assertEqual(self.options(), WORDS + " %command%")
+
+    def test_profile_values_are_shell_data(self):
+        self.profiles({"570": {"env": "VKD3D_CONFIG=foo;bar PROTON_LOG="}})
+        self.run_script()
+        self.assertEqual(self.app_options("570"), "VKD3D_CONFIG='foo;bar' PROTON_LOG= %command%")
+
+    def test_steam_start_snapshot_wins_over_new_host_edit(self):
+        self.profiles({"570": {"env": "PROTON_LOG=0"}})
+        snapshot = self.home / "runtime/steamac/game-profiles.json"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text(json.dumps({"v": 1, "games": {"570": {"env": "PROTON_LOG=1"}}}))
+        self.run_script()
+        self.assertEqual(self.app_options("570"), "PROTON_LOG=1 %command%")
 
 
 if __name__ == "__main__":

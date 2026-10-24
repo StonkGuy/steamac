@@ -98,6 +98,7 @@ API；ROV 需要把 Metal 的 raster order groups 映射为 `VK_EXT_fragment_sha
 启动 Steam 时这些功能消失（驱动切换为 MoltenVK、磁盘移到 M1），则撤回并恢复原来的启动选项；探测失败
 时不做任何改动。已有的值只在前面追加、不会被替换，不含 `%command%` 的值不受影响，用户之后在 Steam
 中的修改优先（标记 `~/.config/steamac/title-defaults.json`，其中也保存原值）。
+配置中的 `env` 会覆盖内置条目；没有此覆盖时，DD2 仍保留受 Venus 功能检查约束的默认值。
 
 SteamOS 采用 Mac 的时区和 12/24 小时制（设置 > 通用中
 **使用 Mac 的时区和时钟格式**，默认开启，下次启动生效）。
@@ -215,8 +216,8 @@ Mac 版 Steam 自身的 UDP 27036 广播不会回灌客户机。
 | 鼠标 | 游戏中自动捕获；游戏列表（名取自 `appmanifest_<appid>.acf`，使用默认/自动/关闭、忘记此游戏） | — |
 | 控制器 | 哪个物理控制器（GameController）驱动虚拟手柄（首个已连接或自选），SteamOS 是否获得手柄及呈现为何种（`--no-gamepad`、`--pad`，见“控制器”），DualSense 是否按本身直通，其余控制器是否成为玩家 2–4，A/B 与 X/Y 互换，摇杆死区，实时输入测试 | — |
 | 声音 | 输出设备（系统默认跟随 macOS，或指定 CoreAudio 设备），音量/静音，低（10 毫秒）/普通（20 毫秒）/稳定（60 毫秒）缓冲——经 `krun_snd_set_*`（`dlsym` 查找；旧 libkrun 下字段置灰并说明） | 声音（`--no-sound`） |
-| 游戏 | **共享游戏统计**（同意前关闭，见“游戏统计”）；所有已记录会话的游戏：会话数、游玩时间、上次会话的 FPS / 1% low / 游戏内存 / Vulkan 驱动、可选的个人评价（运行良好 / 可玩但有问题 / 能启动但无法游玩 / 无法启动）与每款游戏的**共享**开关 | — |
-| 高级 | — | vCPU（`--cpus`）、内存（`--mem`）、SSH 开关 + 端口（`--ssh-port`、`--no-ssh`）与生成密码、网络（`--no-net`）、磁盘映像（`--disk`）、新建磁盘…、Steam 客户端（`--steam-client`，见“Steam 客户端”）、Vulkan 驱动（`--vulkan-driver`，见“Vulkan 驱动”）、在 Mac 的 Metal 上运行 D3D11（wmtr），实验性（`--wmtr-lib`、`--no-wmtr`，见“Vulkan 驱动”） |
+| 游戏 | **共享游戏统计**（同意前关闭，见“游戏统计”）；已知游戏及已记录会话的游戏：单独配置（图形、Vulkan 驱动、启动选项，见下文）、会话数、游玩时间、上次会话的 FPS / 1% low / 游戏内存 / Vulkan 驱动、可选的个人评价（运行良好 / 可玩但有问题 / 能启动但无法游玩 / 无法启动）与每款游戏的**共享**开关 | 配置可能需要重启 Steam 或虚拟机（见下文） |
+| 高级 | — | vCPU（`--cpus`）、内存（`--mem`）、SSH 开关 + 端口（`--ssh-port`、`--no-ssh`）与生成密码、网络（`--no-net`）、磁盘映像（`--disk`）、新建磁盘…、Steam 客户端（`--steam-client`，见“Steam 客户端”）、Vulkan 驱动（`--vulkan-driver`，见“Vulkan 驱动”）、允许 DXMT（通过 Mac 的 Metal 运行 D3D11），实验性（`--wmtr-lib`、`--no-wmtr`，见“Vulkan 驱动”） |
 
 **虚拟机内存与图形共享 Mac 的内存。** 自动分配的虚拟机内存为物理内存的一半（4–16 GiB）。
 每次启动还会为 macOS、其他应用和驱动开销预留至少 3 GiB 或宿主内存的四分之一，
@@ -245,6 +246,45 @@ exFAT 立即分配全部新增容量，故先检查其空闲空间。终端（St
 测试用：`STEAMAC_DEFAULTS_DOMAIN=<domain>` 替换设置域；`--selftest-settings
 --selftest-out DIR` 无虚拟机打开窗口并为每选项卡写 PNG；`--control-fifo` 支持
 `settings TAB`、`settings-dump PNG`、`set KEY VALUE`（与窗口等效）、`restart`。
+
+### 单独配置游戏
+
+**设置 → 游戏**为每个 Steam app id 保存配置，与鼠标自动捕获无关：
+**图形**——默认（= Vulkan）/ Vulkan / DXMT；**Vulkan 驱动**——默认（全局驱动）/
+KosmicKrisp / MoltenVK（仅提供可用的驱动）；**启动选项**——放在 `%command%` 前、以空格分隔的
+`NAME=value`，不接受任意 shell 命令。整串不超过 256 个字符。变量名以 `VKD3D_`、`DXVK_`、
+`PROTON_`、`WINE_`、`MESA_`、`RADV_`、`VK_`、`DXMT_`、`MTL_`、`STEAMAC_` 开头，
+后接零个或多个 `[A-Z0-9_]` 字符；值匹配 `[A-Za-z0-9_.,:;+-]*`（允许空值）。
+赋值按变量名排序，同名时最后一个生效。无效输入会保留并显示错误，不会保存或发送。
+
+**推荐：… — 应用**从统计服务获取配置，使用本机的**我的 Mac**限制（GPU 核心数、内存及性能核心数
+均不高于本机）。按 `(运行良好 + 0.5 × 可玩但有问题) / 全部评价` 排名，再比较更高的启动成功率、
+更低的过早退出率；至少需要两个不同安装（详见“游戏统计”）。
+推荐绝不自动生效：只有点击**应用**才会更改配置。
+
+DXMT 需要启用**设置 → 高级 → 允许 DXMT（通过 Mac 的 Metal 运行 D3D11）**并以此权限启动虚拟机。
+关闭时，DXMT 配置会标为未生效，并提供**允许 DXMT…**操作，保留原有安全警告；
+仅启用 Vulkan 的启动中不会因此将游戏映射到 Proton 10.0。
+Vulkan 驱动按**每次虚拟机启动**选择，而非按进程选择。游戏启动或获得焦点时，若配置的驱动与本次启动不同，
+启动器会提议使用该驱动重启虚拟机，并在 Steam 就绪后重新启动游戏。
+此覆盖仅限下一次启动，不更改全局驱动设置。
+
+配置经双向 `fx.progress` 端口传输（一行一条消息）。宿主 → 客户机：
+`profiles <UTF-8 JSON 的 base64>` 在本次启动首次收到代理心跳/ready 时及配置更改后替换整个集合；
+`launch <appid>` 以会话用户身份运行 `steam steam://rungameid/<appid>`；
+`restart-steam` 仅在用户同意后重启 `steam.service`。配置载荷为
+`{"v":1,"games":{"570":{"gfx":"dxmt","env":"PROTON_LOG=1"}}}`；默认/空字段省略，
+`driver` 仅保留在宿主。客户机原子写入 `~/.config/steamac/game-profiles.json`。
+图形及游戏启动选项准备之前，ExecStartPre `steam-profiles-wait` 最多等待本次启动的同步 5 秒，
+随后为最新可用集合建立快照（超时则使用持久化文件）。客户机 → 宿主：
+`profiles-ok <JSON 的 sha256> applied|pending`；`pending` 表示正在运行的 Steam 使用了不同的配置集合，
+启动器会提供**重启 Steam**或**稍后**。`game-gfx <appid> dxmt|vulkan` 紧随 `game-proton`，
+根据 Proton 的 `.steamac-dxmt` 标记报告实际图形路径，而非本次启动是否允许 DXMT。
+未知命令仍会被忽略，以兼容新旧宿主/客户机组合。
+
+Steam 启动时，配置中的启动选项覆盖 `steam-title-defaults` 的内置条目；没有配置 `env` 时，
+Dragon's Dogma 2 仍保留受 Venus 功能检查约束的默认值。所有权规则不变：用户之后在 Steam 中的修改优先；
+替换或删除由 steamac 管理的启动选项不会累积旧赋值，删除后恢复原来的启动选项。
 
 ## 挂起
 
@@ -490,8 +530,8 @@ Metal 初始化前，启动器检查运行时编译器的模块缓存是否可�
 
 切换改变 Venus 驱动身份（管线缓存 UUID），Steam 与游戏重建着色器缓存。宿主驱动建不出的管线在 virglrenderer 中是占位：其绘制与派发被丢弃，驱动永远见不到 `VK_NULL_HANDLE`。
 
-**在 Mac 的 Metal 上运行 D3D11（wmtr），实验性。** 设置 → 高级 → **在 Mac 的 Metal 上运行
-D3D11（wmtr）**默认关闭，下次启动生效（单次启动用 `--wmtr-lib PATH` 或 `--no-wmtr`）。
+**允许 DXMT（通过 Mac 的 Metal 运行 D3D11），实验性。** 设置 → 高级 →
+**允许 DXMT（通过 Mac 的 Metal 运行 D3D11）**默认关闭，下次启动生效（单次启动用 `--wmtr-lib PATH` 或 `--no-wmtr`）。
 应用捆绑 `libwmtr_host.dylib`；客户机层包含 DXMT 的
 `{d3d11,dxgi,d3d10core,winemetal}.dll` 与 `winemetal.so`。开启时，启动器提供 libkrun 的
 wmtr virtio-gpu 上下文（补丁 0018，capset 30），并以 `steamac.gfx=dxmt` 启动虚拟机。
@@ -499,19 +539,25 @@ wmtr virtio-gpu 上下文（补丁 0018，capset 30），并以 `steamac.gfx=dxm
 的安装与更新；关闭后以 `steamac.gfx=vulkan` 启动并恢复 Proton 原始文件。DXMT 的 dll 是带 Wine unixlib 的
 x86-64 版本，只有 x86-64 Proton 能加载（在 Proton 11.0 (ARM64) 的 ARM64EC Wine 中，winemetal 的 unix 部分无法启动，游戏报告
 “could not load d3d11.dll”），而此 Steam 客户端把所有 Windows 游戏映射到 Proton 11.0 (ARM64)（`proton-stable`，优先级 85）。
-因此在 Steam 启动前，`steam-compat-default` 为每个没有自选工具的已安装 Windows 游戏（依据 `libraryfolders.vdf` 与
-`appcache/appinfo.vdf`：类型为 game/demo/application，oslist 含 windows 不含 linux）写入单独的 `CompatToolMapping`
-条目，指向 **Proton 10.0**，优先级 250，与在游戏属性中选择工具时 Steam 写入的相同。Steam 在此类游戏首次启动时下载
-Proton 10.0（x86-64，在 Steam Linux Runtime 3.0 中经 FEX 运行），`steam-gfx-path --watch` 随后放入 DXMT。Proton Experimental
-与 x86-64 Proton 11.0 需要 Steam Linux Runtime 4.0，arm64 客户端拒绝安装（“Invalid platform”）。Steam 运行期间安装的游戏
-在下次 Steam 启动时切换。从不使用通配条目（“0”）：Steam 也会把高优先级通配应用到自身工具上，曾因此清空 FEX 工具。
-关闭时删除脚本添加的条目；用户之后在 Steam 中修改的条目保持不变。Proton 10.0 上的 D3D12 游戏的 Wine 部分改在 FEX 下而非
-ARM64EC 运行，会消耗更多 CPU。已在 M1 Max 上端到端验证：Death's Door（Unity，D3D11）在 Proton 10.0 上启动，渲染器显示
+Steam 启动前，`steam-compat-default` **仅为配置中选择 DXMT 的游戏**写入单独的 `CompatToolMapping` 条目，
+指向 **Proton 10.0**，优先级 250，且仅限启用 DXMT 的启动。适用对象为未被用户指定兼容工具的已安装 Windows
+游戏（依据 `libraryfolders.vdf` 与 `appcache/appinfo.vdf`：类型为 game/demo/application，oslist 含 windows
+不含 linux）。其余游戏保持 Steam 默认工具 **Proton 11.0 ARM64**，使用 Venus 上的 DXVK/vkd3d-proton。
+原先将所有游戏统一映射到 Proton 10.0 的条目会在首次 Steam 启动时移除；之后的配置更改及新安装游戏在下次
+Steam 启动时应用，用户在 Steam 中的修改保持不变。这不只是 DLL 的选择：某些游戏在 x86-64 Proton 10.0 + FEX
+下无论使用什么 DLL 都会崩溃。例如 Stellar Blade Demo（3564860）的 SEH 递归最终导致
+`virtual_setup_exception stack overflow`，但它能在 Proton 11.0 ARM64 上运行。
+Steam 在首次启动 DXMT 游戏时下载 Proton 10.0（x86-64，在 Steam Linux Runtime 3.0 中经 FEX 运行），
+`steam-gfx-path --watch` 随后放入 DXMT。Proton Experimental 与 x86-64 Proton 11.0 需要 Steam Linux
+Runtime 4.0，arm64 客户端拒绝安装（“Invalid platform”）。从不使用通配条目（“0”）：Steam 也会把高优先级
+通配应用到自身工具上，曾因此清空 FEX 工具。关闭“允许 DXMT”会删除脚本管理的映射。
+Proton 10.0 上的 D3D12 的 Wine 部分改在 FEX 下而非 ARM64EC 运行，会消耗更多 CPU。
+已在 M1 Max 上端到端验证：Death's Door（Unity，D3D11）在 Proton 10.0 上启动，渲染器显示
 “Apple M1 Max”，并经执行器的图层绘制。同一台 M1 Max 上的测量（macOS 27，虚拟机 6 vCPU / 8 GB，120 Hz，KosmicKrisp）：
 Death's Door 标题画面在默认 Proton 11.0 (ARM64) + DXVK 路径约 41 FPS，在 DXMT 上约 117（受 120 Hz 显示器限制）；
 d3d11bench 100 次绘制 + 16 次全屏通道为 44 / 50（Proton 10.0 + DXVK）/ 100 FPS，2000 次绘制 + 4 次通道为
 133 / 139 / 115（DXMT 止于显示器 120 Hz，Vulkan 路径可超过）。经 Steam 启动的三次 20 秒运行取中位数
-（DXMT 取两次启动共六次）；详见网站。这是全局选择，而非按游戏设置。
+（DXMT 取两次启动共六次）；详见网站。
 DXMT 的 winemetal 调用通过 virtio-gpu 到达 **Mac 上虚拟机进程内部**的执行器，
 由其在虚拟机视图内呈现 `CAMetalLayer`。D3D12（vkd3d-proton）和原生 Vulkan 仍走 Venus；
 此路径**仅支持 D3D11/D3D10**，不支持 D3D9。DXMT 仍有兼容性缺口，包括**不支持流输出
@@ -686,8 +732,8 @@ download|skip|later|ok|releases`、`update dump PNG`（窗口与 `-with-vm.png`�
 客户机代理在每秒一次的心跳中监视 Steam 的游戏 scope（`app-steam-app<appid>-*.scope`，
 即**暂停游戏**冻结的那些 cgroup），报告 `game-start <appid>`、每 5 秒一次的
 `game-mem <appid> <anon_kib> <guest_used_kib>`（游戏的匿名内存与客户机已用内存）、
-`game-proton <appid> <version>`（前缀中的 `compatdata/<appid>/version`）和
-`game-exit <appid>`；每次启动后，某 app id 首次 `game-start` 或获得焦点后会跟随
+`game-proton <appid> <version>`（前缀中的 `compatdata/<appid>/version`），紧随其后的
+`game-gfx <appid> dxmt|vulkan`（实际图形路径），以及 `game-exit <appid>`；每次启动后，某 app id 首次 `game-start` 或获得焦点后会跟随
 `game <appid> <name>`。启动器（`GameStats.swift`）为每次游戏运行生成一份报告：
 运行时长与持有焦点的时长（未暂停且虚拟机未挂起），是否曾出现窗口以及等待时间（无窗口的运行视为启动失败），
 游戏持有焦点时由客户机 scanout-0 刷新间隔得出的帧率（平均值、中位数、1% low、
@@ -696,6 +742,10 @@ download|skip|later|ok|releases`、`update dump PNG`（窗口与 `-with-vm.png`�
 `phys_footprint` 峰值、分辨率、Proton 版本及结束原因（`exit`、`shutdown`、`session`）。
 每份报告附带 Mac 信息（型号、芯片、性能核心数与总核心数、GPU 核心数、内存、macOS）、
 虚拟机信息（vCPU、内存、Vulkan 驱动、wmtr、刷新率、SteamOS 构建版本）及启动器版本。
+新的会话与评价报告使用 `v:2`，可选字段为 `gfx`（`vulkan` 或 `dxmt`）和 `env`（“单独配置游戏”中
+允许的启动选项，不超过 256 个字符）。实际图形路径取自 `game-gfx`；评价使用上次会话的图形路径和启动选项。
+服务仍接受 v1（包括之前保存的会话），将其 `gfx`/`env` 存为 NULL。
+无效的 v2 赋值返回 HTTP 400；有效赋值按变量名排序，同名时最后一个生效。
 
 每份报告保存在本 Mac（`~/Library/Application Support/es.fxgam.steamac/game-stats.json`，
 每款游戏 20 次会话），并列于**设置 → 游戏**。启用**共享游戏统计**前，任何数据都不会离开 Mac：
@@ -705,15 +755,24 @@ download|skip|later|ok|releases`、`update dump PNG`（窗口与 `-with-vm.png`�
 关闭某款游戏的**共享**复选框后，该游戏不发送任何数据，且其评价会撤回（`"rating": "none"`）。
 上传逐一进行；HTTP 400/413 会丢弃报告，其他错误则在 10 分钟后、下次会话结束或下次启动时重试。
 
-隐私：不包含姓名、用户名或计算机名、Steam 账号、文件或输入的文字；安装 ID 为随机 UUID，
-仅用于统计不同 Mac 的数量及限流（不是崩溃报告的 ID）；服务仅将客户端地址用作临时限流键，绝不保存。
+隐私：不包含姓名、用户名或计算机名、Steam 账号、文件或任意输入文本（仅共享上述允许的图形启动选项）；
+安装 ID 为随机 UUID，仅用于统计不同 Mac 的数量及限流（不是崩溃报告的 ID）；
+服务仅将客户端地址用作临时限流键，绝不保存。
 
-页面只公布聚合数据（按游戏及芯片 / 内存 / 驱动 / wmtr 分组），绝不公布单次会话，
-并列出每款游戏已测试的芯片。**我的 Mac** 筛选器仅保留配置不高于访问者 Mac 的报告
-（GPU 核心数、内存与性能核心数均不超过给定值；API 参数为 `max_gpu_cores`、
-`max_ram_gb`、`max_pcores`）：能在那里运行的游戏，应该也能在这里运行。
+页面只公布聚合数据，绝不公布单次会话，并列出每款游戏已测试的芯片。配置按芯片、内存、Vulkan 驱动、
+图形路径和启动选项分组（`gfx`/`env`；保留 `wmtr` 以兼容旧版）。旧行的 NULL `gfx` 在 `wmtr=0`
+时表示 `vulkan`，在 `wmtr=1` 时仍未知：允许 DXMT 不等于游戏确实使用了它。
+**我的 Mac** 筛选器仅保留配置不高于访问者 Mac 的报告（GPU 核心数、内存与性能核心数均不超过给定值；
+API 参数为 `max_gpu_cores`、`max_ram_gb`、`max_pcores`）：能在那里运行的游戏，应该也能在这里运行。
 启动器中的**打开统计页面**会传入本 Mac 的参数（`?chip=…&gpu=…&ram=…&pcores=…`）
 并开启筛选器；页面会记住这些参数。
+
+`GET /v1/games/<appid>` 还返回 `recommended`（没有合格配置时为 `null`）。在同一“我的 Mac”筛选范围内，
+跨芯片按 `(driver, gfx, env)` 分组，要求会话与评价合计至少来自两个不同安装；未知图形路径不能获选。
+得分 = `(well + 0.5 × issues) / 全部评价`（无评价时为零）；同分先选更高的 `launch_rate`，
+再选更低的 `early_exit_rate`，缺失比率排最后，之后按驱动/图形/env 的确定顺序排序。
+结果包括驱动、图形路径、启动选项、安装数/会话数、评价、平均 FPS 的中位数及启动成功率。
+网站与启动器显示推荐，但绝不自动应用。
 
 服务：`services/game-stats`——使用 D1 数据库的 Cloudflare Worker（严格校验、幂等会话 ID、
 每个地址每分钟 30 次 POST、每个安装的每日上限、缓存 5 分钟的聚合数据
@@ -726,6 +785,9 @@ npx wrangler d1 create steamac-game-stats      # put the printed database_id int
 npx wrangler d1 migrations apply steamac-game-stats --remote
 npx wrangler deploy                            # prints https://steamac-game-stats.<account>.workers.dev
 ```
+更新已有部署时，迁移 `0002_profiles.sql` 为会话和评价添加 `gfx`/`env` 并更新分组索引，保留 v1 数据。
+务必**先**运行 `npx wrangler d1 migrations apply steamac-game-stats --remote`，
+**再**运行 `npx wrangler deploy`。
 
 Worker URL 填入 `host/launcher/Info.plist`（`SteamacGameStatsURL`）与 `docs/assets/games.js`
 （`API`）。本地运行：`npx wrangler d1 migrations apply steamac-game-stats --local && npx wrangler dev`、

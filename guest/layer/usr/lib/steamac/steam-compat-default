@@ -1,14 +1,14 @@
 #!/usr/bin/python3
-"""steamac: an x86-64 Proton for each installed Windows game while the DXMT graphics path is on.
+"""steamac: an x86-64 Proton for installed Windows games whose profiles request DXMT.
 
 DXMT's dlls are x86-64 Windows builds with a Wine unixlib, which only an x86-64 Proton can load (in
 Proton 11.0 (ARM64), ARM64EC Wine, d3d11.dll loads but winemetal's unix side does not come up and
 the game reports "could not load d3d11.dll"). The Steam client of this SteamOS maps every Windows
 title to "proton-stable", Proton 11.0 (ARM64), at priority 85. With the launcher's setting on
-(steamac.gfx=dxmt), steam-gfx-path runs `steam-compat-default dxmt` before Steam starts: every
+(steamac.gfx=dxmt), steam-gfx-path runs `steam-compat-default dxmt` before Steam starts: an
 installed Windows game (libraryfolders.vdf's apps whose appinfo.vdf entry has type game/demo/
-application and an oslist with windows but not linux) without a compatibility tool of its own gets
-a per-game CompatToolMapping entry in config.vdf for Proton 10.0 at priority 250, the entry Steam
+application and an oslist with windows but not linux) with profile gfx=dxmt and no tool of its own
+gets a per-game CompatToolMapping entry in config.vdf for Proton 10.0 at priority 250, the entry Steam
 writes for a game set to a tool in its Properties. Steam downloads Proton 10.0 when such a game first
 needs it, and steam-gfx-path --watch fills it with DXMT. Proton 10.0 (proton_10, appid 3658110) is
 the newest x86-64 Proton this client installs: it runs in Steam Linux Runtime 3.0 under the FEX tool;
@@ -20,8 +20,8 @@ Never the wildcard ("0"): Steam applies a high-priority wildcard to its tools to
 tool (3127680) to Proton, "updated" it to zero depots and emptied it, after which every x86-64 Proton
 failed ("Tool 3127680 "fex" unsupported version 0").
 
-With the setting off (`vulkan`) the entries this script added are removed. The games it mapped are
-remembered in $STATE/compat-default.json; a game whose entry was changed in Steam since is left alone
+With the setting off (`vulkan`), or a profile no longer requesting DXMT, our entries are removed.
+The games it mapped are remembered in $STATE/compat-default.json; a game whose entry was changed in Steam since is left alone
 from then on. Steam is not running when this runs (ExecStartPre of steam.service); it rewrites
 config.vdf only when it exits. Every byte of config.vdf outside the entries is kept (the VDF helpers
 are mac-clock-format's).
@@ -241,6 +241,16 @@ def windows_games(steam):
     return games
 
 
+def profile_dxmt():
+    persisted = Path.home() / ".config/steamac/game-profiles.json"
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/" + str(os.getuid())) / "steamac/game-profiles.json"
+    path = runtime if runtime.exists() else persisted
+    if not path.exists() or not path.stat().st_size:
+        return set()
+    profiles = json.loads(path.read_text())
+    return {appid for appid, profile in profiles["games"].items() if profile.get("gfx") == "dxmt"}
+
+
 def main(mode):
     steam = Path(os.environ.get("STEAMAC_STEAM_ROOT") or Path.home() / ".local/share/Steam")
     state_dir = Path(os.environ.get("STEAMAC_GFX_STATE")
@@ -260,21 +270,20 @@ def main(mode):
             log("compatibility tool of " + appid + " changed in Steam; leaving it")
             mapped.discard(appid)
 
-    changed = []
-    if mode == "dxmt":
-        for appid in sorted(windows_games(steam) - set(current)):
-            text = set_mapping(text, appid, OURS)
-            mapped.add(appid)
-            changed.append(appid)
-        if changed:
-            log(TOOL + " for " + " ".join(changed))
-    else:
-        for appid in sorted(mapped):
-            text = set_mapping(text, appid, None)
-            changed.append(appid)
-        mapped.clear()
-        if changed:
-            log("Steam's own compatibility tool again for " + " ".join(changed))
+    wanted = windows_games(steam) & profile_dxmt() if mode == "dxmt" else set()
+    removed = sorted(mapped - wanted)
+    for appid in removed:
+        text = set_mapping(text, appid, None)
+        mapped.remove(appid)
+    if removed:
+        log("Steam's own compatibility tool again for " + " ".join(removed))
+    added = sorted(wanted - set(current))
+    for appid in added:
+        text = set_mapping(text, appid, OURS)
+        mapped.add(appid)
+    if added:
+        log(TOOL + " for " + " ".join(added))
+    changed = added + removed
     if changed:
         atomic_write(config, text)
     if mapped:

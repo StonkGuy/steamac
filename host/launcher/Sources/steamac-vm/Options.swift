@@ -218,7 +218,7 @@ struct Options {
                            Switching makes Steam and games rebuild their shader caches.
       --wmtr-lib PATH      experimental: offer the guest the wmtr virtio-gpu context type (capset 30), DXMT's
                            winemetal calls run on this Mac's Metal by the executor library PATH
-                           (default: Settings > Advanced "D3D11 on the Mac's Metal (wmtr)", off unless changed)
+                           (default: Settings > Advanced "Allow DXMT", off unless changed)
       --no-wmtr            the guest gets no wmtr context type for this run
 
     Creating a SteamOS disk (no Docker; the same code as Settings > Advanced "Create New Disk…"):

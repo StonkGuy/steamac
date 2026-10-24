@@ -37,11 +37,23 @@ function choice(value, name, values) {
   if (!values.includes(value)) invalid(name);
   return value;
 }
+/** Match the launcher's safe assignment subset, not shell syntax. Last assignment wins, as in env. */
+function profileEnv(value) {
+  if (typeof value !== "string" || value.length > 256) invalid("env");
+  if (value === "") return null;
+  const assignments = new Map();
+  for (const word of value.split(" ")) {
+    const match = /^((?:VKD3D|DXVK|PROTON|WINE|MESA|RADV|VK|DXMT|MTL|STEAMAC)_[A-Z0-9_]*)=([A-Za-z0-9_.,:;+-]*)$/.exec(word);
+    if (!match || match[0] !== word) invalid("env");
+    assignments.set(match[1], word);
+  }
+  return [...assignments].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, word]) => word).join(" ");
+}
 /** Flatten only known schema fields; unknown keys never reach D1. */
 export function validate(value, rating = false) {
   const b = object(value, "body"), mac = object(b.mac, "mac"), vm = object(b.vm, "vm");
   const row = {
-    v: number(b.v, "v", 1, 1, true),
+    v: number(b.v, "v", 1, 2, true),
     install: string(b.install, "install", 36, UUID).toLowerCase(),
     launcher: string(b.launcher, "launcher", 64, VERSION),
     appid: number(b.appid, "appid", 1, STEAM_APPID_MAX, true),
@@ -53,6 +65,8 @@ export function validate(value, rating = false) {
     vm_driver: choice(vm.driver, "vm.driver", ["moltenvk", "kosmickrisp"]),
     vm_wmtr: boolean(vm.wmtr, "vm.wmtr"),
   };
+  row.gfx = row.v === 2 && "gfx" in b ? choice(b.gfx, "gfx", ["vulkan", "dxmt"]) : null;
+  row.env = row.v === 2 && "env" in b ? profileEnv(b.env) : null;
   if ("game" in b) row.game = string(b.game, "game", 128, /^[^\p{Cc}\p{Cs}\p{Cf}]+$/u);
   if ("pcores" in mac) {
     row.mac_pcores = number(mac.pcores, "mac.pcores", 0, 1024, true);
@@ -171,31 +185,41 @@ function reportScope(appid, filters) {
   }
   return { where: `WHERE ${clauses.join(" AND ")}`, bindings };
 }
+// Legacy wmtr advertised a context, not a game's graphics path: only wmtr=0 proves Vulkan.
+const EFFECTIVE_GFX = "coalesce(gfx, CASE WHEN vm_wmtr = 0 THEN 'vulkan' END)";
+const CONFIG_GROUP = "appid, mac_chip, mac_ram_gb, vm_driver, effective_gfx, env";
+function normalizedReports(table, scope) {
+  return `SELECT *, ${EFFECTIVE_GFX} AS effective_gfx FROM ${table} ${scope.where}`;
+}
 /** Window ranks produce exact medians, ignoring missing measurements, without transferring raw history. */
 async function summaries(db, scope, config = false) {
-  const group = config ? "appid, mac_chip, mac_ram_gb, vm_driver, vm_wmtr" : "appid";
+  const group = config ? CONFIG_GROUP : "appid";
   const metrics = config ? Object.entries(MEDIANS) : [["fps_avg", "fps_avg_median"]];
   const ranks = metrics.map(([key]) => `row_number() OVER (PARTITION BY ${group} ORDER BY ${key} IS NULL, ${key}) AS ${key}_rank,
     count(${key}) OVER (PARTITION BY ${group}) AS ${key}_count`).join(",");
   const medians = metrics.map(([key, name]) => `avg(CASE WHEN ${key}_rank IN ((${key}_count + 1) / 2, (${key}_count + 2) / 2) THEN ${key} END) AS ${name}`).join(",");
-  const rows = await db.prepare(`WITH ranked AS (
-    SELECT *, ${ranks}
-    FROM sessions ${scope.where}
+  const rows = await db.prepare(`WITH reports AS (
+    ${normalizedReports("sessions", scope)}
+  ), ranked AS (
+    SELECT *, ${ranks} FROM reports
   ) SELECT appid, (SELECT game FROM game_names WHERE game_names.appid = ranked.appid) AS game,
     count(*) AS sessions, count(DISTINCT install) AS installs, avg(launched) AS launch_rate,
     sum(play_s) / 3600.0 AS play_hours, max(received) AS last_seen, ${medians}
-    ${config ? ", mac_chip AS chip, mac_ram_gb AS ram_gb, vm_driver AS driver, vm_wmtr AS wmtr, 1.0 * sum(CASE WHEN launched = 1 AND end = 'exit' AND run_s < 60 THEN 1 ELSE 0 END) / nullif(sum(launched), 0) AS early_exit_rate" : ""}
+    ${config ? ", mac_chip AS chip, mac_ram_gb AS ram_gb, vm_driver AS driver, max(vm_wmtr) AS wmtr, effective_gfx AS gfx, env, 1.0 * sum(CASE WHEN launched = 1 AND end = 'exit' AND run_s < 60 THEN 1 ELSE 0 END) / nullif(sum(launched), 0) AS early_exit_rate" : ""}
     FROM ranked GROUP BY ${group} ORDER BY sessions DESC, appid`).bind(...scope.bindings).all();
   return rows.results;
 }
 function emptyRatings() { return { well: 0, issues: 0, unplayable: 0, no_start: 0 }; }
-function configKey(row) { return JSON.stringify([row.chip, row.ram_gb, row.driver, Number(row.wmtr)]); }
+function configKey(row) { return JSON.stringify([row.chip, row.ram_gb, row.driver, row.gfx, row.env]); }
 async function ratingRows(db, scope, config = false) {
-  return (await db.prepare(`SELECT appid, (SELECT game FROM game_names WHERE game_names.appid = ranked.appid) AS game,
+  return (await db.prepare(`WITH reports AS (
+    SELECT appid, game, rating, received, mac_chip, mac_ram_gb, vm_driver, vm_wmtr, ${EFFECTIVE_GFX} AS effective_gfx, env
+    FROM ratings ${scope.where}
+  ) SELECT appid, (SELECT game FROM game_names WHERE game_names.appid = ranked.appid) AS game,
     ${RATING_KEYS.map((key) => `sum(rating = '${key}') AS ${key}`).join(",")}, max(received) AS last_seen
-    ${config ? ", mac_chip AS chip, mac_ram_gb AS ram_gb, vm_driver AS driver, vm_wmtr AS wmtr" : ""}
-    FROM ratings AS ranked ${scope.where}
-    GROUP BY appid ${config ? ", mac_chip, mac_ram_gb, vm_driver, vm_wmtr" : ""}`).bind(...scope.bindings).all()).results;
+    ${config ? ", mac_chip AS chip, mac_ram_gb AS ram_gb, vm_driver AS driver, max(vm_wmtr) AS wmtr, effective_gfx AS gfx, env" : ""}
+    FROM reports AS ranked
+    GROUP BY ${config ? CONFIG_GROUP : "appid"}`).bind(...scope.bindings).all()).results;
 }
 function mergeRatings(sessions, ratings, config = false) {
   const key = config ? configKey : (row) => row.appid;
@@ -204,12 +228,58 @@ function mergeRatings(sessions, ratings, config = false) {
     let row = rows.get(key(r));
     if (!row) {
       row = { appid: r.appid, game: r.game, sessions: 0, installs: 0, launch_rate: null, play_hours: 0, fps_avg_median: null, last_seen: r.last_seen, ratings: emptyRatings() };
-      if (config) Object.assign(row, { chip: r.chip, ram_gb: r.ram_gb, driver: r.driver, wmtr: r.wmtr, early_exit_rate: null, fps_low1_median: null, game_mib_median: null, host_mib_median: null });
+      if (config) Object.assign(row, { chip: r.chip, ram_gb: r.ram_gb, driver: r.driver, wmtr: r.wmtr, gfx: r.gfx, env: r.env, early_exit_rate: null, fps_low1_median: null, game_mib_median: null, host_mib_median: null });
       rows.set(key(r), row);
     }
     for (const name of RATING_KEYS) row.ratings[name] = r[name];
+    if (config) row.wmtr = Number(row.wmtr) || Number(r.wmtr);
   }
   return [...rows.values()].map((row) => config ? { ...row, wmtr: Boolean(row.wmtr) } : row);
+}
+/** Rank profiles across chips in the same hardware scope. Score = (well + 0.5 * issues) / ratings;
+ *  no ratings score zero. Require two distinct installs across either source. Ties prefer launch
+ *  success, then fewer early exits (missing rates last), then stable profile-key order.
+ *  Unknown legacy graphics paths cannot be applied safely, so they never qualify. */
+async function recommended(db, scope) {
+  const group = "vm_driver, effective_gfx, env";
+  const row = await db.prepare(`WITH session_reports AS (
+    ${normalizedReports("sessions", scope)}
+  ), rating_reports AS (
+    ${normalizedReports("ratings", scope)}
+  ), installs AS (
+    SELECT vm_driver, effective_gfx, env, install FROM session_reports
+    UNION
+    SELECT vm_driver, effective_gfx, env, install FROM rating_reports
+  ), profiles AS (
+    SELECT ${group}, count(*) AS installs FROM installs
+    WHERE effective_gfx IS NOT NULL GROUP BY ${group} HAVING count(*) >= 2
+  ), ranked AS (
+    SELECT *, row_number() OVER (PARTITION BY ${group} ORDER BY fps_avg IS NULL, fps_avg) AS fps_rank,
+      count(fps_avg) OVER (PARTITION BY ${group}) AS fps_count FROM session_reports
+  ), profile_sessions AS (
+    SELECT ${group}, count(*) AS sessions, avg(launched) AS launch_rate,
+      1.0 * sum(CASE WHEN launched = 1 AND end = 'exit' AND run_s < 60 THEN 1 ELSE 0 END) / nullif(sum(launched), 0) AS early_exit_rate,
+      avg(CASE WHEN fps_rank IN ((fps_count + 1) / 2, (fps_count + 2) / 2) THEN fps_avg END) AS fps_avg_median
+    FROM ranked GROUP BY ${group}
+  ), profile_ratings AS (
+    SELECT ${group}, count(*) AS ratings,
+      ${RATING_KEYS.map((key) => `sum(rating = '${key}') AS ${key}`).join(",")}
+    FROM rating_reports GROUP BY ${group}
+  )
+  SELECT p.vm_driver AS driver, p.effective_gfx AS gfx, p.env, p.installs,
+    coalesce(s.sessions, 0) AS sessions, s.fps_avg_median, s.launch_rate,
+    ${RATING_KEYS.map((key) => `coalesce(r.${key}, 0) AS ${key}`).join(",")}
+  FROM profiles p
+  LEFT JOIN profile_sessions s ON s.vm_driver = p.vm_driver AND s.effective_gfx = p.effective_gfx AND s.env IS p.env
+  LEFT JOIN profile_ratings r ON r.vm_driver = p.vm_driver AND r.effective_gfx = p.effective_gfx AND r.env IS p.env
+  ORDER BY coalesce((r.well + 0.5 * r.issues) / r.ratings, 0) DESC,
+    s.launch_rate IS NULL, s.launch_rate DESC, s.early_exit_rate IS NULL, s.early_exit_rate ASC,
+    p.vm_driver, p.effective_gfx, p.env
+  LIMIT 1`).bind(...scope.bindings, ...scope.bindings).first();
+  if (!row) return null;
+  const ratings = Object.fromEntries(RATING_KEYS.map((key) => [key, row[key]]));
+  for (const key of RATING_KEYS) delete row[key];
+  return { ...row, ratings };
 }
 /** Distinct tested chips include rating-only configurations, ranked by session sample size. */
 async function testedChips(db, scope) {
@@ -233,7 +303,7 @@ async function get(env, appid, filters) {
   if (appid === undefined) return { generated: new Date().toISOString(), games };
   if (!games.length) throw new HttpError(404, "Game not found");
   const configs = mergeRatings(await summaries(env.DB, scope, true), await ratingRows(env.DB, scope, true), true);
-  return { generated: new Date().toISOString(), ...games[0], configs };
+  return { generated: new Date().toISOString(), ...games[0], configs, recommended: await recommended(env.DB, scope) };
 }
 export default {
   async fetch(request, env, ctx) {
@@ -246,9 +316,9 @@ export default {
       if (request.method === "OPTIONS") return json({ status: "ok" });
       if (isPost && request.method === "POST") return await post(request, env, path === "/v1/ratings");
       if (!isGet || request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: isGet ? "GET, OPTIONS" : "POST, OPTIONS" });
-      // Do not serve cached responses from the earlier API that included individual sessions.
+      // Version every public aggregate shape so pre-profile answers cannot hide recommendations.
       const filters = hardwareFilters(url.searchParams);
-      const cacheParams = new URLSearchParams({ aggregates: "3", ...filters });
+      const cacheParams = new URLSearchParams({ aggregates: "4", ...filters });
       const cacheKey = new Request(`${url.origin}${path}?${cacheParams}`, { method: "GET" });
       const cached = await caches.default.match(cacheKey);
       if (cached) return cached;

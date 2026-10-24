@@ -1068,8 +1068,8 @@ private struct AdvancedTab: View {
             }
             Section {
                 Toggle(isOn: $settings.wmtr) {
-                    Label2(title: "D3D11 on the Mac's Metal (wmtr)",
-                           detail: String(localized: "When on, installed Windows games without a compatibility tool of their own run on Proton 10.0 (x86-64; Steam downloads it the first time) instead of Proton 11.0 (ARM64), and their D3D11 and D3D10 draw through DXMT directly with the Mac's Metal. D3D12 and Vulkan stay on the usual Vulkan path, emulated a little more. A game installed while Steam runs switches at Steam's next start. Switching off restores Proton's own files and the games' tools. DXMT has compatibility gaps, including no D3D11 stream output. Security risk: while on, programs in SteamOS can run code on the Mac with your user's rights. The executor runs inside the VM process and trusts the guest; a fault can stop the VM."),
+                    Label2(title: "Allow DXMT (D3D11 on the Mac's Metal)",
+                           detail: GameProfile.securityText,
                            now: false, key: .wmtr, experimental: true)
                 }
                 if settings.wmtr {
