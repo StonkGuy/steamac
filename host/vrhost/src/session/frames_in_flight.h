@@ -3,8 +3,9 @@
 // only when at most N-1 of the frames already released still wait for their copy to the host, so a GPU-bound game
 // cannot queue frames ahead of the GPU (each queued frame is a frame period of motion-to-photon latency; live VRChat
 // at 36 fps: submit -> copied 50 ms). Two exceptions keep poses flowing: while the game submits nothing (loading,
-// paused) the clock is not held, and one wait never exceeds two frame periods (a frame id the game skips costs one late
-// frame, not a stall).
+// paused) the clock is not held, and one wait never exceeds max_hold_ns (a frame id the game skips costs one late
+// frame, not a stall). The bound is in time, not display periods: a GPU-bound game's frame takes several periods
+// (VRChat at 24 fps: 41 ms+), and a bound of two periods released every frame before its copy, leaving no limit.
 #pragma once
 #include "session/vr_session.h" // ns
 
@@ -19,7 +20,8 @@ namespace vrhost
 class FramesInFlight
 {
 public:
-	static constexpr int idle_periods = 8; // no frame copied for this long: the game is not rendering, do not hold
+	static constexpr int idle_periods = 8;           // no frame copied for this long: not rendering, do not hold
+	static constexpr ns max_hold_ns = 100'000'000;  // a GPU frame of up to 100 ms (10 fps) still counts as rendering
 
 	explicit FramesInFlight(uint32_t n) : n(n) {}
 	bool enabled() const { return n > 0; }
@@ -30,9 +32,9 @@ public:
 		if (not n or not issued)
 			return true;
 		std::unique_lock l(m);
-		if (now - last_ready_time >= idle_periods * period)
+		if (now - last_ready_time >= std::max(idle_periods * period, 2 * max_hold_ns))
 			return true;
-		return cv.wait_for(l, std::chrono::nanoseconds(2 * period), [&] { return stop or last_ready_id + n > issued; });
+		return cv.wait_for(l, std::chrono::nanoseconds(std::max(2 * period, max_hold_ns)), [&] { return stop or last_ready_id + n > issued; });
 	}
 
 	// Link thread: frame `id` was copied to the host at `t`.

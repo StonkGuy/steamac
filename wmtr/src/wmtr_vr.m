@@ -242,8 +242,9 @@ unsigned
 wmtr_vr_frame_cadence(struct wmtr_vr_cadence *c, uint64_t host_id, int64_t host_wake, int64_t host_display,
                       uint64_t guest_last, int64_t now, int64_t period, int64_t render_period, uint64_t *id,
                       int64_t *wake, int64_t *display) {
-  int live = host_id && host_wake > now - 4 * period; /* the pacer's newest timing is current */
-  int fresh = live && host_id != c->host_last;        /* a new, current pacer frame */
+  int64_t window = 4 * period > WMTR_VR_PACER_LIVE_NS ? 4 * period : WMTR_VR_PACER_LIVE_NS;
+  int live = host_id && host_wake > now - window;                               /* the pacer is running */
+  int fresh = host_id && host_id != c->host_last && host_wake > now - 4 * period; /* a new, current pacer frame */
   if (fresh) {
     if (host_id < c->host_last || (int64_t)host_id + c->offset <= (int64_t)guest_last)
       c->offset = (int64_t)guest_last + 1 - (int64_t)host_id; /* host restarted: continue after the guest's id */

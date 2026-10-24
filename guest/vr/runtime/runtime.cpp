@@ -23,6 +23,8 @@ int64_t now_ns() {
 // how often wait_frame asks again for a pacer frame that is due but not out yet (the host sends it at its wake-up;
 // it reaches the exporter a few microseconds later)
 static constexpr int64_t kPacerPollNs = 250000;
+// the longest wait_frame waits for one pacer frame (a backstop: the exporter stops flagging PACER_LIVE first)
+static constexpr int64_t kPacerWaitMaxNs = 200000000;
 
 static void sleep_until(int64_t t) {
   timespec ts{(time_t)(t / 1000000000), (long)(t % 1000000000)};
@@ -161,10 +163,11 @@ bool Runtime::wait_frame() {
   // The host's pacer runs but its next frame is not out yet (spacewarp releases one every other display period; the
   // host holds one while the GPU is behind): wait for it instead of rendering a frame the headset never asked for,
   // which only queues GPU work ahead of the frames it does show. Bounded, so a pacer that stops (headset gone) leaves
-  // the game on the local cadence.
+  // the game on the local cadence; the bound is time, not display periods, since the host holds a timing for a whole
+  // GPU frame of a GPU-bound game (exporter: PACER_LIVE ends WMTR_VR_PACER_LIVE_NS = 150 ms after the last timing).
   if ((rep.flags & SVR_FRAME_PACER_LIVE) && !(rep.flags & SVR_FRAME_FROM_PACER)) {
     int64_t period = (int64_t)(1e9f / (rep.refresh_hz > 0 ? rep.refresh_hz : 90.0f));
-    int64_t give_up = now_ns() + 4 * period;
+    int64_t give_up = now_ns() + std::max<int64_t>(4 * period, kPacerWaitMaxNs);
     while ((rep.flags & SVR_FRAME_PACER_LIVE) && !(rep.flags & SVR_FRAME_FROM_PACER) && now_ns() < give_up) {
       sleep_until(std::max(host_to_guest(rep.wake_up), now_ns() + kPacerPollNs));  // when it is due, then polls
       if (!fetch(&rep)) return false;

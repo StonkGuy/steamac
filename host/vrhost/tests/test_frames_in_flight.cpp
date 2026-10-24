@@ -70,6 +70,22 @@ int main()
 		copy.get();
 	}
 	{
+		// a GPU-bound game: 100 Hz display, 60 ms GPU frames -> held until the copy, not released after two periods
+		// (the bound is time, not display periods; with a two-period bound the limit never held a frame)
+		FramesInFlight g(1);
+		const ns fast = 10'000'000;
+		g.ready(4, now_ns());
+		auto copy = std::async(std::launch::async, [&] {
+			std::this_thread::sleep_for(std::chrono::milliseconds(60));
+			g.ready(5, now_ns());
+		});
+		ns t0 = now_ns();
+		CHECK(g.wait(5, fast, now_ns()));
+		double waited = ms_since(t0);
+		CHECK(waited >= 59 and waited < FramesInFlight::max_hold_ns / 1e6);
+		copy.get();
+	}
+	{
 		// copies arriving out of order keep the newest id
 		FramesInFlight g(1);
 		g.ready(6, now_ns());
@@ -79,7 +95,7 @@ int main()
 		CHECK(ms_since(t0) < 40);
 	}
 	{
-		// a copy that never comes (frame dropped): released after two periods, reported as a timeout
+		// a copy that never comes (frame dropped): released after max(two periods, max_hold_ns), reported as a timeout
 		FramesInFlight g(2);
 		g.ready(3, now_ns());
 		ns t0 = now_ns();

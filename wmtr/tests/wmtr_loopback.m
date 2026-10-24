@@ -668,8 +668,11 @@ static void test_vr_cadence(void) {
   CHECK(flags == (WMTR_VR_FRAME_FROM_PACER | WMTR_VR_FRAME_PACER_LIVE) && id == g + 1 && wake == hw + 3 * P,
         "held pacer frame: flags %u id %+lld", flags, (long long)(id - g));
   g = id, hw += 3 * P;
-  /* the pacer stopped (headset gone): after 4 periods the guest is no longer told to wait */
-  flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, hw + 4 * P + 1, P, 2 * P, &id, &wake, &disp);
+  /* a GPU-bound game: the host holds the next timing for a 60 ms frame (5+ periods), the guest is still told to wait */
+  flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, hw + 60000000, P, 2 * P, &id, &wake, &disp);
+  CHECK(flags == WMTR_VR_FRAME_PACER_LIVE && id == g + 1, "held 60 ms: flags %u", flags);
+  /* the pacer stopped (headset gone): after WMTR_VR_PACER_LIVE_NS the guest is no longer told to wait */
+  flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, hw + WMTR_VR_PACER_LIVE_NS + 1, P, 2 * P, &id, &wake, &disp);
   CHECK(flags == 0 && id == g + 1, "stopped pacer: flags %u", flags);
   /* an older host (no render divisor): due one display period after its last frame */
   struct wmtr_vr_cadence o = {0};

@@ -64,6 +64,9 @@ void wmtr_vr_get_stats(struct wmtr_vr *vr, struct wmtr_vr_stats *out);
  * Returns WMTR_VR_FRAME_* (= SVR_FRAME_*). */
 #define WMTR_VR_FRAME_FROM_PACER 1u /* a fresh timing: the pacer's own frame */
 #define WMTR_VR_FRAME_PACER_LIVE 2u /* the pacer's newest timing is current */
+/* how long after its last timing the pacer counts as running: in time, not display periods, since a host that holds
+ * frames for a GPU-bound game (VRChat at 24 fps: 41 ms+ per frame) sends its timings several periods apart */
+#define WMTR_VR_PACER_LIVE_NS 150000000ll
 struct wmtr_vr_cadence {
   uint64_t host_last;  /* host frame id of the last fresh timing used */
   int64_t offset;      /* guest id = host id + offset */
