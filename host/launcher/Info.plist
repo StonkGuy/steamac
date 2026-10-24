@@ -2,47 +2,47 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key>
-    <string>es.fxgam.steamac</string>
-    <key>CFBundleName</key>
-    <string>FX Steam Launcher</string>
-    <key>CFBundleDisplayName</key>
-    <string>FX Steam Launcher</string>
-    <key>CFBundleExecutable</key>
-    <string>steamac-vm</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleLocalizations</key>
-    <array>
-        <string>en</string>
-        <string>ru</string>
-        <string>zh-Hans</string>
-    </array>
-    <key>CFBundleShortVersionString</key>
-    <string>1.9.3</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIconName</key>
-    <string>AppIcon</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>GCSupportsControllerUserInteraction</key>
-    <true/>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.games</string>
-    <key>GCSupportsGameMode</key>
-    <true/>
-    <key>LSSupportsGameMode</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>The SteamOS virtual machine records from the microphone while a game or Steam voice chat in it uses one.</string>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>Discover Steam Link and Remote Play devices on your local network and connect them to Steam in the SteamOS virtual machine when LAN Remote Play is enabled.</string>
-    <key>SteamacGameStatsURL</key>
-    <string>https://steamac-game-stats.steamac-game-stats.workers.dev</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>FX Steam Launcher</string>
+	<key>CFBundleExecutable</key>
+	<string>steamac-vm</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>es.fxgam.steamac</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>ru</string>
+		<string>zh-Hans</string>
+	</array>
+	<key>CFBundleName</key>
+	<string>FX Steam Launcher</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.9.4</string>
+	<key>GCSupportsControllerUserInteraction</key>
+	<true/>
+	<key>GCSupportsGameMode</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.games</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSSupportsGameMode</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Discover Steam Link and Remote Play devices on your local network and connect them to Steam in the SteamOS virtual machine when LAN Remote Play is enabled.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>The SteamOS virtual machine records from the microphone while a game or Steam voice chat in it uses one.</string>
+	<key>SteamacGameStatsURL</key>
+	<string>https://steamac-game-stats.steamac-game-stats.workers.dev</string>
 </dict>
 </plist>
