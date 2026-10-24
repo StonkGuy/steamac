@@ -71,4 +71,16 @@ STEAMAC_VR_SOCKET=$sock "$out/vr-testapp" "$out/runtime" "$here/data" 2>"$tmp/ap
 wait $fh
 grep -q '"ok":false' "$log" && { grep '"ok":false' "$log" | head -3; echo "FAIL e2e (live view): bad submit"; exit 1; }
 echo "e2e (live view): $(grep '"ev":"summary"' "$log")"
+# spacewarp: the pacer releases every other frame, each reaching the guest 1 ms after its wake-up; the runtime must
+# wait for each instead of rendering the local frame it is offered in between (every submit a pacer frame)
+sock=$tmp/vr-pacer.sock log=$tmp/host-pacer.log
+"$out/vr-fakehost" --socket "$sock" --script "$here/data/script.txt" --log "$log" --once --pacer 2 &
+fh=$!
+i=0
+while [ ! -S "$sock" ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+STEAMAC_VR_SOCKET=$sock "$out/vr-testapp" "$out/runtime" "$here/data" --divisor 2 2>"$tmp/app-pacer.err" || {
+  cat "$tmp/app-pacer.err"; echo "FAIL e2e (pacer)"; exit 1; }
+wait $fh
+grep -q '"ok":false' "$log" && { grep '"ok":false' "$log" | head -3; echo "FAIL e2e (pacer): bad submit"; exit 1; }
+echo "e2e (pacer 2): $(grep '"ev":"summary"' "$log")"
 echo "PASS e2e"

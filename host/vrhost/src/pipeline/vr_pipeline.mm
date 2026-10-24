@@ -67,8 +67,9 @@ void SessionEncoderSink::encode(int eye, CVPixelBufferRef buffer, const LinkFram
 	}
 }
 
-VrPipeline::VrPipeline(VrSession & session, int link_fd, const std::string & mach_name, CompositorOptions opt) :
-        session(session), opt(opt)
+VrPipeline::VrPipeline(VrSession & session, int link_fd, const std::string & mach_name, CompositorOptions opt,
+                       uint32_t frames_in_flight) :
+        session(session), opt(opt), in_flight(frames_in_flight)
 {
 	server = std::make_unique<VrLinkServer>(
 	        link_fd, mach_name, [this](const LinkFrame & f) { on_frame(f); },
@@ -84,6 +85,7 @@ const char * VrPipeline::upscaler() const
 VrPipeline::~VrPipeline()
 {
 	quit = true;
+	in_flight.shutdown();
 	if (clock.joinable())
 		clock.join();
 	server.reset(); // joins the link thread before the bridge goes away
@@ -239,9 +241,11 @@ void VrPipeline::on_message(const void * msg, size_t n)
 }
 
 // The pacer's frame cadence, forwarded: the guest's WaitGetPoses returns on VRL_TIMING with the poses for its
-// display time, and submits with that frame id (WiVRn matches the headset's feedback by it).
+// display time, and submits with that frame id (WiVRn matches the headset's feedback by it). The render divisor goes
+// along, so that the guest waits for the pacer's next frame instead of rendering frames in between.
 void VrPipeline::frame_clock()
 {
+	uint64_t issued = 0; // the last frame id sent to the guest
 	while (not quit and not server->peer_closed())
 	{
 		if (not session.connected())
@@ -249,13 +253,17 @@ void VrPipeline::frame_clock()
 			std::this_thread::sleep_for(std::chrono::milliseconds(20));
 			continue;
 		}
+		if (in_flight.enabled())
+			in_flight.wait(issued, ns(1e9 / std::max(refresh.load(), 1.0f)), now_ns());
 		FrameTiming t = session.next_frame_timing();
+		issued = t.frame_id;
 		vrl_timing tm{};
 		tm.h = {VRL_TIMING, sizeof tm};
 		tm.frame_id = t.frame_id;
 		tm.wake_up = t.wake_up;
 		tm.predicted_display = t.predicted_display;
 		tm.refresh_hz = refresh;
+		tm.render_divisor = t.render_divisor;
 		vrl_poses ps{};
 		ps.h = {VRL_POSES, sizeof ps};
 		ps.time = t.predicted_display;
@@ -284,6 +292,8 @@ void VrPipeline::on_frame_error()
 void VrPipeline::on_frame(const LinkFrame & f)
 {
 	st.received++;
+	if (in_flight.enabled())
+		in_flight.ready(f.frame_id, f.received_time);
 	auto info = session.connected() ? session.headset() : std::nullopt;
 	if (not info or not info->eye_width)
 	{

@@ -45,6 +45,7 @@ static std::string g_control_socket;              // --control-socket
 static std::atomic<double> g_pipeline_p50_ms{0}; // last link report, for the control socket
 static std::atomic<double> g_compose_gpu_p50_ms{0}, g_submit_copied_p50_ms{0}, g_game_fps{0};
 static CompositorOptions g_quality;                // --upscaler / --sharpness / --force-srgb
+static uint32_t g_frames_in_flight = 0;            // --frames-in-flight
 
 static void usage()
 {
@@ -64,6 +65,8 @@ static void usage()
 	        "  --upscaler metalfx|bilinear  upscaler for --render-scale below 1 (default metalfx)\n"
 	        "  --sharpness F       sharpening in the compositor, 0-1 (default 0)\n"
 	        "  --force-srgb        decode 8-bit eye images as sRGB even when the format is not marked sRGB\n"
+	        "  --frames-in-flight N  hold the game's next frame until all but N-1 issued frames are copied (default 0:\n"
+	        "                      off; 2 keeps CPU/GPU overlap, 1 is the lowest latency)\n"
 	        "  --keyframe-interval S  an IDR at least every S seconds (default: only when the headset asks)\n"
 	        "  --prioritize-speed  VideoToolbox: encoding speed over quality\n"
 	        "  --no-encryption     WiVRn's 'encryption disabled' mode (trusted LAN only)\n"
@@ -433,7 +436,7 @@ static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_soc
 			return 0;
 	}
 	WivrnSession session(cfg);
-	VrPipeline pipeline(session, link_fd, mach_name, g_quality);
+	VrPipeline pipeline(session, link_fd, mach_name, g_quality, g_frames_in_flight);
 	vra_region * audio_region = nullptr;
 	std::unique_ptr<AudioBridge> audio;
 	if (audio_fd >= 0)
@@ -645,6 +648,8 @@ int main(int argc, char ** argv)
 			g_quality.sharpness = std::clamp(std::stof(next()), 0.0f, 1.0f);
 		else if (a == "--force-srgb")
 			g_quality.force_srgb = true;
+		else if (a == "--frames-in-flight")
+			g_frames_in_flight = uint32_t(std::clamp(std::stoi(next()), 0, 8));
 		else if (a == "--keyframe-interval")
 			cfg.keyframe_interval_s = std::stof(next());
 		else if (a == "--pair-on-request")

@@ -82,6 +82,9 @@ struct wmtr_vr {
 #define VR_STATE_ASK_NS 50000000ll
 #define VR_STATE_WAIT_AGAIN_NS 2000000000ll
 
+_Static_assert(WMTR_VR_FRAME_FROM_PACER == SVR_FRAME_FROM_PACER && WMTR_VR_FRAME_PACER_LIVE == SVR_FRAME_PACER_LIVE,
+               "cadence flags are the guest's SVR_FRAME_* flags");
+
 static int64_t
 now_ns(void) {
   return (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -235,16 +238,24 @@ reader_main(void *arg) {
   return NULL;
 }
 
-void
+unsigned
 wmtr_vr_frame_cadence(struct wmtr_vr_cadence *c, uint64_t host_id, int64_t host_wake, int64_t host_display,
-                      uint64_t guest_last, int64_t now, int64_t period, uint64_t *id, int64_t *wake, int64_t *display) {
-  int fresh = host_id && host_id != c->host_last && host_wake > now - 4 * period; /* a new, current pacer frame */
+                      uint64_t guest_last, int64_t now, int64_t period, int64_t render_period, uint64_t *id,
+                      int64_t *wake, int64_t *display) {
+  int live = host_id && host_wake > now - 4 * period; /* the pacer's newest timing is current */
+  int fresh = live && host_id != c->host_last;        /* a new, current pacer frame */
   if (fresh) {
     if (host_id < c->host_last || (int64_t)host_id + c->offset <= (int64_t)guest_last)
       c->offset = (int64_t)guest_last + 1 - (int64_t)host_id; /* host restarted: continue after the guest's id */
     c->host_last = host_id;
     *id = (uint64_t)((int64_t)host_id + c->offset);
     *wake = host_wake, *display = host_display;
+  } else if (live) {
+    /* the pacer's next frame is not out yet: a local one at the time it is due, for a guest that does not wait */
+    *id = guest_last + 1;
+    int64_t w = host_wake + (render_period > period ? render_period : period);
+    if (w < now) w = now;
+    *wake = w, *display = host_display + (w - host_wake);
   } else {
     /* no new host frame: the next local one, a period after the last, never in the past by more than a frame */
     *id = guest_last + 1;
@@ -258,6 +269,7 @@ wmtr_vr_frame_cadence(struct wmtr_vr_cadence *c, uint64_t host_id, int64_t host_
     *wake = now;
   }
   c->last_wake = *wake;
+  return (fresh ? WMTR_VR_FRAME_FROM_PACER : 0) | (live ? WMTR_VR_FRAME_PACER_LIVE : 0);
 }
 
 static void
@@ -298,12 +310,14 @@ query_locked(struct wmtr_vr *vr, void *buf, uint32_t size) {
     int64_t now = now_ns();
     float hz = vr && vr->timing.refresh_hz > 0 ? vr->timing.refresh_hz : st && st->refresh_hz > 0 ? st->refresh_hz : 90.0f;
     int64_t period = (int64_t)(1e9f / hz);
+    int64_t render_period = vr && vr->timing.render_divisor > 1 ? period * vr->timing.render_divisor : period;
     /* the pacer's next frame, or the local cadence with no headset (WaitGetPoses keeps pacing either way) */
     uint64_t f;
     int64_t wake, disp;
     struct wmtr_vr_cadence none = {0};
-    wmtr_vr_frame_cadence(vr ? &vr->cadence : &none, vr ? vr->timing.frame_id : 0, vr ? vr->timing.wake_up : 0,
-                          vr ? vr->timing.predicted_display : 0, last, now, period, &f, &wake, &disp);
+    r.flags = wmtr_vr_frame_cadence(vr ? &vr->cadence : &none, vr ? vr->timing.frame_id : 0,
+                                    vr ? vr->timing.wake_up : 0, vr ? vr->timing.predicted_display : 0, last, now,
+                                    period, render_period, &f, &wake, &disp);
     r.frame_id = f, r.host_now = now, r.wake_up = wake, r.predicted_display = disp;
     r.refresh_hz = hz;
     r.connected = connected;
