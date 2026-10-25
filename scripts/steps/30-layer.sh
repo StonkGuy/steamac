@@ -102,6 +102,10 @@ grep -q 'fx-progress-agent sleep suspend$' "$ST/usr/lib/systemd/system/systemd-s
 [[ -L $ST/usr/lib/systemd/system/timers.target.wants/steamac-mem-trim.timer ]] \
     && grep -q '^ExecStart=/usr/lib/steamac/mem-trim$' "$ST/usr/lib/systemd/system/steamac-mem-trim.service" \
     || { echo "[layer] steamac-mem-trim timer/service missing" >&2; exit 1; }
+# Each time the last running game ends: compact and drop the clean cache so its freed memory goes back too.
+[[ -L $ST/usr/lib/systemd/system/multi-user.target.wants/steamac-mem-trim-games.service ]] \
+    && grep -q '^ExecStart=/usr/lib/steamac/mem-trim games$' "$ST/usr/lib/systemd/system/steamac-mem-trim-games.service" \
+    || { echo "[layer] steamac-mem-trim-games service missing" >&2; exit 1; }
 # Sanity: the pieces the initramfs and the A/B flow depend on.
 for f in usr/bin/splctl usr/lib/rauc/post-install.sh usr/lib/steamac/kernelsetup.sh \
          usr/lib/steamac/rauc-shims/steamos-chroot usr/lib/steamac/steam-gfx-env \
