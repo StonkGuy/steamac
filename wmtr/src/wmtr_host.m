@@ -99,6 +99,13 @@ struct wmtr_host {
   pthread_mutex_t view_lock;
   uint64_t *views;
   uint32_t n_views, cap_views;
+  /* objects the client owns: the +1 results of its creation calls (owned_fields) and out-errors, plus its retains
+   * of them minus its releases (object -> count). Released on destroy, so a client that exits or is killed
+   * without releasing them (DXMT does not at process exit, a killed process never does) does not leave its
+   * textures, buffers and pipelines in the VMM until the VM shuts down. Autoreleased results (encoders, command
+   * buffers, drawables) are not listed: releasing an encoder that is still encoding aborts the process. */
+  pthread_mutex_t owned_lock;
+  CFMutableDictionaryRef owned;
   _Atomic uint64_t n_req, n_sync, n_bytes, n_worker, n_sleep;
   /* client-assigned encoder handles (WMTR_F_CLIENT_HANDLE): entry (handle % WMTR_HANDLE_SLOTS) */
   struct wmtr_handle { _Atomic uint64_t id; _Atomic uint64_t obj; } *handles;
@@ -610,6 +617,72 @@ view_untrack(struct wmtr_host *h, uint64_t v) {
   return found;
 }
 
+/* the fields of `call`'s params that return +1 objects the caller owns (new/alloc/copy results, out-errors);
+ * offsets in `off`, count returned. Autoreleased and non-object results are not listed (keep_autoreleased). */
+static int
+owned_fields(uint16_t call, uint32_t off[2]) {
+#define F1(t, a) do { off[0] = offsetof(struct t, a); return 1; } while (0)
+#define F2(t, a, b) do { off[0] = offsetof(struct t, a); off[1] = offsetof(struct t, b); return 2; } while (0)
+  switch (call) {
+  case 4: F1(unixcall_generic_obj_ret, ret);
+  case 9: case 26: case 114: F1(unixcall_generic_obj_uint64_obj_ret, ret);
+  case 15: case 105: case 106: F1(unixcall_generic_obj_obj_ret, ret);
+  case 18: F1(unixcall_mtldevice_newbuffer, ret);
+  case 19: F1(unixcall_mtldevice_newsamplerstate, ret);
+  case 20: F1(unixcall_mtldevice_newdepthstencilstate, ret);
+  case 21: case 120: F1(unixcall_mtldevice_newtexture, ret);
+  case 22: F1(unixcall_mtlbuffer_newtexture, ret);
+  case 23: F1(unixcall_mtltexture_newtextureview, ret);
+  case 25: F2(unixcall_mtldevice_newlibrary, ret_library, ret_error);
+  case 29: F2(unixcall_mtldevice_newcomputepso, ret_pso, ret_error);
+  case 34: case 131: F2(unixcall_mtldevice_newrenderpso, ret_pso, ret_error);
+  case 35: F2(unixcall_mtldevice_newmeshrenderpso, ret_pso, ret_error);
+  case 56: F1(unixcall_mtldevice_newfxtemporalscaler, ret);
+  case 57: F1(unixcall_mtldevice_newfxspatialscaler, ret);
+  case 61: F1(unixcall_nsstring_string, ret);
+  case 98: F2(unixcall_mtllibrary_newfunction_with_constants, ret, ret_error);
+  case 112: F2(unixcall_mtldevice_newbinaryarchive, ret_archive, ret_error);
+  case 113: F1(unixcall_mtlbinaryarchive_serialize, ret_error);
+  case 115: case 117: F1(unixcall_cache_alloc_init, ret_cache);
+  case 124: F1(unixcall_mtldevice_newsharedeventwithmachport, ret_event);
+  case 127: F1(unixcall_mtlcountersamplebuffer_newtimestampbuffer, ret);
+  case 132: F2(unixcall_mtldevice_newresidencyset, ret_set, ret_error);
+  case 138: F1(unixcall_mtldevice_newheap, ret);
+  case 141: F1(unixcall_mtlheap_newbuffer, ret);
+  case 142: F1(unixcall_mtlheap_newtexture, ret);
+  case 143: F1(unixcall_mtldevice_newicb, ret);
+  case 144: F2(unixcall_mtldevice_newlibrarywithsource, ret_library, ret_error);
+  default: return 0;
+  }
+#undef F1
+#undef F2
+}
+
+/* `d` references of `o`: +1 for a creation result (listed if new), retain/release adjust listed objects only */
+static void
+owned_adjust(struct wmtr_host *h, uint64_t o, long d, int create) {
+  if (!o) return;
+  pthread_mutex_lock(&h->owned_lock);
+  const void *v = NULL;
+  long n = CFDictionaryGetValueIfPresent(h->owned, (const void *)(uintptr_t)o, &v) ? (long)(uintptr_t)v : 0;
+  if (n || create) {
+    n += d;
+    if (n > 0) CFDictionarySetValue(h->owned, (const void *)(uintptr_t)o, (const void *)(uintptr_t)n);
+    else CFDictionaryRemoveValue(h->owned, (const void *)(uintptr_t)o);
+  }
+  pthread_mutex_unlock(&h->owned_lock);
+}
+
+/* test hook: the references to `o` the client owns as listed for destroy (0: not listed) */
+__attribute__((visibility("default"))) long
+wmtr_debug_owned(struct wmtr_host *h, uint64_t o) {
+  const void *v = NULL;
+  pthread_mutex_lock(&h->owned_lock);
+  long n = CFDictionaryGetValueIfPresent(h->owned, (const void *)(uintptr_t)o, &v) ? (long)(uintptr_t)v : 0;
+  pthread_mutex_unlock(&h->owned_lock);
+  return n;
+}
+
 static void *
 resolve(struct wmtr_host *h, uint64_t v, uint8_t *payload, uint32_t payload_size) {
   uint64_t tag = v & WMTR_REF_MASK;
@@ -887,11 +960,17 @@ static NTSTATUS
 host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr_req_ext *r, const uint32_t *relocs,
           const uint64_t *orig) {
   switch (call) {
-  case 0: /* NSObject_retain */
-    if (is_vpool(*(uint64_t *)params)) return STATUS_SUCCESS;
-    break;
+  case 0: { /* NSObject_retain: an object the client owns gains a reference */
+    uint64_t o = *(uint64_t *)params;
+    if (is_vpool(o)) return STATUS_SUCCESS;
+    impl_fn f = (impl_fn)wmtr_impl_funcs[call];
+    NTSTATUS st = f ? f(params) : STATUS_UNSUCCESSFUL;
+    if (st == STATUS_SUCCESS) owned_adjust(h, o, 1, 0);
+    return st;
+  }
   case 1: /* NSObject_release: a virtual pool drains */
     if (is_vpool(*(uint64_t *)params)) { vpool_pop((struct vpool *)(uintptr_t)*(uint64_t *)params); return STATUS_SUCCESS; }
+    owned_adjust(h, *(uint64_t *)params, -1, 0); /* before the release that may free it (and its address) */
     break;
   case 10: /* NSAutoreleasePool_alloc_init */
     ((struct unixcall_generic_obj_ret *)params)->ret =
@@ -1131,6 +1210,10 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
       } else if (!handles_in(h, r, payload, &w0, &cid)) {
         st = STATUS_INVALID_HANDLE; /* a client handle whose creation failed (logged) */
       } else {
+        /* +1 results: only what the implementation writes is listed, never a value the request carried */
+        uint32_t own[2];
+        int n_own = owned_fields(r->h.call, own);
+        for (int k = 0; k < n_own; k++) memset(payload + own[k], 0, 8);
         sigjmp_buf jb;
         if (sigsetjmp(jb, 1) == 0) {
           fault_jmp = &jb;
@@ -1142,6 +1225,11 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
           if (cs) callstats_add(r->h.call, r->h.flags & WMTR_F_SYNC, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
           fault_jmp = NULL;
           if (cid) handle_created(h, r, payload, cid);
+          for (int k = 0; st == STATUS_SUCCESS && k < n_own; k++) {
+            uint64_t o;
+            memcpy(&o, payload + own[k], 8);
+            owned_adjust(h, o, 1, 1);
+          }
           uint32_t ti = atomic_fetch_add(&h->trace_n, 1) % 128;
           h->trace[ti].call = r->h.call; h->trace[ti].slot = r->h.slot; h->trace[ti].st = (uint32_t)st;
           for (int k = 0; k < 4; k++) h->trace[ti].q[k] = r->h.params_size >= 8u * (k + 1) ? ((const uint64_t *)payload)[k] : 0;
@@ -1319,6 +1407,8 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   h->callbacks = [[WMTRCallbackState alloc] init];
   h->callbacks->host = h;
   pthread_mutex_init(&h->view_lock, NULL);
+  pthread_mutex_init(&h->owned_lock, NULL);
+  h->owned = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
   h->compile_q = dispatch_queue_create("wmtr.compile", DISPATCH_QUEUE_CONCURRENT);
   h->block_q = dispatch_queue_create("wmtr.block", DISPATCH_QUEUE_CONCURRENT);
   pthread_attr_t a;
@@ -1374,6 +1464,20 @@ wmtr_host_destroy(struct wmtr_host *h) {
   /* let queued compile/blocking jobs finish: they call back into the embedder */
   dispatch_barrier_sync(h->compile_q, ^{});
   dispatch_barrier_sync(h->block_q, ^{});
+  /* the client is gone: release the objects it still owned (no call runs any more) */
+  CFIndex n_owned = CFDictionaryGetCount(h->owned);
+  if (n_owned) {
+    const void **objs = malloc((size_t)n_owned * sizeof *objs), **counts = malloc((size_t)n_owned * sizeof *counts);
+    CFDictionaryGetKeysAndValues(h->owned, objs, counts);
+    CFDictionaryRemoveAllValues(h->owned);
+    uint64_t refs = 0;
+    @autoreleasepool {
+      for (CFIndex i = 0; i < n_owned; i++)
+        for (uintptr_t k = 0; k < (uintptr_t)counts[i]; k++, refs++) [(id)objs[i] release];
+    }
+    LOG(1, "client gone: released %ld objects it still owned (%llu references)\n", (long)n_owned, (unsigned long long)refs);
+    free(objs); free(counts);
+  }
   /* the client is gone: take down the views it never released */
   pthread_mutex_lock(&h->view_lock);
   for (uint32_t i = 0; i < h->n_views; i++)

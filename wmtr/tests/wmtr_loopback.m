@@ -32,6 +32,8 @@ typedef int NTSTATUS;
 typedef NTSTATUS (*fn_t)(void *);
 extern const void *__wine_unix_call_funcs[];
 extern int wmtr_vr_call(const void *req, uint32_t req_size, void *rep, uint32_t rep_cap);
+/* weak: the behaviour checks of the owned-object section also run against a host without the hook */
+extern long wmtr_debug_owned(struct wmtr_host *h, uint64_t o) __attribute__((weak_import));
 
 static int failures;
 #define CHECK(c, ...) do { if (!(c)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
@@ -131,11 +133,25 @@ static NTSTATUS f_sm50compile(void *a) {
 }
 static NTSTATUS f_pixelformat(void *a) { ((struct unixcall_generic_obj_uint64_ret *)a)->ret = 70; return 0; } /* RGBA8 */
 static NTSTATUS f_release(void *a) { [(id)*(obj_handle_t *)a release]; return 0; }
+static NTSTATUS f_retain(void *a) { [(id)*(obj_handle_t *)a retain]; return 0; }
+/* newFunction: a +1 result like the real one, counted while alive; the value it computed from the name and the
+ * receiver is kept for the native/remote comparison */
+static int owned_alive;
+@interface Owned : NSObject
+@end
+@implementation Owned
+- (instancetype)init { if ((self = [super init])) owned_alive++; return self; }
+- (void)dealloc { owned_alive--; [super dealloc]; }
+@end
+static uint64_t newfunction_val;
 static NTSTATUS f_newfunction(void *a) {
   struct unixcall_generic_obj_uint64_obj_ret *p = a;
-  p->ret = strlen((const char *)(uintptr_t)p->arg) * 1000 + p->handle;
+  newfunction_val = strlen((const char *)(uintptr_t)p->arg) * 1000 + p->handle;
+  p->ret = (obj_handle_t)[[Owned alloc] init];
   return 0;
 }
+/* newSharedEvent that writes no result: what the request carried in `ret` must not count as an object */
+static NTSTATUS f_noresult(void *a) { (void)a; return 0; }
 static NTSTATUS f_signal(void *p) { /* encodeSignalEvent, as DXMT's unix side */
   struct unixcall_generic_obj_obj_uint64_noret *a = p;
   [(id<MTLCommandBuffer>)a->handle encodeSignalEvent:(id<MTLSharedEvent>)a->arg0 value:a->arg1];
@@ -150,14 +166,21 @@ static mach_port_t new_send_port(void) {
   return p;
 }
 static mach_port_t shared_imported; /* the port of the last newSharedTexture import */
-static NTSTATUS f_newshared(void *a) { /* newSharedTexture: export mints a port, import opens one */
+/* newSharedTexture: export mints a port, import opens one; +1 results like the real ones (the client never
+ * releases them: destroy does, see the owned-object checks) */
+static obj_handle_t shared_exported_tex, shared_imported_tex, shared_event_obj;
+static NTSTATUS f_newshared(void *a) {
   struct unixcall_mtldevice_newtexture *p = a; struct WMTTextureInfo *info = p->info.ptr;
-  if (info->mach_port) { shared_imported = info->mach_port; p->ret = 0x5100; }
-  else { info->mach_port = new_send_port(); p->ret = 0x5000; }
+  p->ret = (obj_handle_t)[[Owned alloc] init];
+  if (info->mach_port) { shared_imported = info->mach_port; shared_imported_tex = p->ret; }
+  else { info->mach_port = new_send_port(); shared_exported_tex = p->ret; }
   return 0;
 }
 static NTSTATUS f_eventport(void *a) { ((struct unixcall_mtlsharedevent_createmachport *)a)->ret_mach_port = new_send_port(); return 0; }
-static NTSTATUS f_eventwithport(void *a) { ((struct unixcall_mtldevice_newsharedeventwithmachport *)a)->ret_event = 0x5200; return 0; }
+static NTSTATUS f_eventwithport(void *a) {
+  shared_event_obj = ((struct unixcall_mtldevice_newsharedeventwithmachport *)a)->ret_event = (obj_handle_t)[[Owned alloc] init];
+  return 0;
+}
 static uint64_t enc_log[64][2]; static int n_enc_log;
 static void enc_note(uint64_t call, uint64_t v) { if (n_enc_log < 64) { enc_log[n_enc_log][0] = call; enc_log[n_enc_log][1] = v; } n_enc_log++; }
 static NTSTATUS f_new_encoder(uint64_t *ret, uint64_t call, int fail) {
@@ -174,7 +197,7 @@ static NTSTATUS f_render_enc(void *a) {
 }
 static NTSTATUS f_end_encoding(void *a) { enc_note(33, ((struct unixcall_generic_obj_noret *)a)->handle); return 0; }
 static NTSTATUS f_compute_encode(void *a) { enc_note(37, ((struct unixcall_generic_obj_cmd_noret *)a)->encoder); return 0; }
-const void *wmtr_impl_funcs[WMTR_NCALLS] = {[120] = f_newshared, [123] = f_eventport, [124] = f_eventwithport, [12] = f_commit, [1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
+const void *wmtr_impl_funcs[WMTR_NCALLS] = {[120] = f_newshared, [123] = f_eventport, [124] = f_eventwithport, [12] = f_commit, [0] = f_retain, [1] = f_release, [15] = f_noresult, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
                                     [33] = f_end_encoding, [37] = f_compute_encode, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
                                     [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes};
 
@@ -711,8 +734,9 @@ int main(void) {
 
     /* 2. C-string input in a uint64 arg, value result */
     struct unixcall_generic_obj_uint64_obj_ret fa = {5, (uint64_t)(uintptr_t)"vertex_main", 0}, fb = fa;
-    native(26, &fa); remote(26, &fb);
-    CHECK(fa.ret == fb.ret, "newFunction ret %llu vs %llu", fa.ret, fb.ret);
+    native(26, &fa); uint64_t nv = newfunction_val; remote(26, &fb);
+    CHECK(fa.ret && fb.ret && nv == newfunction_val, "newFunction value %llu vs %llu", nv, newfunction_val);
+    [(id)fa.ret release]; /* the native call's result; the remote ones are the client's (released on destroy) */
 
     /* 3. command list with embedded pointers (async call, then a sync call orders it) */
     struct WMTViewport vps[3] = {{0, 0, 640, 480, 0, 1}, {0, 0, 320, 240, 0, 1}, {0, 0, 7, 7, 0, 1}};
@@ -792,6 +816,7 @@ int main(void) {
       CHECK(R->free_head == fh + 1, "buffer range not returned (free_head %llu)", R->free_head);
     }
     /* 6. caller-placed memory (DXMT CpuPlaced): initial bytes kept, pointer replaced by arena memory */
+    obj_handle_t placed = 0; /* never released by the client: destroy releases it */
     {
       uint8_t *own; posix_memalign((void **)&own, 16384, 65536); memset(own, 0x3c, 65536);
       struct WMTBufferInfo ci = {65536, WMTResourceStorageModeShared, {own}, 0};
@@ -799,6 +824,7 @@ int main(void) {
       remote(18, &cb2);
       CHECK(cb2.ret && ci.memory.ptr && ci.memory.ptr != own && ((uint8_t *)ci.memory.ptr)[65535] == 0x3c,
             "caller-placed buffer ret %llx mem %p", cb2.ret, ci.memory.ptr);
+      placed = cb2.ret;
       free(own);
     }
     /* 7. after a peak, idle arena blobs beyond the 128 MiB reserve go back to the host once they have
@@ -955,6 +981,37 @@ int main(void) {
       CHECK(n == 1 && t > 0 && strstr(line, ",0,0,0,0,0"), "WMTR_FRAMES: %d lines, last '%s'", n, line);
       unlink(frames_path);
     }
+    /* objects the client owns and never released go on destroy (checked after it): +1 results with its retains
+       minus its releases; an object it released is not released again, one it only retained after getting it
+       autoreleased is not released for it, and a value the request carried in a result field is not an object */
+    obj_handle_t kept = 0, shared = 0; NSUInteger shared_refs = 0, placed_refs = 0; uint64_t placed_fh = 0;
+    {
+      struct unixcall_generic_obj_uint64_obj_ret c1 = {5, (uint64_t)(uintptr_t)"kept", 0}, c2 = {5, (uint64_t)(uintptr_t)"dropped", 0};
+      remote(26, &c1); remote(26, &c2);
+      kept = c1.ret;
+      obj_handle_t h = kept;
+      remote(0, &h); remote(0, &h); remote(1, &h); /* owned twice */
+      int alive = owned_alive;
+      h = c2.ret; remote(1, &h); /* released by its owner: freed now */
+      struct unixcall_generic_obj_ret ar = {0};
+      remote(53, &ar);
+      shared = ar.ret; h = shared; remote(0, &h);
+      struct unixcall_mtldevice_newlibrary nl = {0};
+      remote(25, &nl); /* its out-error is never released by the client */
+      struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q);
+      CHECK(owned_alive == alive - 1, "an object released by its owner is still alive (%d -> %d)", alive, owned_alive);
+      if (wmtr_debug_owned) {
+        CHECK(wmtr_debug_owned(H, kept) == 2 && wmtr_debug_owned(H, shared) == 0 && wmtr_debug_owned(H, nl.ret_error) == 1 &&
+              wmtr_debug_owned(H, placed) == 1, "owned: kept %ld shared %ld error %ld placed %ld", wmtr_debug_owned(H, kept),
+              wmtr_debug_owned(H, shared), wmtr_debug_owned(H, nl.ret_error), wmtr_debug_owned(H, placed));
+        struct unixcall_generic_obj_obj_ret forged = {0, 0x4141414141410ull};
+        uint32_t fst = raw_request(15, sizeof forged, sizeof forged, NULL, 0, NULL, 0, &forged, sizeof forged, NULL);
+        CHECK(fst == 0 && wmtr_debug_owned(H, 0x4141414141410ull) == 0, "a result value from the request was listed (st %x)", fst);
+      }
+      shared_refs = [(id)shared retainCount];
+      if (placed) { [(id)placed retain]; placed_refs = [(id)placed retainCount]; } /* watched across destroy */
+      placed_fh = ((struct wmtr_ring *)blob_base[0])->free_head;
+    }
     { /* views: ReleaseMetalView releases once; views the client never released go on destroy */
       struct unixcall_create_metal_view_from_hwnd v1 = {.hwnd = 1, .device = 2}, v2 = {.hwnd = 3, .device = 2};
       CHECK(remote(72, &v1) == 0 && remote(72, &v2) == 0 && v1.ret_view && v2.ret_view && v1.ret_layer == 0x77,
@@ -1006,7 +1063,7 @@ int main(void) {
       {
         struct WMTTextureInfo ti = {.pixel_format = 81, .width = 272, .height = 272, .depth = 1, .array_length = 1};
         struct unixcall_mtldevice_newtexture nt = {.device = 0x77}; nt.info.ptr = &ti;
-        CHECK(remote(120, &nt) == 0 && ti.mach_port && nt.ret == 0x5000, "newSharedTexture export: port %u", ti.mach_port);
+        CHECK(remote(120, &nt) == 0 && ti.mach_port && nt.ret && nt.ret == shared_exported_tex, "newSharedTexture export: port %u", ti.mach_port);
         struct unixcall_bootstrap reg = {0};
         snprintf(reg.name, sizeof reg.name, "DXMT_shared_resource_wmtrtest%d", (int)getpid());
         reg.mach_port = ti.mach_port;
@@ -1017,7 +1074,7 @@ int main(void) {
         CHECK(remote(122, &look) == 0 && look.mach_port == ti.mach_port, "WMTBootstrapLookUp: %u, want %u", look.mach_port, ti.mach_port);
         struct WMTTextureInfo ti2 = ti; ti2.mach_port = look.mach_port;
         struct unixcall_mtldevice_newtexture open = {.device = 0x77}; open.info.ptr = &ti2;
-        CHECK(remote(120, &open) == 0 && open.ret == 0x5100 && shared_imported == ti.mach_port, "newSharedTexture import");
+        CHECK(remote(120, &open) == 0 && open.ret && open.ret == shared_imported_tex && shared_imported == ti.mach_port, "newSharedTexture import");
         struct unixcall_bootstrap missing = {0}; strcpy(missing.name, "DXMT_shared_resource_never_registered");
         CHECK(remote(122, &missing) != 0 && !missing.mach_port, "WMTBootstrapLookUp of an unknown name succeeded");
         /* ports the host never gave out are refused, so a client cannot publish or open the host's own ports */
@@ -1033,7 +1090,7 @@ int main(void) {
         struct unixcall_bootstrap ereg = {0}; strcpy(ereg.name, "DXMT_shared_resource_fence"); ereg.mach_port = ep.ret_mach_port;
         CHECK(remote(121, &ereg) == 0, "WMTBootstrapRegister of an event port");
         struct unixcall_mtldevice_newsharedeventwithmachport ew = {.device = 0x77, .mach_port = ep.ret_mach_port};
-        CHECK(remote(124, &ew) == 0 && ew.ret_event == 0x5200, "newSharedEventWithMachPort");
+        CHECK(remote(124, &ew) == 0 && ew.ret_event && ew.ret_event == shared_event_obj, "newSharedEventWithMachPort");
         struct unixcall_mtldevice_newsharedeventwithmachport ef = {.device = 0x77, .mach_port = foreign};
         CHECK(remote(124, &ef) != 0, "newSharedEventWithMachPort of a foreign port");
         CHECK(wmtr_host_shared_names() == 2, "%u shared names registered, want 2", wmtr_host_shared_names());
@@ -1082,6 +1139,17 @@ int main(void) {
       printf("wake after destroy: blocked\n");
       /* the client is gone: so are the names it registered */
       CHECK(wmtr_host_shared_names() == 0, "%u shared names left after the client was destroyed", wmtr_host_shared_names());
+      CHECK(owned_alive == 0, "destroy left %d objects the client owned alive", owned_alive);
+      CHECK(!err_alive, "destroy did not release an out-error the client owned");
+      CHECK([(id)shared retainCount] == shared_refs, "destroy released an object the client did not own (%lu -> %lu refs)",
+            (unsigned long)shared_refs, (unsigned long)[(id)shared retainCount]);
+      if (placed) {
+        CHECK([(id)placed retainCount] == placed_refs - 1, "destroy did not release the client's arena buffer (%lu -> %lu refs)",
+              (unsigned long)placed_refs, (unsigned long)[(id)placed retainCount]);
+        [(id)placed release]; /* freed now: its deallocator must not write the destroyed client's ring */
+        usleep(50000);
+        CHECK(((struct wmtr_ring *)blob_base[0])->free_head == placed_fh, "a free reached the ring after destroy");
+      }
       CHECK(n_released == 2 && released[1] == v2.ret_view, "destroy did not release the leftover view (%d releases)", n_released);
       /* WMTR_CALLSTATS: destroy wrote a snapshot; call 39 (sync, above) is in it with its sync count */
       FILE *sf = fopen(stats_path, "r");
