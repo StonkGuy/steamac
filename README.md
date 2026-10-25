@@ -126,6 +126,11 @@ uses goes back to the Mac:
 | DXMT arena trim (`wmtr/`, libkrun patch 0028) | DXMT path: shared buffers idle for 1 s beyond a 128 MiB reserve go back to the Mac after a loading peak | on; `WMTR_ARENA_KEEP_MB`, `WMTR_ARENA_TRIM_MS`, `-1` keeps all | offline test: 504 -> 203 MiB after a peak; live check pending |
 | DXMT objects of an ended game (`wmtr/`) | when a game exits or is killed, the Metal objects it still owned (textures, buffers, pipelines) are released at once; before, they stayed in the VM until it shut down | on | after an OOM-killed VRChat ~1.1 GiB of graphics memory stayed behind; offline test, live check pending |
 
+Swap inside the guest: zram as large as the VM's memory, compressed with zstd (SteamOS's own is half the RAM with
+lzo-rle), and behind it a swap file on /home of half the VM's memory that only takes pages once zram is full
+(`steamac.swap_fallback=0` turns the file off and removes it). With SteamOS's zram alone, a heavy VRChat world change in
+an 8 GiB VM filled RAM and zram and the guest kernel killed the game.
+
 Scope: general (any game on this stack). These lower the idle and after-load footprint; they do not make a game fit
 whose peak needs more than the VM and the Mac have (see *Limits*).
 

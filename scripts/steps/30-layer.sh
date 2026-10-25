@@ -106,11 +106,15 @@ grep -q 'fx-progress-agent sleep suspend$' "$ST/usr/lib/systemd/system/systemd-s
 [[ -L $ST/usr/lib/systemd/system/multi-user.target.wants/steamac-mem-trim-games.service ]] \
     && grep -q '^ExecStart=/usr/lib/steamac/mem-trim games$' "$ST/usr/lib/systemd/system/steamac-mem-trim-games.service" \
     || { echo "[layer] steamac-mem-trim-games service missing" >&2; exit 1; }
+# Guest swap: zram the size of RAM (zstd), a swap file behind it for when zram is full.
+grep -qx 'zram-size = ram' "$ST/usr/lib/systemd/zram-generator.conf.d/50-steamac.conf" \
+    && [[ -L $ST/usr/lib/systemd/system/multi-user.target.wants/steamac-swap-fallback.service ]] \
+    || { echo "[layer] zram drop-in / steamac-swap-fallback service missing" >&2; exit 1; }
 # Sanity: the pieces the initramfs and the A/B flow depend on.
 for f in usr/bin/splctl usr/lib/rauc/post-install.sh usr/lib/steamac/kernelsetup.sh \
          usr/lib/steamac/rauc-shims/steamos-chroot usr/lib/steamac/steam-gfx-env \
          usr/lib/steamac/steam-shader-defaults usr/lib/steamac/steam-client \
-         usr/lib/steamac/nested-desktop usr/lib/steamac/steam-gfx-path usr/lib/steamac/steam-vr-path usr/lib/steamac/steam-frame-latency usr/lib/steamac/mem-trim usr/lib/steamac/steam-ui-gpu \
+         usr/lib/steamac/nested-desktop usr/lib/steamac/steam-gfx-path usr/lib/steamac/steam-vr-path usr/lib/steamac/steam-frame-latency usr/lib/steamac/mem-trim usr/lib/steamac/swap-fallback usr/lib/steamac/steam-ui-gpu \
          usr/lib/steamac/desktop-bin/kwin_wayland_wrapper \
          usr/lib/steamac/desktop-bin/steamosctl usr/lib/steamos/gamescope-session; do
     [[ -x $ST/$f ]] || { echo "[layer] $f missing or not executable" >&2; exit 1; }
