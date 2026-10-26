@@ -252,10 +252,13 @@ wmtr_vr_frame_cadence(struct wmtr_vr_cadence *c, uint64_t host_id, int64_t host_
     *id = (uint64_t)((int64_t)host_id + c->offset);
     *wake = host_wake, *display = host_display;
   } else if (live) {
-    /* the pacer's next frame is not out yet: a local one at the time it is due, for a guest that does not wait */
+    /* the pacer's next frame is not out yet: a local one at the time it is due, for a guest that does not wait;
+     * a period after the last one at least, or a guest that asks again at once (one that does not wait, or a
+     * runtime that gave up waiting) renders a burst of frames, all due now, faster than it can display them */
     *id = guest_last + 1;
     int64_t w = host_wake + (render_period > period ? render_period : period);
     if (w < now) w = now;
+    if (c->last_wake && w < c->last_wake + period) w = c->last_wake + period;
     *wake = w, *display = host_display + (w - host_wake);
   } else {
     /* no new host frame: the next local one, a period after the last, never in the past by more than a frame */

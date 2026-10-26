@@ -671,6 +671,20 @@ static void test_vr_cadence(void) {
   /* a GPU-bound game: the host holds the next timing for a 60 ms frame (5+ periods), the guest is still told to wait */
   flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, hw + 60000000, P, 2 * P, &id, &wake, &disp);
   CHECK(flags == WMTR_VR_FRAME_PACER_LIVE && id == g + 1, "held 60 ms: flags %u", flags);
+  /* a guest that does not wait for the pacer (it sleeps until each frame's wake-up and asks again right after)
+   * while the next pacer frame is overdue: one frame a period, not a burst all due now (vr_e2e: four frames in 80 us
+   * overran the producer's ring of three eye textures) */
+  {
+    int64_t q = hw + 60000000, prev = wake;
+    int spaced = 0;
+    for (int k = 0; k < 4; k++) {
+      flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, q, P, 2 * P, &id, &wake, &disp);
+      spaced += flags == WMTR_VR_FRAME_PACER_LIVE && id == g + 1 && wake >= prev + P;
+      prev = wake, g = id;
+      q = (wake > q ? wake : q) + 10000;
+    }
+    CHECK(spaced == 4, "local frames while the pacer is live: %d of 4 a period apart", spaced);
+  }
   /* the pacer stopped (headset gone): after WMTR_VR_PACER_LIVE_NS the guest is no longer told to wait */
   flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, hw + WMTR_VR_PACER_LIVE_NS + 1, P, 2 * P, &id, &wake, &disp);
   CHECK(flags == 0 && id == g + 1, "stopped pacer: flags %u", flags);
