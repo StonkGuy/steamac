@@ -65,8 +65,10 @@ static void usage()
 	        "  --upscaler metalfx|bilinear  upscaler for --render-scale below 1 (default metalfx)\n"
 	        "  --sharpness F       sharpening in the compositor, 0-1 (default 0)\n"
 	        "  --force-srgb        decode 8-bit eye images as sRGB even when the format is not marked sRGB\n"
-	        "  --frames-in-flight N  hold the game's next frame until all but N-1 issued frames are copied (default 0:\n"
-	        "                      off; 2 keeps CPU/GPU overlap, 1 is the lowest latency)\n"
+	        "  --frames-in-flight N|auto  hold the game's next frame until all but N-1 issued frames are copied (default\n"
+	        "                      0: off; 2 keeps CPU/GPU overlap, 1 is the lowest latency); auto: a GPU-bound game's\n"
+	        "                      CPU work is timed to end as the GPU finishes the frame before (latency of 1, frame\n"
+	        "                      rate of 0)\n"
 	        "  --keyframe-interval S  an IDR at least every S seconds (default: only when the headset asks)\n"
 	        "  --prioritize-speed  VideoToolbox: encoding speed over quality\n"
 	        "  --no-encryption     WiVRn's 'encryption disabled' mode (trusted LAN only)\n"
@@ -485,6 +487,12 @@ static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_soc
 			       q(l.submit_to_copied, .5), q(l.submit_to_copied, .99), q(l.copied_to_received, .5),
 			       q(l.copied_to_received, .99), q(l.received_to_sent, .5), q(l.received_to_sent, .99), q(l.total, .5),
 			       q(l.total, .99), q(l.compose_gpu, .5), s.last_encode_ns / 1e6, s.last_feedback_decode_ns / 1e6);
+			if (pipeline.release_adaptive())
+			{
+				auto e = pipeline.release_estimate();
+				printf("frame release auto: CPU %.1f ms, GPU %.1f ms, %s\n", e.cpu / 1e6, e.gpu / 1e6,
+				       e.holding ? "GPU-bound: held" : "not held");
+			}
 			fflush(stdout);
 			last_report = now_ns();
 		}
@@ -649,7 +657,10 @@ int main(int argc, char ** argv)
 		else if (a == "--force-srgb")
 			g_quality.force_srgb = true;
 		else if (a == "--frames-in-flight")
-			g_frames_in_flight = uint32_t(std::clamp(std::stoi(next()), 0, 8));
+		{
+			std::string v = next();
+			g_frames_in_flight = v == "auto" ? FramesInFlight::adaptive : uint32_t(std::clamp(std::stoi(v), 0, 8));
+		}
 		else if (a == "--keyframe-interval")
 			cfg.keyframe_interval_s = std::stof(next());
 		else if (a == "--pair-on-request")

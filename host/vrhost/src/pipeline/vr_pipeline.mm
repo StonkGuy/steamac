@@ -272,7 +272,10 @@ void VrPipeline::frame_clock()
 		// poses first: the guest's frame starts on the timing packet
 		server->send(&ps, sizeof ps);
 		if (server->send(&tm, sizeof tm))
+		{
 			timings++;
+			in_flight.released(t.frame_id, now_ns());
+		}
 	}
 }
 
@@ -293,7 +296,7 @@ void VrPipeline::on_frame(const LinkFrame & f)
 {
 	st.received++;
 	if (in_flight.enabled())
-		in_flight.ready(f.frame_id, f.received_time);
+		in_flight.ready(f.frame_id, f.received_time, f.app_submit_time, f.ready_time);
 	auto info = session.connected() ? session.headset() : std::nullopt;
 	if (not info or not info->eye_width)
 	{

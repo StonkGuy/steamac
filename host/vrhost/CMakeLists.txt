@@ -128,7 +128,7 @@ add_custom_command(TARGET steamac-vrhost POST_BUILD
 option(VRHOST_TESTS "Build the tests" ON)
 if(VRHOST_TESTS)
 enable_testing()
-foreach(t protocol annexb pose_history encoder loopback pacer frames_in_flight crypto audio control)
+foreach(t protocol annexb pose_history encoder loopback pacer frames_in_flight adaptive_release crypto audio control)
 	add_executable(test_${t} tests/test_${t}.cpp)
 	target_link_libraries(test_${t} PRIVATE vrhost-core)
 	add_test(NAME ${t} COMMAND test_${t})
