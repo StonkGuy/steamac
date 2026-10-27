@@ -8,7 +8,7 @@ SRC=$WORK/FEX
 STAGE=$WORK/stage
 REPO=https://github.com/StonkGuy/FEX.git
 FEX_EAC_TAG=eac-2610.3
-FEX_EAC_SHA=938eedfcd79eb00e86561fbdf4933770766f0ba9
+FEX_EAC_SHA=39107ddbb1f1f9ad3778a5aba65f9947cd7e84ce
 
 # Clone the exact tag with shallow submodules unless the tree is already there.
 if [ ! -d "$SRC/.git" ]; then
