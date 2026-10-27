@@ -451,6 +451,116 @@ frame_record_on_completion(id<MTLCommandBuffer> cb) {
   }];
 }
 
+/* ------------------------------------------------------------------------------------------- *
+ * shared resources (calls 120-124): DXMT shares a D3D11 MISC_SHARED texture or a shared fence through a Mach port
+ * that it registers under a random name with the bootstrap server (121) and that another device looks up (122) and
+ * opens (120 with info->mach_port, 124). Every client's executor runs in this process, so a port a client holds is
+ * a name in this process and never crosses the VM. The registry is a table here rather than the bootstrap server:
+ * the names reach every client and nothing outside, and they go when the client that registered them does. A port
+ * a client passes in must be one this host gave a client (an export of 120 or 123, or a look-up). */
+struct shared_port { mach_port_t port; struct wmtr_host *owner; };
+struct shared_name { char name[sizeof(((struct unixcall_bootstrap *)0)->name)]; mach_port_t port; struct wmtr_host *owner; };
+static pthread_mutex_t shared_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct shared_port *shared_ports;
+static uint32_t n_shared_ports, cap_shared_ports;
+static struct shared_name *shared_names;
+static uint32_t n_shared_names, cap_shared_names;
+
+static int
+grow(void **a, uint32_t n, uint32_t *cap, size_t elem) {
+  if (n < *cap) return 1;
+  uint32_t c = *cap ? *cap * 2 : 16;
+  void *p = realloc(*a, c * elem);
+  if (!p) return 0;
+  *a = p; *cap = c;
+  return 1;
+}
+
+/* a port this host gave a client (shared_lock held) */
+static int
+shared_port_known(mach_port_t port) {
+  if (port == MACH_PORT_NULL) return 0;
+  for (uint32_t i = 0; i < n_shared_ports; i++) if (shared_ports[i].port == port) return 1;
+  for (uint32_t i = 0; i < n_shared_names; i++) if (shared_names[i].port == port) return 1;
+  return 0;
+}
+
+/* an exported port: its send right is the client's, given back when the client goes */
+static void
+shared_port_add(struct wmtr_host *h, mach_port_t port) {
+  pthread_mutex_lock(&shared_lock);
+  if (grow((void **)&shared_ports, n_shared_ports, &cap_shared_ports, sizeof *shared_ports))
+    shared_ports[n_shared_ports++] = (struct shared_port){port, h};
+  pthread_mutex_unlock(&shared_lock);
+}
+
+static int
+shared_known(mach_port_t port) {
+  pthread_mutex_lock(&shared_lock);
+  int k = shared_port_known(port);
+  pthread_mutex_unlock(&shared_lock);
+  return k;
+}
+
+static NTSTATUS
+shared_register(struct wmtr_host *h, struct unixcall_bootstrap *p) {
+  if (!memchr(p->name, 0, sizeof p->name)) return STATUS_INVALID_PARAMETER;
+  NTSTATUS st = STATUS_UNSUCCESSFUL;
+  pthread_mutex_lock(&shared_lock);
+  if (!shared_port_known(p->mach_port)) st = STATUS_INVALID_PARAMETER;
+  else {
+    uint32_t i = 0;
+    while (i < n_shared_names && strcmp(shared_names[i].name, p->name)) i++;
+    /* the table keeps its own send right, as the bootstrap server would */
+    if (i == n_shared_names && grow((void **)&shared_names, n_shared_names, &cap_shared_names, sizeof *shared_names) &&
+        mach_port_mod_refs(mach_task_self(), p->mach_port, MACH_PORT_RIGHT_SEND, 1) == KERN_SUCCESS) {
+      struct shared_name *n = &shared_names[n_shared_names++];
+      strcpy(n->name, p->name);
+      n->port = p->mach_port;
+      n->owner = h;
+      st = STATUS_SUCCESS;
+    }
+  }
+  pthread_mutex_unlock(&shared_lock);
+  return st;
+}
+
+static NTSTATUS
+shared_look_up(struct unixcall_bootstrap *p) {
+  p->mach_port = MACH_PORT_NULL;
+  if (!memchr(p->name, 0, sizeof p->name)) return STATUS_INVALID_PARAMETER;
+  pthread_mutex_lock(&shared_lock);
+  for (uint32_t i = 0; i < n_shared_names; i++)
+    if (!strcmp(shared_names[i].name, p->name)) { p->mach_port = shared_names[i].port; break; }
+  pthread_mutex_unlock(&shared_lock);
+  return p->mach_port ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+
+/* the client is gone: its names and the send rights of its exports */
+static void
+shared_release(struct wmtr_host *h) {
+  pthread_mutex_lock(&shared_lock);
+  for (uint32_t i = 0; i < n_shared_names;)
+    if (shared_names[i].owner == h) {
+      mach_port_deallocate(mach_task_self(), shared_names[i].port);
+      shared_names[i] = shared_names[--n_shared_names];
+    } else i++;
+  for (uint32_t i = 0; i < n_shared_ports;)
+    if (shared_ports[i].owner == h) {
+      mach_port_deallocate(mach_task_self(), shared_ports[i].port);
+      shared_ports[i] = shared_ports[--n_shared_ports];
+    } else i++;
+  pthread_mutex_unlock(&shared_lock);
+}
+
+uint32_t
+wmtr_host_shared_names(void) {
+  pthread_mutex_lock(&shared_lock);
+  uint32_t n = n_shared_names;
+  pthread_mutex_unlock(&shared_lock);
+  return n;
+}
+
 /* ------------------------------------------------------------------------------------------- */
 static void
 view_track(struct wmtr_host *h, uint64_t v) {
@@ -487,6 +597,26 @@ resolve(struct wmtr_host *h, uint64_t v, uint8_t *payload, uint32_t payload_size
     uint64_t size = 0;
     uint8_t *b = h->ops->blob_ptr(h->ctx, blob, &size);
     return (b && off < size) ? b + off : NULL;
+  }
+  return NULL;
+}
+
+/* the `size` bytes the client staged for the pointer field at `field` (one of the request's relocations), or NULL:
+ * for a host-side read of a structure a call's implementation would otherwise be the first to dereference */
+static void *
+staged(struct wmtr_host *h, const struct wmtr_req_ext *r, const uint32_t *relocs, const uint64_t *orig,
+       uint8_t *payload, uint32_t field, uint32_t size) {
+  for (int i = 0; i < r->n_reloc; i++) {
+    if (relocs[i] != field || !orig[i]) continue;
+    uint64_t v = orig[i], tag = v & WMTR_REF_MASK;
+    uint32_t off = (uint32_t)v;
+    if (tag == WMTR_REF_EXTRA) return off <= r->payload_size && size <= r->payload_size - off ? payload + off : NULL;
+    if (tag == WMTR_REF_ARENA) {
+      uint64_t bsize = 0;
+      uint8_t *b = h->ops->blob_ptr(h->ctx, (uint32_t)((v >> 32) & 0xffff), &bsize);
+      return b && off <= bsize && size <= bsize - off ? b + off : NULL;
+    }
+    return NULL;
   }
   return NULL;
 }
@@ -763,6 +893,30 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
                                 ((struct unixcall_generic_obj_obj_uint64_noret *)params)->arg1);
     break;
   }
+  case 120: { /* newSharedTexture: an import opens a port this host gave out; an export's port is recorded */
+    struct WMTTextureInfo *info =
+        staged(h, r, relocs, orig, params, offsetof(struct unixcall_mtldevice_newtexture, info), sizeof *info);
+    if (!info) return STATUS_INVALID_PARAMETER; /* the client always stages it */
+    mach_port_t in = info->mach_port;
+    if (in && !shared_known(in)) return STATUS_INVALID_PARAMETER;
+    NTSTATUS st = ((impl_fn)wmtr_impl_funcs[call])(params);
+    keep_autoreleased(r->h.slot, call, params);
+    if (!st && !in && info->mach_port) shared_port_add(h, info->mach_port);
+    return st;
+  }
+  case 121: /* WMTBootstrapRegister */
+    return shared_register(h, (struct unixcall_bootstrap *)params);
+  case 122: /* WMTBootstrapLookUp */
+    return shared_look_up((struct unixcall_bootstrap *)params);
+  case 123: { /* MTLSharedEvent_createMachPort */
+    struct unixcall_mtlsharedevent_createmachport *p = (void *)params;
+    NTSTATUS st = ((impl_fn)wmtr_impl_funcs[call])(params);
+    if (!st && p->ret_mach_port) shared_port_add(h, p->ret_mach_port);
+    return st;
+  }
+  case 124: /* newSharedEventWithMachPort */
+    if (!shared_known(((struct unixcall_mtldevice_newsharedeventwithmachport *)params)->mach_port)) return STATUS_INVALID_PARAMETER;
+    break;
   case 146: /* WMTVRSubmit: the executor's VR exporter (not DXMT's unix side, which has no VR host) */
     return wmtr_vr_submit(atomic_load(&h->vr), &((struct unixcall_wmtvr_submit *)params)->info);
   case 112: case 113: case 115: case 117: case 119: if (h->ops->map_path) {
@@ -1160,6 +1314,7 @@ wmtr_host_destroy(struct wmtr_host *h) {
   h->n_views = 0;
   free(h->views); h->views = NULL; h->cap_views = 0;
   pthread_mutex_unlock(&h->view_lock);
+  shared_release(h);
   if (h->owns_vr) {
     struct wmtr_vr *vr = atomic_exchange(&h->vr, NULL);
     if (h->owns_vr == 2) vr_shared_release(vr);

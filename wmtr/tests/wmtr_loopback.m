@@ -127,6 +127,21 @@ static NTSTATUS f_signal(void *p) { /* encodeSignalEvent, as DXMT's unix side */
 }
 static NTSTATUS f_commit(void *a) { [(id<MTLCommandBuffer>)((struct unixcall_generic_obj_noret *)a)->handle commit]; return 0; }
 /* encoders: autoreleased objects; the log records (call, receiver or result) in execution order */
+static mach_port_t new_send_port(void) {
+  mach_port_t p = MACH_PORT_NULL;
+  mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &p);
+  mach_port_insert_right(mach_task_self(), p, p, MACH_MSG_TYPE_MAKE_SEND);
+  return p;
+}
+static mach_port_t shared_imported; /* the port of the last newSharedTexture import */
+static NTSTATUS f_newshared(void *a) { /* newSharedTexture: export mints a port, import opens one */
+  struct unixcall_mtldevice_newtexture *p = a; struct WMTTextureInfo *info = p->info.ptr;
+  if (info->mach_port) { shared_imported = info->mach_port; p->ret = 0x5100; }
+  else { info->mach_port = new_send_port(); p->ret = 0x5000; }
+  return 0;
+}
+static NTSTATUS f_eventport(void *a) { ((struct unixcall_mtlsharedevent_createmachport *)a)->ret_mach_port = new_send_port(); return 0; }
+static NTSTATUS f_eventwithport(void *a) { ((struct unixcall_mtldevice_newsharedeventwithmachport *)a)->ret_event = 0x5200; return 0; }
 static uint64_t enc_log[64][2]; static int n_enc_log;
 static void enc_note(uint64_t call, uint64_t v) { if (n_enc_log < 64) { enc_log[n_enc_log][0] = call; enc_log[n_enc_log][1] = v; } n_enc_log++; }
 static NTSTATUS f_new_encoder(uint64_t *ret, uint64_t call, int fail) {
@@ -143,7 +158,7 @@ static NTSTATUS f_render_enc(void *a) {
 }
 static NTSTATUS f_end_encoding(void *a) { enc_note(33, ((struct unixcall_generic_obj_noret *)a)->handle); return 0; }
 static NTSTATUS f_compute_encode(void *a) { enc_note(37, ((struct unixcall_generic_obj_cmd_noret *)a)->encoder); return 0; }
-const void *wmtr_impl_funcs[WMTR_NCALLS] = {[12] = f_commit, [1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
+const void *wmtr_impl_funcs[WMTR_NCALLS] = {[120] = f_newshared, [123] = f_eventport, [124] = f_eventwithport, [12] = f_commit, [1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
                                     [33] = f_end_encoding, [37] = f_compute_encode, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
                                     [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes};
 
@@ -920,6 +935,44 @@ int main(void) {
       [pcb waitUntilCompleted];
       usleep(20000); /* the completion handler runs after waitUntilCompleted returns */
       test_hostile_requests(dev);
+      /* shared resources (DXMT's D3D11 MISC_SHARED textures and shared fences): the Mach ports stay in this process,
+       * so register/look-up (121/122) work through it, and a port a client passes in must be one the host gave out */
+      {
+        struct WMTTextureInfo ti = {.pixel_format = 81, .width = 272, .height = 272, .depth = 1, .array_length = 1};
+        struct unixcall_mtldevice_newtexture nt = {.device = 0x77}; nt.info.ptr = &ti;
+        CHECK(remote(120, &nt) == 0 && ti.mach_port && nt.ret == 0x5000, "newSharedTexture export: port %u", ti.mach_port);
+        struct unixcall_bootstrap reg = {0};
+        snprintf(reg.name, sizeof reg.name, "DXMT_shared_resource_wmtrtest%d", (int)getpid());
+        reg.mach_port = ti.mach_port;
+        CHECK(remote(121, &reg) == 0, "WMTBootstrapRegister of an exported port failed");
+        struct unixcall_bootstrap dup = reg;
+        CHECK(remote(121, &dup) != 0, "WMTBootstrapRegister: a name registered twice");
+        struct unixcall_bootstrap look = {0}; memcpy(look.name, reg.name, sizeof look.name);
+        CHECK(remote(122, &look) == 0 && look.mach_port == ti.mach_port, "WMTBootstrapLookUp: %u, want %u", look.mach_port, ti.mach_port);
+        struct WMTTextureInfo ti2 = ti; ti2.mach_port = look.mach_port;
+        struct unixcall_mtldevice_newtexture open = {.device = 0x77}; open.info.ptr = &ti2;
+        CHECK(remote(120, &open) == 0 && open.ret == 0x5100 && shared_imported == ti.mach_port, "newSharedTexture import");
+        struct unixcall_bootstrap missing = {0}; strcpy(missing.name, "DXMT_shared_resource_never_registered");
+        CHECK(remote(122, &missing) != 0 && !missing.mach_port, "WMTBootstrapLookUp of an unknown name succeeded");
+        /* ports the host never gave out are refused, so a client cannot publish or open the host's own ports */
+        mach_port_t foreign = new_send_port();
+        struct unixcall_bootstrap forged = {0}; strcpy(forged.name, "DXMT_shared_resource_forged"); forged.mach_port = foreign;
+        CHECK(remote(121, &forged) != 0, "WMTBootstrapRegister of a port the host never gave out");
+        struct WMTTextureInfo ti3 = ti; ti3.mach_port = foreign; shared_imported = 0;
+        struct unixcall_mtldevice_newtexture fopen_ = {.device = 0x77}; fopen_.info.ptr = &ti3;
+        CHECK(remote(120, &fopen_) != 0 && !shared_imported, "newSharedTexture import of a foreign port");
+        /* shared fence: the event's port registers and opens the same way */
+        struct unixcall_mtlsharedevent_createmachport ep = {.event = 0x88};
+        CHECK(remote(123, &ep) == 0 && ep.ret_mach_port, "MTLSharedEvent_createMachPort");
+        struct unixcall_bootstrap ereg = {0}; strcpy(ereg.name, "DXMT_shared_resource_fence"); ereg.mach_port = ep.ret_mach_port;
+        CHECK(remote(121, &ereg) == 0, "WMTBootstrapRegister of an event port");
+        struct unixcall_mtldevice_newsharedeventwithmachport ew = {.device = 0x77, .mach_port = ep.ret_mach_port};
+        CHECK(remote(124, &ew) == 0 && ew.ret_event == 0x5200, "newSharedEventWithMachPort");
+        struct unixcall_mtldevice_newsharedeventwithmachport ef = {.device = 0x77, .mach_port = foreign};
+        CHECK(remote(124, &ef) != 0, "newSharedEventWithMachPort of a foreign port");
+        CHECK(wmtr_host_shared_names() == 2, "%u shared names registered, want 2", wmtr_host_shared_names());
+        mach_port_mod_refs(mach_task_self(), foreign, MACH_PORT_RIGHT_RECEIVE, -1);
+      }
       /* a call that faults (bad handle) fails, the process lives, and the client is refused from then on */
       struct unixcall_generic_obj_uint64_ret fz = {0};
       NTSTATUS fs = remote(5, &fz);
@@ -952,6 +1005,8 @@ int main(void) {
         wmtr_host_set_spin(H, WMTR_HOST_SPIN_US_DEFAULT * 1000);
       }
       wmtr_host_destroy(H);
+      /* the client is gone: so are the names it registered */
+      CHECK(wmtr_host_shared_names() == 0, "%u shared names left after the client was destroyed", wmtr_host_shared_names());
       CHECK(n_released == 2 && released[1] == v2.ret_view, "destroy did not release the leftover view (%d releases)", n_released);
       /* WMTR_CALLSTATS: destroy wrote a snapshot; call 39 (sync, above) is in it with its sync count */
       FILE *sf = fopen(stats_path, "r");
