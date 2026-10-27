@@ -295,8 +295,7 @@ void VrPipeline::on_frame_error()
 void VrPipeline::on_frame(const LinkFrame & f)
 {
 	st.received++;
-	if (in_flight.enabled())
-		in_flight.ready(f.frame_id, f.received_time, f.app_submit_time, f.ready_time);
+	in_flight.ready(f.frame_id, f.received_time, f.app_submit_time, f.ready_time); // also while off: the limit can be switched on at run time
 	auto info = session.connected() ? session.headset() : std::nullopt;
 	if (not info or not info->eye_width)
 	{

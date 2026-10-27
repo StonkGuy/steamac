@@ -14,6 +14,7 @@
 #include "session/vr_session.h" // ns
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -31,6 +32,12 @@ public:
 	explicit FramesInFlight(uint32_t n) : n(n) {}
 	bool enabled() const { return n > 0; }
 	bool is_adaptive() const { return n == adaptive; }
+	uint32_t limit() const { return n; }
+	void set(uint32_t limit) // the control socket's "frames-in-flight N|auto" (0 = off)
+	{
+		n = limit;
+		cv.notify_all();
+	}
 
 	// Frame clock, before releasing the frame after `issued` (0: none yet). False when the wait timed out.
 	bool wait(uint64_t issued, ns period, ns now)
@@ -47,20 +54,19 @@ public:
 			for (;;)
 			{
 				ns t = now_ns(), target = std::min(ar.release_time(issued), bound);
-				if (stop or t >= target)
+				if (stop or n != adaptive or t >= target)
 					return stop or t < bound or ar.release_time(issued) <= t;
 				cv.wait_for(l, std::chrono::nanoseconds(target - t));
 			}
 		}
-		return cv.wait_for(l, std::chrono::nanoseconds(std::max(2 * period, max_hold_ns)), [&] { return stop or last_ready_id + n > issued; });
+		return cv.wait_for(l, std::chrono::nanoseconds(std::max(2 * period, max_hold_ns)),
+		                   [&] { return stop or not n or n == adaptive or last_ready_id + n > issued; });
 	}
 
 	// Frame clock: frame `id` went to the guest at `t`.
 	void released(uint64_t id, ns t)
 	{
-		if (n != adaptive)
-			return;
-		std::lock_guard l(m);
+		std::lock_guard l(m); // also while off or fixed: auto can be switched on at run time
 		ar.released(id, t);
 	}
 
@@ -72,7 +78,7 @@ public:
 			std::lock_guard l(m);
 			last_ready_id = std::max(last_ready_id, id);
 			last_ready_time = t;
-			if (n == adaptive and submitted and copied)
+			if (submitted and copied)
 				ar.frame(id, submitted, copied);
 		}
 		cv.notify_one();
@@ -100,7 +106,7 @@ public:
 	}
 
 private:
-	const uint32_t n;
+	std::atomic<uint32_t> n;
 	std::mutex m;
 	std::condition_variable cv;
 	uint64_t last_ready_id = 0;

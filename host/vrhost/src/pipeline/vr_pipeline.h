@@ -82,6 +82,8 @@ public:
 	void on_refresh_rate(float hz) override;
 
 	uint64_t timings_sent() const { return timings; }
+	void set_frames_in_flight(uint32_t n) { in_flight.set(n); }
+	uint32_t frames_in_flight() const { return in_flight.limit(); }
 	bool release_adaptive() const { return in_flight.is_adaptive(); }
 	FramesInFlight::Estimate release_estimate() { return in_flight.estimate(); }
 	const char * upscaler() const; // of the last composed frame ("" = none)

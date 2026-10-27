@@ -301,7 +301,8 @@ static void write_pin(const std::string & pin)
 }
 
 // The launcher's status/pairing socket, when asked for (never fatal: the host serves without it).
-static std::unique_ptr<ControlServer> make_control(WivrnSession & session, std::function<std::string()> stream_json = nullptr)
+static std::unique_ptr<ControlServer> make_control(WivrnSession & session, std::function<std::string()> stream_json = nullptr,
+                                                   std::function<bool(uint32_t)> set_frames_in_flight = nullptr)
 {
 	if (g_control_socket.empty())
 		return nullptr;
@@ -312,6 +313,7 @@ static std::unique_ptr<ControlServer> make_control(WivrnSession & session, std::
 		                                               .pipeline_latency_ms = [] { return g_pipeline_p50_ms.load(); },
 		                                               .pin_changed = write_pin,
 		                                               .stream_json = std::move(stream_json),
+		                                               .set_frames_in_flight = std::move(set_frames_in_flight),
 		                                       });
 	}
 	catch (std::exception & e)
@@ -459,6 +461,9 @@ static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_soc
 		         g_game_fps.load(), ps.received.load(), ps.no_headset.load(), g_compose_gpu_p50_ms.load(),
 		         g_submit_copied_p50_ms.load(), pipeline.upscaler());
 		return std::string(b);
+	}, [&pipeline](uint32_t n) {
+		pipeline.set_frames_in_flight(n);
+		return true;
 	});
 	printf("steamac-vrhost: VR link fd %d, mach name %s, listening on port %d, protocol %016" PRIx64 " (WiVRn v26.9)%s\n",
 	       link_fd, mach_name.c_str(), session.port(), WivrnSession::protocol_version(),

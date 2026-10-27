@@ -25,6 +25,7 @@ public:
 		std::function<void(const std::string &)> pin_changed; // new PIN ("" = pairing off), e.g. for --show-pin
 		// extra members of the status "stream" object (",\"key\":value..."), e.g. the game pipeline's counters
 		std::function<std::string()> stream_json;
+		std::function<bool(uint32_t)> set_frames_in_flight; // "frames-in-flight N|auto"; false = no game link
 	};
 	ControlServer(std::string path, WivrnSession &, Hooks = {});
 	~ControlServer();
