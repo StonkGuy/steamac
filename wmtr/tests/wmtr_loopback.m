@@ -837,6 +837,32 @@ int main(void) {
       CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
       if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
     }
+    /* 7b. more frees at once than the free ring holds, while the client takes none (quit, logout, a large unload:
+          Metal runs the deallocators inside the client's release calls): the executor must not wait for the client
+          (it did: the next sync call never returned, StonkGuy/steamac#1), and every free must still reach the client */
+    {
+      enum { NF = WMTR_FREE_RING + 200 };
+      static obj_handle_t fbuf[NF];
+      for (int i = 0; i < NF; i++) {
+        struct WMTBufferInfo si = {4096, WMTResourceStorageModeShared, {NULL}, 0};
+        struct unixcall_mtldevice_newbuffer sb = {(obj_handle_t)dev, {&si}, 0};
+        remote(18, &sb);
+        fbuf[i] = sb.ret;
+      }
+      CHECK(fbuf[NF - 1] != 0, "burst: newBuffer failed");
+      struct wmtr_ring *R = blob_base[0];
+      uint64_t fh = R->free_head;
+      static volatile int returned;
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_global_queue(0, 0), ^{
+        if (!returned) { fprintf(stderr, "FAIL burst of %d frees: the executor is waiting for the client\n", (int)NF); _exit(1); }
+      });
+      for (int i = 0; i < NF; i++) remote(1, &fbuf[i]);
+      struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); /* sync: the executor is past every release */
+      returned = 1;
+      for (int i = 0; i < 4000 && R->free_head < fh + NF; i++) { remote(26, &fb); usleep(1000); }
+      CHECK(R->free_head >= fh + NF, "burst: %llu of %d frees reached the client", (unsigned long long)(R->free_head - fh), (int)NF);
+      printf("free burst: %d frees past a full ring ok\n", (int)NF);
+    }
     test_vr(dev);
     test_vr_fd();
     /* 8. client-assigned handles: a frame's pool + encoder creations do not wait for the host (one sync call
