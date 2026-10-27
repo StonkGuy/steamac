@@ -230,6 +230,10 @@ int main()
 		if (const char * e = getenv("VR_E2E_LAYOUT"))
 			layout = !strcmp(e, "wide") ? Layout::wide : !strcmp(e, "array") ? Layout::array : Layout::separate;
 		printf("eye layout: %s\n", layout == Layout::wide ? "double-wide" : layout == Layout::array ? "array" : "separate");
+		// VR_E2E_FRAMES_IN_FLIGHT=N|auto: the frame clock's hold (--frames-in-flight); default 0
+		uint32_t frames_in_flight = 0;
+		if (const char * e = getenv("VR_E2E_FRAMES_IN_FLIGHT"))
+			frames_in_flight = !strcmp(e, "auto") ? FramesInFlight::adaptive : uint32_t(atoi(e));
 		// the real configuration: encryption with PIN pairing (keys in a scratch file, not the user's)
 		char dir[] = "/tmp/vr_e2e.XXXXXX";
 		REQUIRE(mkdtemp(dir));
@@ -244,7 +248,7 @@ int main()
 		snprintf(name, sizeof name, "com.steamac.vrhost.e2etest.%d", int(getpid()));
 		int sv[2];
 		REQUIRE(socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0);
-		auto pipeline = std::make_unique<VrPipeline>(session, sv[1], name);
+		auto pipeline = std::make_unique<VrPipeline>(session, sv[1], name, CompositorOptions{}, frames_in_flight);
 		session.start(pipeline.get()); // the pipeline forwards state / input to the guest
 		REQUIRE(session.port() > 0);
 		wmtr_vr * vr = wmtr_vr_create(sv[0], name);
@@ -420,7 +424,8 @@ int main()
 			}
 			if (not ok and bad_colour++ < 3)
 				fprintf(stderr, "eye %d frame %llu: centre Cb %d Cr %d\n", eye, (unsigned long long)frame, cb, cr);
-			if (eye == 1 and submit_ns.count(frame + lead[eye]))
+			// only frames whose picture number set the lead: without it the wire index names an unrelated older frame
+			if (eye == 1 and lead_set[eye] and submit_ns.count(frame + lead[eye]))
 				latency_ms.push_back((now_ns() - submit_ns[frame + lead[eye]]) / 1e6);
 		};
 
