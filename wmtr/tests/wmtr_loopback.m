@@ -27,6 +27,7 @@
 #include <servers/bootstrap.h>
 #include <sys/socket.h>
 #include <poll.h>
+#include <objc/runtime.h>
 
 typedef int NTSTATUS;
 typedef NTSTATUS (*fn_t)(void *);
@@ -78,12 +79,12 @@ static NTSTATUS f_argsinfo(void *a) { (void)a; return 0; }
 static NTSTATUS f_noop(void *a) { (void)a; return 0; }
 static NTSTATUS f_fault(void *a) { (void)a; return *(volatile int *)(uintptr_t)0x10; }
 /* an autoreleased result whose lifetime the test watches */
-static int probe_alive;
+static int probe_alive, probe_count; /* the last one's lifetime; how many are alive */
 @interface Probe : NSObject
 @end
 @implementation Probe
-- (instancetype)init { if ((self = [super init])) probe_alive = 1; return self; }
-- (void)dealloc { probe_alive = 0; [super dealloc]; }
+- (instancetype)init { if ((self = [super init])) probe_alive = 1, probe_count++; return self; }
+- (void)dealloc { probe_alive = 0; probe_count--; [super dealloc]; }
 @end
 /* A shared event keeps the actual notification block registered by host_call(104). Delivering it
  * explicitly makes the after-destroy race deterministic, without depending on Metal queue timing. */
@@ -183,8 +184,16 @@ static NTSTATUS f_eventwithport(void *a) {
 }
 static uint64_t enc_log[64][2]; static int n_enc_log;
 static void enc_note(uint64_t call, uint64_t v) { if (n_enc_log < 64) { enc_log[n_enc_log][0] = call; enc_log[n_enc_log][1] = v; } n_enc_log++; }
+/* a command encoder as far as the host can tell (MTLCommandEncoder is added to it at start) */
+static int encoder_count;
+@interface FakeEncoder : NSObject
+@end
+@implementation FakeEncoder
+- (instancetype)init { if ((self = [super init])) encoder_count++; return self; }
+- (void)dealloc { encoder_count--; [super dealloc]; }
+@end
 static NTSTATUS f_new_encoder(uint64_t *ret, uint64_t call, int fail) {
-  *ret = fail ? 0 : (obj_handle_t)[[[NSObject alloc] init] autorelease];
+  *ret = fail ? 0 : (obj_handle_t)[[[FakeEncoder alloc] init] autorelease];
   enc_note(call, *ret);
   return 0;
 }
@@ -505,6 +514,35 @@ static struct wmtr_host *idle_host(void) {
   R->magic = WMTR_RING_MAGIC; R->version = WMTR_VERSION;
   return wmtr_host_create(R, &idle_ops, R);
 }
+/* another client (a second guest process): its own context; its requests are written straight into its ring (params
+ * only, sync), so the test's client library stays this process's one client */
+static struct wmtr_host *second_client(struct wmtr_ring **ring) {
+  struct wmtr_ring *R = pages(WMTR_RING_BLOB_BYTES);
+  R->magic = WMTR_RING_MAGIC; R->version = WMTR_VERSION;
+  *ring = R;
+  return wmtr_host_create(R, &idle_ops, R);
+}
+static NTSTATUS second_call(struct wmtr_ring *R, struct wmtr_host *h, uint32_t slot_i, uint16_t call, uint16_t flags,
+                            void *params, uint32_t size) {
+  uint8_t *data = (uint8_t *)R + WMTR_RING_DATA_OFFSET;
+  struct wmtr_slot *slot = (struct wmtr_slot *)((uint8_t *)R + WMTR_SLOTS_OFFSET) + slot_i;
+  struct wmtr_req_ext hdr = {0};
+  hdr.h.call = call; hdr.h.flags = WMTR_F_SYNC | flags; hdr.h.slot = slot_i; hdr.h.params_size = size;
+  hdr.h.seq = slot->done_seq + 1;
+  hdr.payload_size = WMTR_ALIGN8(size);
+  uint32_t poff = wmtr_req_payload_offset(&hdr), total = WMTR_ALIGN8(poff + size);
+  hdr.h.size = total;
+  uint64_t head = R->head; /* a few hundred bytes from a fresh ring: no wrap */
+  uint8_t *dst = data + head % WMTR_RING_BYTES;
+  memset(dst, 0, total);
+  memcpy(dst, &hdr, sizeof hdr);
+  memcpy(dst + poff, params, size);
+  __atomic_store_n(&R->head, head + total, __ATOMIC_RELEASE);
+  wmtr_host_kick(h);
+  while (__atomic_load_n(&slot->done_seq, __ATOMIC_ACQUIRE) < hdr.h.seq) sched_yield();
+  memcpy(params, (const void *)slot->data, size);
+  return slot->status;
+}
 static void test_vr_fd(void) {
   char name[64]; snprintf(name, sizeof name, "com.steamac.vrhost.fdtest.%d", (int)getpid());
   mach_port_t port;
@@ -703,6 +741,7 @@ test_hostile_requests(id<MTLDevice> dev) {
 
 int main(void) {
   @autoreleasepool {
+    class_addProtocol([FakeEncoder class], @protocol(MTLCommandEncoder));
     test_vr_cadence();
     snprintf(frames_path, sizeof frames_path, "/tmp/wmtr_frames_%d.csv", (int)getpid());
     unlink(frames_path);
@@ -945,6 +984,56 @@ int main(void) {
       struct unixcall_generic_obj_uint64_ret pf3 = {0}; remote(39, &pf3);
       CHECK(ar.ret && probe_alive, "autoreleased result without a pool was freed with the request");
     }
+    { /* two clients (two guest processes, each its own context) both number their threads' reply slots from 0: the
+         autorelease pools of one are not the other's (live 2026-10-24: a second DXMT client next to VRChat aborted the
+         VM with "Command encoder released without endEncoding") */
+      struct wmtr_ring *rb;
+      struct wmtr_host *b = second_client(&rb);
+      int c0 = probe_count;
+      struct unixcall_generic_obj_ret pool = {0};
+      remote(10, &pool);
+      uint64_t bpool[WMTR_SLOTS];
+      for (uint32_t s = 0; s < WMTR_SLOTS; s++) {
+        struct unixcall_generic_obj_ret p = {0};
+        second_call(rb, b, s, 10, 0, &p, sizeof p);
+        bpool[s] = p.ret;
+      }
+      struct unixcall_generic_obj_ret ar = {0};
+      remote(53, &ar); /* autoreleased: into this client's pool, whatever the other client has open */
+      struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q);
+      for (uint32_t s = WMTR_SLOTS; s-- > 0;) { uint64_t ph = bpool[s]; second_call(rb, b, s, 1, 0, &ph, sizeof ph); }
+      CHECK(probe_count == c0 + 1, "two clients: the other client's drained pools took this client's result (%d live, want %d)",
+            probe_count - c0, 1);
+      /* a pool of the other client, by its address: not this client's to drain */
+      struct unixcall_generic_obj_ret bp = {0}, bar = {0};
+      second_call(rb, b, 0, 10, 0, &bp, sizeof bp);
+      second_call(rb, b, 0, 53, 0, &bar, sizeof bar);
+      obj_handle_t foreign = bp.ret; remote(1, &foreign); remote(39, &q);
+      CHECK(probe_count == c0 + 2, "two clients: this client drained the other's pool (%d live, want %d)", probe_count - c0, 2);
+      uint64_t bph = bp.ret; second_call(rb, b, 0, 1, 0, &bph, sizeof bph);
+      CHECK(probe_count == c0 + 1, "two clients: the other client could not drain its own pool");
+      /* the other client opens a pool under this client's very handle (both count their pools from 1): this client's
+         release still drains its own pool */
+      struct unixcall_generic_obj_ret twin = {pool.ret};
+      if ((pool.ret & WMTR_REF_MASK) == WMTR_HANDLE_TAG)
+        second_call(rb, b, (uint32_t)(pool.ret >> 32) & 0x7fff, 10, WMTR_F_CLIENT_HANDLE, &twin, sizeof twin);
+      obj_handle_t ph = pool.ret; remote(1, &ph); remote(39, &q);
+      CHECK(probe_count == c0, "two clients: this client's release did not drain its own pool (%d live)", probe_count - c0);
+      /* the other client exits with a pool open (a result and an encoder still encoding in it) and a result kept
+         without a pool: the results are released, the encoder is not (its release would trip Metal's assertion) */
+      int e0 = encoder_count;
+      struct unixcall_generic_obj_ret dp = {0}, dr = {0}, lr = {0};
+      struct unixcall_generic_obj_obj_ret de = {0x77, 0};
+      second_call(rb, b, 1, 10, 0, &dp, sizeof dp);
+      second_call(rb, b, 1, 53, 0, &dr, sizeof dr);
+      second_call(rb, b, 1, 30, 0, &de, sizeof de);
+      second_call(rb, b, 2, 53, 0, &lr, sizeof lr);
+      CHECK(dr.ret && de.ret && lr.ret && probe_count == c0 + 2 && encoder_count == e0 + 1, "second client's results");
+      wmtr_host_destroy(b);
+      CHECK(probe_count == c0 && encoder_count == e0 + 1,
+            "client gone: %d results left alive (want 0), %d encoders released (want 0)", probe_count - c0, e0 + 1 - encoder_count);
+      printf("two clients: separate autorelease pools ok\n");
+    }
     { /* D3D12 pipelines pass serialized root signatures through SM50Compile's argument list */
       uint8_t rs1[300], rs2[77]; for (int i = 0; i < 300; i++) rs1[i] = (uint8_t)(i * 7 + 1); for (int i = 0; i < 77; i++) rs2[i] = (uint8_t)(i ^ 0x5a);
       struct SM50_SHADER_ROOT_SIGNATURE_DATA r2 = {.next = NULL, .type = SM50_SHADER_ROOT_SIGNATURE2, .bytecode = rs2, .bytecode_length = 77};
@@ -1141,7 +1230,9 @@ int main(void) {
       CHECK(wmtr_host_shared_names() == 0, "%u shared names left after the client was destroyed", wmtr_host_shared_names());
       CHECK(owned_alive == 0, "destroy left %d objects the client owned alive", owned_alive);
       CHECK(!err_alive, "destroy did not release an out-error the client owned");
-      CHECK([(id)shared retainCount] == shared_refs, "destroy released an object the client did not own (%lu -> %lu refs)",
+      /* `shared` came back autoreleased with no pool open: the host's keep for the client's thread (its outer pool)
+         goes with the client; the client's own retain of an object it did not create is not counted as owned */
+      CHECK([(id)shared retainCount] == shared_refs - 1, "destroy: %lu -> %lu refs (want the client thread's keep only)",
             (unsigned long)shared_refs, (unsigned long)[(id)shared retainCount]);
       if (placed) {
         CHECK([(id)placed retainCount] == placed_refs - 1, "destroy did not release the client's arena buffer (%lu -> %lu refs)",
