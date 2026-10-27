@@ -174,6 +174,10 @@ if(VRHOST_DXMT_DIR)
 		add_test(NAME vr_e2e_${layout} COMMAND test_vr_e2e)
 		set_tests_properties(vr_e2e_${layout} PROPERTIES TIMEOUT 90 ENVIRONMENT VR_E2E_LAYOUT=${layout})
 	endforeach()
+	# One at a time under ctest -j: the producer renders into a ring of 3 right away, and with several pipelines and
+	# video encoders/decoders on the GPU at once the exporter's copy can run more than 3 frames late (the copy then
+	# reads a newer frame: "carries frame N+3", wrong pose). One pipeline per machine is what the host runs.
+	set_tests_properties(vr_e2e vr_e2e_auto vr_e2e_wide vr_e2e_array PROPERTIES RESOURCE_LOCK vr_gpu_pipeline)
 else()
 	message(STATUS "vr_e2e test off: set VRHOST_DXMT_DIR to a StonkGuy/dxmt vr-export checkout")
 endif()
