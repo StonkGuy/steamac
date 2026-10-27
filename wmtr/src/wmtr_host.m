@@ -489,11 +489,15 @@ push_free(struct wmtr_host *h, uint32_t blob, uint32_t off, uint64_t size) {
   pthread_mutex_lock(&h->free_lock);
   struct wmtr_ring *R = h->ring;
   uint64_t head = R->free_head;
-  while (head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) >= WMTR_FREE_RING) {
-    pthread_mutex_unlock(&h->free_lock); /* client drains on its next allocation */
-    usleep(100);
-    pthread_mutex_lock(&h->free_lock);
-    head = R->free_head;
+  if (head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) >= WMTR_FREE_RING) {
+    /* Full. The client drains the ring only from its own calls, and the call releasing this buffer may be the
+     * one it is blocked in (quitting or logging out frees thousands of buffers in a row), so waiting here can
+     * deadlock the game. Do not wait: this range is not handed back and stays the client's until it exits. */
+    static _Atomic uint64_t dropped;
+    uint64_t n = atomic_fetch_add_explicit(&dropped, 1, memory_order_relaxed);
+    if (!(n % WMTR_FREE_RING)) LOG(0, "free ring full: %llu frees not returned\n", (unsigned long long)n + 1);
+    pthread_mutex_unlock(&h->free_lock);
+    return;
   }
   R->free_ring[head % WMTR_FREE_RING] = (struct wmtr_free_entry){blob, off, (uint32_t)size, 0};
   __atomic_store_n(&R->free_head, head + 1, __ATOMIC_RELEASE);
