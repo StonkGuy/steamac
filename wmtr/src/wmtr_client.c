@@ -921,7 +921,6 @@ dispatch(uint16_t call, void *params, uint32_t size, int sync) {
   case 143: b_begin(params, size); b_out(OFF(struct unixcall_mtldevice_newicb, info), ((struct unixcall_mtldevice_newicb *)params)->info.ptr, sizeof(struct WMTIndirectCommandBufferInfo), 1); break;
   case 144: { struct unixcall_mtldevice_newlibrarywithsource *p = params; b_begin(p, size); b_in(OFF(struct unixcall_mtldevice_newlibrarywithsource, source), p->source.ptr, p->length); break; }
   case 109: return listener_run(((struct unixcall_generic_obj_noret *)params)->handle);
-  case 121: case 122: case 123: case 124: return STATUS_NOT_SUPPORTED; /* mach ports do not cross the VM */
   default: b_begin(params, size); break;
   }
   return send_built(call, sync, params, size);
