@@ -19,7 +19,10 @@ enum GraphicsPathSelfTest {
             VM.applyGraphicsEnv(o)
             let wmtr = ProcessInfo.processInfo.environment["STEAMAC_WMTR"]
             let lib = ProcessInfo.processInfo.environment["STEAMAC_WMTR_LIB"]
-            if path == .dxmt, let want = o.wmtrLibrary, LauncherSettings.Wmtr.unavailableReason(want) == nil {
+            if path == .dxmt, let want = o.wmtrLibrary, let reason = LauncherSettings.Wmtr.unavailableReason(want) {
+                // Options.resolve drops an executor that does not load, so a start never gets here with it
+                log("selftest-graphics-path: DXMT executor not checked here (\(reason))")
+            } else if path == .dxmt, let want = o.wmtrLibrary {
                 check(wmtr == "1", "DXMT: STEAMAC_WMTR not set")
                 check(lib == want, "DXMT: STEAMAC_WMTR_LIB is \(lib ?? "unset"), not \(want)")
                 if let lib, let h = dlopen(lib, RTLD_LAZY | RTLD_LOCAL) {
