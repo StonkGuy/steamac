@@ -147,6 +147,19 @@ static void draw(VkShaderModule vs, VkShaderModule fs, const char *what)
 		.pMultisampleState = &ms, .pColorBlendState = &cb, .layout = layout, .renderPass = rp };
 	VkPipeline p;
 	VkResult r = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpci, NULL, &p);
+	if (!strcmp(what, "link-log")) {
+		printf("%-4s missing vertex output fails graphics linking (VkResult %d)\n", r ? "OK" : "FAIL", r);
+		fails += r == VK_SUCCESS;
+		if (!r) vkDestroyPipeline(dev, p, NULL);
+		vkDestroyPipelineLayout(dev, layout, NULL);
+		vkDestroyDescriptorSetLayout(dev, sl, NULL);
+		vkDestroyFramebuffer(dev, fb, NULL);
+		vkDestroyImageView(dev, iv, NULL);
+		vkDestroyImage(dev, img, NULL);
+		vkFreeMemory(dev, imem, NULL);
+		vkDestroyRenderPass(dev, rp, NULL);
+		return;
+	}
 	printf("%-4s %s: fragment discard helper pipeline (VkResult %d)\n", r ? "FAIL" : "OK", what, r);
 	if (r) { fails++; return; }
 
@@ -238,8 +251,8 @@ static void dispatch(VkShaderModule mod)
 
 int main(int argc, char **argv)
 {
-	if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2], "log10"))) {
-		fprintf(stderr, "usage: %s <spv dir> [log10]\n", argv[0]); return 2;
+	if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2], "log10") && strcmp(argv[2], "link-log"))) {
+		fprintf(stderr, "usage: %s <spv dir> [log10|link-log]\n", argv[0]); return 2;
 	}
 	VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_3 };
 	VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };
@@ -264,8 +277,15 @@ int main(int argc, char **argv)
 		snprintf(path, sizeof(path), "%s/%s.spv", argv[1], shaders[i]);
 		draw(vs, module(path), shaders[i]);
 	}
-	snprintf(path, sizeof(path), "%s/log10_helper.comp.spv", argv[1]);
-	dispatch(module(path));
+	if (argc == 3 && !strcmp(argv[2], "link-log")) {
+		snprintf(path, sizeof(path), "%s/link_missing.frag.spv", argv[1]);
+		VkShaderModule fs = module(path);
+		draw(vs, fs, "link-log");
+		vkDestroyShaderModule(dev, fs, NULL);
+	} else {
+		snprintf(path, sizeof(path), "%s/log10_helper.comp.spv", argv[1]);
+		dispatch(module(path));
+	}
 	CK(vkDeviceWaitIdle(dev));
 	vkDestroyDevice(dev, NULL);
 	vkDestroyInstance(inst, NULL);

@@ -1,0 +1,10 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform usamplerBuffer view;
+layout(set = 0, binding = 1, std430) buffer Result { uint width; uint value; } result;
+layout(push_constant) uniform Index { uint index; } pc;
+void main()
+{
+    result.width = uint(textureSize(view));
+    result.value = texelFetch(view, int(pc.index)).x;
+}

@@ -37,7 +37,7 @@ Epic Games、VRChat 及 DXMT 作者均无关联。
 
 ## 安装与首次启动
 
-1. 从本分支的 `main` 分支或某个[发布](https://github.com/StonkGuy/steamac/releases)标签构建应用：`./build.sh`（[要求与构建](docs/upstream/requirements-and-building.md)；DXMT 路径还需在 layer 步骤之前于 `wmtr/` 中运行 `make dxmt-payload`）。也可以下载[发布](https://github.com/StonkGuy/steamac/releases)附带的 DMG（自 v1.9-eac.1 起，由 GitHub Actions 构建，ad-hoc 签名）。把 `work/out/`（或 DMG）中的 **FX Steam Launcher.app** 复制到“应用程序”并打开（见下文*首次打开*）。
+1. 从本分支的 `main` 分支或某个[发布](https://github.com/StonkGuy/steamac/releases)标签构建应用：`./build.sh`（[要求与构建](docs/upstream/requirements-and-building.md)；DXMT 路径还需在 layer 步骤之前运行 `./build.sh dxmt`）。也可以下载[发布](https://github.com/StonkGuy/steamac/releases)附带的 DMG（自 v1.9-eac.1 起，由 GitHub Actions 构建，ad-hoc 签名）。把 `work/out/`（或 DMG）中的 **FX Steam Launcher.app** 复制到“应用程序”并打开（见下文*首次打开*）。
 2. 首次启动时选择**新建磁盘…**。应用会下载 Valve 的 SteamOS 映像，校验并完成设置。此过程较久，但只需一次。
 3. 在窗口中登录 Steam。保持 **16:10** 的窗口大小（设置 > 显示 > 默认窗口大小；默认的 1280×800 即 16:10）。16:9 的游戏
    在 16:10 窗口中会出现黑边。
@@ -55,8 +55,10 @@ Epic Games、VRChat 及 DXMT 作者均无关联。
 
 ## 选择图形路径
 
-设置 > 高级 > **图形路径**：*DXMT（精简）* 或 *Vulkan（经典）*；下次启动时生效。无需为每个游戏单独设置：Steam 启动时，
-每个已安装的 Proton 都会获得所选路径，并由 Proton 放入每个游戏的前缀。切回 *Vulkan* 会原样恢复 Proton 自带的文件。
+设置 > 高级 > **允许 DXMT（通过 Mac 的 Metal 运行 D3D11）**：开启为 DXMT 路径，关闭为 Vulkan 路径；下次启动时生效。
+无需为每个游戏单独设置：Steam 启动时，每个已安装的 Proton 都会获得 DXMT，并由 Proton 放入每个游戏的前缀（还可在 设置 > 游戏
+中为游戏指定配置：选择 DXMT 的配置会把没有自己兼容性工具的游戏改用 Proton 10.0，因为 DXMT 需要 x86-64 的 Proton）。
+关闭后会原样恢复 Proton 自带的文件。
 若 Proton 的原始文件缺失（例如在同一磁盘上切换两个应用构建之后），DXMT 的文件会保留，启动日志会给出提示；请在 Steam 中修复
 Proton：该 Proton 工具 > 属性 > 已安装文件 > **验证工具文件的完整性**。DXMT 覆盖 Direct3D 11（及 10）；Direct3D 12 游戏请用
 *Vulkan*（DXMT 的 Direct3D 12 受限）。DXMT 下的 EAC 已用 VRChat 验证；若其他游戏 EAC 失败，请切换到 *Vulkan*。

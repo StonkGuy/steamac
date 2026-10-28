@@ -12,6 +12,7 @@ publish = false
 x11rb = { version = "0.13", default-features = false, features = ["xfixes"] }
 # Raw syscalls only: open/write/fcntl, sigaction/pause, mktime.
 libc = "0.2"
+serde_json = "1"
 
 [profile.release]
 opt-level = "s"

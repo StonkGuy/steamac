@@ -333,7 +333,10 @@ final class DisplayBackend {
             damage = DamageRect(x0: Int(r.x), y0: Int(r.y), x1: Int(r.x) + Int(r.width), y1: Int(r.y) + Int(r.height))
         }
         guard s.present(frameId: Int32(bitPattern: frameId), rect: damage) else { return KRUN_DISPLAY_ERR_INVALID_PARAM }
-        if id == 0 { PerfStats.shared?.framePresented() }
+        if id == 0 {
+            PerfStats.shared?.framePresented()
+            FrameMeter.flushed()
+        }
         sink?.framePresented(s)
         return 0
     }

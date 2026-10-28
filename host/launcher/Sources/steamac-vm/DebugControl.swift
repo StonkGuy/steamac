@@ -19,7 +19,7 @@ import Foundation
 ///   guest LINE            handle LINE as if the guest had sent it on fx.progress
 ///   dump PATH             frame + window dump (as SIGUSR1, to PATH)
 ///   settings TAB|close    open the Settings window at TAB (general, display, mouse, controller,
-///                         sound, advanced) or close it
+///                         sound, games, advanced) or close it
 ///   settings-dump PATH    PNG of the Settings window
 ///   restart               Restart VM (as the menu / Settings button)
 ///   activate              bring the app to the front (tests of the background mute / pause)
@@ -39,11 +39,15 @@ import Foundation
 ///                         retry, close, dsn, dump)
 ///   update …              new-version check (UpdateChecker.control: check, startup, press
 ///                         download|skip|later|ok|releases, dump PATH, state)
-///   pad on|off|test|state  GamepadBridge.control: a guest pad without a controller (as
-///                         --input-selftest) / follow the controller again; press A + push the left
-///                         stick; log the guest pad and the guest's last rumble
+///   pad on|off|test [N] | state  GamepadBridge.control: a guest pad for player N (1 if not
+///                         given) without a controller (as --input-selftest) / follow the
+///                         controller again; press A + push the left stick; log the guest pads
+///                         and the guest's last rumble
+///   stats …               game statistics (GameStatsStore.control: state, flush, ask, press
+///                         share|decline, dump PATH, reset-question)
 enum DebugControl {
     nonisolated(unsafe) private static var settingsWindow: SettingsWindowController?
+    nonisolated(unsafe) static var gameStats: GameSessionTracker?
     nonisolated(unsafe) private static var gamepad: GamepadBridge?
 
     static func start(path: String, window wc: WindowController, progress: BootProgress,
@@ -212,6 +216,7 @@ enum DebugControl {
             if !LauncherSettings.shared.set(args[0], value) { log("control: set: unknown key or bad value") }
         case "report": MainActor.assumeIsolated { ReportControl.handle(args) }
         case "update": UpdateChecker.shared.control(args)
+        case "stats": GameStatsStore.shared.control(args, tracker: gameStats)
         case "pad":
             guard let gamepad else { log("control: no gamepad bridge (--no-gamepad)"); break }
             gamepad.control(args)

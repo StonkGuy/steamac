@@ -1,0 +1,44 @@
+#!/usr/bin/python3
+"""Wait at most five seconds for this boot's host profiles, then snapshot them for Steam.
+
+A runtime snapshot makes all ExecStartPre consumers use the same bytes, even if
+another host edit arrives while Steam is starting. The applied digest describes
+that snapshot, not a newer persisted file that these consumers never read.
+"""
+import hashlib
+import os
+from pathlib import Path
+import tempfile
+import time
+
+
+def atomic_write(path, data):
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def main():
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/" + str(os.getuid())) / "steamac"
+    runtime.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + 5
+    while not (runtime / "profiles-synced").exists():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.05, remaining))
+    profiles = Path.home() / ".config/steamac/game-profiles.json"
+    # An absent file is an empty set, but must not claim a digest for bytes the
+    # host never sent (its eventual empty-set JSON may have different whitespace).
+    data = profiles.read_bytes() if profiles.exists() else b""
+    atomic_write(runtime / "game-profiles.json", data)
+    atomic_write(runtime / "profiles-applied.sha256", (hashlib.sha256(data).hexdigest() + "\n").encode())
+
+
+if __name__ == "__main__":
+    main()

@@ -53,6 +53,26 @@ static const uint32_t call_params_size[WMTR_NCALLS] = {
  * the struct the implementation reads there may run past its end */
 #define WMTR_COPY_SLACK 4096u
 
+/* Metal owns copied notification/deallocator blocks beyond a context's lifetime. They retain this
+ * small gate, not the executor. Destroy clears host under the same lock used for the entire callback,
+ * including wake, so neither the ring nor the embedder can be touched after destroy returns. */
+@interface WMTRCallbackState : NSObject {
+@public
+  pthread_mutex_t lock;
+  struct wmtr_host *host;
+}
+@end
+@implementation WMTRCallbackState
+- (instancetype)init {
+  if ((self = [super init])) pthread_mutex_init(&lock, NULL);
+  return self;
+}
+- (void)dealloc {
+  pthread_mutex_destroy(&lock);
+  [super dealloc];
+}
+@end
+
 struct wmtr_host {
   struct wmtr_ring *ring;
   uint8_t *data;
@@ -68,7 +88,7 @@ struct wmtr_host {
   struct { uint16_t call, slot; uint32_t st; uint64_t q[4]; } trace[128];
   _Atomic uint32_t trace_n;
   dispatch_queue_t compile_q, block_q;
-  pthread_mutex_t free_lock, event_lock;
+  WMTRCallbackState *callbacks; /* the free and event rings' producers (Metal blocks), retired by destroy */
   /* views the client created and has not released: released on destroy, so a client that exits
    * without ReleaseMetalView (DXMT never calls it at process exit) does not leave its layer behind */
   pthread_mutex_t view_lock;
@@ -763,19 +783,22 @@ keep_autoreleased(uint32_t slot, uint16_t call, uint8_t *params) {
 /* ------------------------------------------------------------------------------------------- *
  * overridden calls */
 static void
-push_free(struct wmtr_host *h, uint32_t blob, uint32_t off, uint64_t size) {
-  pthread_mutex_lock(&h->free_lock);
-  struct wmtr_ring *R = h->ring;
-  uint64_t head = R->free_head;
-  while (head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) >= WMTR_FREE_RING) {
-    pthread_mutex_unlock(&h->free_lock); /* client drains on its next allocation */
+push_free(WMTRCallbackState *state, uint32_t blob, uint32_t off, uint64_t size) {
+  for (;;) {
+    pthread_mutex_lock(&state->lock);
+    struct wmtr_host *h = state->host;
+    if (!h) { pthread_mutex_unlock(&state->lock); return; }
+    struct wmtr_ring *R = h->ring;
+    uint64_t head = R->free_head;
+    if (head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) < WMTR_FREE_RING) {
+      R->free_ring[head % WMTR_FREE_RING] = (struct wmtr_free_entry){blob, off, (uint32_t)size, 0};
+      __atomic_store_n(&R->free_head, head + 1, __ATOMIC_RELEASE);
+      pthread_mutex_unlock(&state->lock);
+      return;
+    }
+    pthread_mutex_unlock(&state->lock); /* client drains on its next allocation; destroy may retire it */
     usleep(100);
-    pthread_mutex_lock(&h->free_lock);
-    head = R->free_head;
   }
-  R->free_ring[head % WMTR_FREE_RING] = (struct wmtr_free_entry){blob, off, (uint32_t)size, 0};
-  __atomic_store_n(&R->free_head, head + 1, __ATOMIC_RELEASE);
-  pthread_mutex_unlock(&h->free_lock);
 }
 
 static NTSTATUS
@@ -796,11 +819,12 @@ host_new_buffer(struct wmtr_host *h, struct unixcall_mtldevice_newbuffer *p, uin
       LOG(0, "newBuffer: memory outside its arena blob (blob %u off %u len %llu)\n", blob, off, (unsigned long long)len);
       return STATUS_INVALID_PARAMETER;
     }
+    WMTRCallbackState *state = h->callbacks;
     buffer = [device newBufferWithBytesNoCopy:info->memory.ptr
                                        length:len
                                       options:(MTLResourceOptions)info->options
                                   deallocator:^(void *pointer, NSUInteger length) {
-                                    push_free(h, blob, off, length);
+                                    push_free(state, blob, off, length);
                                   }];
   } else {
     buffer = [device newBufferWithLength:info->length options:(MTLResourceOptions)info->options];
@@ -814,16 +838,18 @@ host_new_buffer(struct wmtr_host *h, struct unixcall_mtldevice_newbuffer *p, uin
 struct host_listener { MTLSharedEventListener *listener; };
 
 static void
-push_event(struct wmtr_host *h, uint64_t listener, uint64_t event_handle) {
-  pthread_mutex_lock(&h->event_lock);
+push_event(WMTRCallbackState *state, uint64_t listener, uint64_t event_handle) {
+  pthread_mutex_lock(&state->lock);
+  struct wmtr_host *h = state->host;
+  if (!h) { pthread_mutex_unlock(&state->lock); return; }
   struct wmtr_ring *R = h->ring;
   uint64_t head = R->event_head;
   if (head - __atomic_load_n(&R->event_tail, __ATOMIC_ACQUIRE) < WMTR_EVENT_RING) {
     R->event_ring[head % WMTR_EVENT_RING] = (struct wmtr_event){listener, event_handle};
     __atomic_store_n(&R->event_head, head + 1, __ATOMIC_RELEASE);
   } else LOG(0, "event ring full, dropping\n");
-  pthread_mutex_unlock(&h->event_lock);
   h->ops->wake(h->ctx, WMTR_EVENT_SLOT);
+  pthread_mutex_unlock(&state->lock);
 }
 
 static NTSTATUS
@@ -868,10 +894,11 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     struct host_listener *l = (struct host_listener *)p->shared_event_listener;
     uint64_t lid = p->shared_event_listener, ev = p->event_handle;
     if (!l) return STATUS_INVALID_PARAMETER;
+    WMTRCallbackState *state = h->callbacks;
     [(id<MTLSharedEvent>)p->shared_event notifyListener:l->listener
                                                 atValue:p->value
                                                   block:^(id<MTLSharedEvent> e, uint64_t v) {
-                                                    push_event(h, lid, ev);
+                                                    push_event(state, lid, ev);
                                                   }];
     return STATUS_SUCCESS;
   }
@@ -884,7 +911,7 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
   case 110: { /* destroy: tell the client's listener thread to return; the listener object is kept
                  (late notifications for it are harmless and are dropped by the client) */
     uint64_t lid = ((struct unixcall_generic_obj_noret *)params)->handle;
-    if (lid) push_event(h, lid, 0);
+    if (lid) push_event(h->callbacks, lid, 0);
     return STATUS_SUCCESS;
   }
   case 17: { /* encodeSignalEvent: with a VR link, the time is kept for the exporter's stage split */
@@ -1253,7 +1280,8 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   pthread_mutex_init(&h->lock, NULL); pthread_cond_init(&h->cond, NULL);
   const char *sp = getenv("WMTR_HOST_SPIN_US");
   wmtr_host_set_spin(h, (uint64_t)(sp && *sp ? atoll(sp) : WMTR_HOST_SPIN_US_DEFAULT) * 1000);
-  pthread_mutex_init(&h->free_lock, NULL); pthread_mutex_init(&h->event_lock, NULL);
+  h->callbacks = [[WMTRCallbackState alloc] init];
+  h->callbacks->host = h;
   pthread_mutex_init(&h->view_lock, NULL);
   h->compile_q = dispatch_queue_create("wmtr.compile", DISPATCH_QUEUE_CONCURRENT);
   h->block_q = dispatch_queue_create("wmtr.block", DISPATCH_QUEUE_CONCURRENT);
@@ -1298,6 +1326,9 @@ wmtr_host_kick(struct wmtr_host *h) {
 
 void
 wmtr_host_destroy(struct wmtr_host *h) {
+  pthread_mutex_lock(&h->callbacks->lock);
+  h->callbacks->host = NULL;
+  pthread_mutex_unlock(&h->callbacks->lock);
   pthread_mutex_lock(&h->lock);
   h->quit = 1;
   pthread_cond_signal(&h->cond);
@@ -1321,6 +1352,8 @@ wmtr_host_destroy(struct wmtr_host *h) {
     else { callstats_vr(vr, NULL); wmtr_vr_destroy(vr); }
     h->owns_vr = 0;
   }
+  [h->callbacks release]; /* pending Metal blocks keep only the retired gate alive */
+  h->callbacks = nil;
 }
 
 uint64_t

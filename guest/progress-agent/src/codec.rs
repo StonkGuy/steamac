@@ -15,6 +15,28 @@ pub fn base64(data: &[u8]) -> String {
     out
 }
 
+/// Standard padded base64 only; reject noncanonical padding and trailing bits.
+pub fn unbase64(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 4 != 0 { return None; }
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    for (i, chunk) in text.as_bytes().chunks(4).enumerate() {
+        let digit = |b| B64.iter().position(|&c| c == b).map(|v| v as u32);
+        let a = digit(chunk[0])?;
+        let b = digit(chunk[1])?;
+        let c = if chunk[2] == b'=' { 0 } else { digit(chunk[2])? };
+        let d = if chunk[3] == b'=' { 0 } else { digit(chunk[3])? };
+        let padding = if chunk[2] == b'=' { 2 } else if chunk[3] == b'=' { 1 } else { 0 };
+        if padding != 0 && i + 1 != text.len() / 4 { return None; }
+        if padding == 2 && (chunk[3] != b'=' || b & 15 != 0) { return None; }
+        if padding == 1 && c & 3 != 0 { return None; }
+        let n = a << 18 | b << 12 | c << 6 | d;
+        out.push((n >> 16) as u8);
+        if padding < 2 { out.push((n >> 8) as u8); }
+        if padding == 0 { out.push(n as u8); }
+    }
+    Some(out)
+}
+
 /// Lowercase hex, two digits per byte.
 pub fn hex(data: &[u8]) -> String {
     const D: &[u8; 16] = b"0123456789abcdef";
@@ -97,6 +119,16 @@ mod tests {
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64_decode_vectors() {
+        for bytes in [b"".as_slice(), b"f", b"fo", b"foo", b"foobar"] {
+            assert_eq!(unbase64(&base64(bytes)), Some(bytes.to_vec()));
+        }
+        for bad in ["Zg", "Zg==AAAA", "Zh==", "Zm9=", "=m9v", "Zg=A", "!!!!"] {
+            assert_eq!(unbase64(bad), None, "{bad}");
+        }
     }
 
     #[test]

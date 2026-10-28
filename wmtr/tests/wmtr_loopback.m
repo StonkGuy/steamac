@@ -83,6 +83,22 @@ static int probe_alive;
 - (instancetype)init { if ((self = [super init])) probe_alive = 1; return self; }
 - (void)dealloc { probe_alive = 0; [super dealloc]; }
 @end
+/* A shared event keeps the actual notification block registered by host_call(104). Delivering it
+ * explicitly makes the after-destroy race deterministic, without depending on Metal queue timing. */
+@interface DelayedSharedEvent : NSObject {
+  MTLSharedEventNotificationBlock notification;
+}
+- (void)notifyListener:(MTLSharedEventListener *)listener atValue:(uint64_t)value block:(MTLSharedEventNotificationBlock)block;
+- (void)fire;
+@end
+@implementation DelayedSharedEvent
+- (void)notifyListener:(MTLSharedEventListener *)listener atValue:(uint64_t)value block:(MTLSharedEventNotificationBlock)block {
+  [notification release];
+  notification = [block copy];
+}
+- (void)fire { if (notification) notification((id<MTLSharedEvent>)self, 1); }
+- (void)dealloc { [notification release]; [super dealloc]; }
+@end
 static NTSTATUS f_autoreleased(void *a) { ((struct unixcall_generic_obj_ret *)a)->ret = (obj_handle_t)[[[Probe alloc] init] autorelease]; return 0; }
 /* DXMT's out-errors: autoreleased NSError retained before the handle is returned (+1, owned by the caller) */
 static int err_alive;
@@ -166,7 +182,8 @@ const void *wmtr_impl_funcs[WMTR_NCALLS] = {[120] = f_newshared, [123] = f_event
 static struct wmtr_host *H;
 static void *blob_base[WMTR_MAX_BLOBS]; static uint64_t blob_size[WMTR_MAX_BLOBS];
 static void *t_blob_ptr(void *c, uint32_t b, uint64_t *s) { if (b >= WMTR_MAX_BLOBS) return NULL; *s = blob_size[b]; return blob_base[b]; }
-static void t_wake(void *c, uint32_t s) {}
+static uint64_t wake_count;
+static void t_wake(void *c, uint32_t s) { __atomic_fetch_add(&wake_count, 1, __ATOMIC_RELAXED); }
 static uint64_t next_view = 0x1000, released[8]; static int n_released;
 static uint64_t t_create_view(void *c, uint64_t hwnd, void *dev, uint64_t *layer) { *layer = 0x77; return next_view++; }
 static void t_release_view(void *c, uint64_t v) { if (n_released < 8) released[n_released] = v; n_released++; }
@@ -934,6 +951,21 @@ int main(void) {
       { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); }
       [pcb waitUntilCompleted];
       usleep(20000); /* the completion handler runs after waitUntilCompleted returns */
+      /* A shared-event notification (call 104) queues an event for the client and wakes the embedder while the
+       * context lives; one delivered after destroy must do neither, although Metal still owns the copied block. */
+      DelayedSharedEvent *late_event = [[DelayedSharedEvent alloc] init];
+      struct { MTLSharedEventListener *listener; } late_listener = {nil};
+      struct unixcall_mtlsharedevent_setevent late = {
+        .shared_event = (obj_handle_t)late_event, .shared_event_listener = (obj_handle_t)&late_listener,
+        .value = 1, .event_handle = 0x1234
+      };
+      CHECK(raw_request(104, sizeof late, sizeof late, NULL, 0, NULL, 0, &late, sizeof late, NULL) == 0,
+            "register delayed event notification");
+      uint64_t before_wake = __atomic_load_n(&wake_count, __ATOMIC_RELAXED);
+      uint64_t before_event = wmtr_host_progress(H, WMTR_EVENT_SLOT);
+      [late_event fire];
+      CHECK(__atomic_load_n(&wake_count, __ATOMIC_RELAXED) == before_wake + 1 &&
+            wmtr_host_progress(H, WMTR_EVENT_SLOT) == before_event + 1, "live event did not wake");
       test_hostile_requests(dev);
       /* shared resources (DXMT's D3D11 MISC_SHARED textures and shared fences): the Mach ports stay in this process,
        * so register/look-up (121/122) work through it, and a port a client passes in must be one the host gave out */
@@ -1005,6 +1037,15 @@ int main(void) {
         wmtr_host_set_spin(H, WMTR_HOST_SPIN_US_DEFAULT * 1000);
       }
       wmtr_host_destroy(H);
+      uint64_t destroyed_wakes = __atomic_load_n(&wake_count, __ATOMIC_RELAXED);
+      struct wmtr_ring *destroyed_ring = blob_base[0];
+      uint64_t destroyed_events = __atomic_load_n(&destroyed_ring->event_head, __ATOMIC_ACQUIRE);
+      [late_event fire];
+      CHECK(__atomic_load_n(&wake_count, __ATOMIC_RELAXED) == destroyed_wakes &&
+            __atomic_load_n(&destroyed_ring->event_head, __ATOMIC_ACQUIRE) == destroyed_events,
+            "event callback touched ring or woke embedder after destroy");
+      [late_event release];
+      printf("wake after destroy: blocked\n");
       /* the client is gone: so are the names it registered */
       CHECK(wmtr_host_shared_names() == 0, "%u shared names left after the client was destroyed", wmtr_host_shared_names());
       CHECK(n_released == 2 && released[1] == v2.ret_view, "destroy did not release the leftover view (%d releases)", n_released);

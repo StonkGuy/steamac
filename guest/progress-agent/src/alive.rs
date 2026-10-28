@@ -38,12 +38,15 @@ impl Heartbeat {
     }
 
     /// Drain the timer; send one beat if it expired since the last call.
-    pub fn pump(&self, port: &mut Port) {
+    /// Return whether a tick elapsed, even when backpressure skips the beat.
+    pub fn pump(&self, port: &mut Port) -> bool {
         let mut expirations = 0u64;
         let n = unsafe { libc::read(self.fd, &mut expirations as *mut u64 as *mut libc::c_void, 8) };
-        if n == 8 && expirations > 0 && !port.has_pending() {
+        let elapsed = n == 8 && expirations > 0;
+        if elapsed && !port.has_pending() {
             port.send_quiet(&line());
         }
+        elapsed
     }
 }
 

@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import UniformTypeIdentifiers
 
 /// Running inside "FX Steam Launcher.app" (build.sh / bundle.sh): the kernel, initramfs, layer
 /// disk, gvproxy, desync and Valve's RAUC CA are bundled in Contents/Resources; the SteamOS disk
@@ -40,13 +41,33 @@ enum AppBundle {
     }
 
     static func defaultDisk() -> String? {
-        defaultDiskCandidates().first { FileManager.default.isReadableFile(atPath: $0) }
+        defaultDiskCandidates().first(where: isDiskImage)
+    }
+
+    /// A disk image libkrun can attach: a readable file, not a directory. The open panels let a
+    /// package through as a file: two 1.9 users chose an app (/System/Applications/Apps.app,
+    /// Steam.app) as their disk, and every start failed in krun_start_enter with -22 (STEAMAC-15).
+    static func isDiskImage(_ path: String) -> Bool {
+        var directory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &directory) && !directory.boolValue
+            && FileManager.default.isReadableFile(atPath: path)
+    }
+
+    /// "Choose a SteamOS disk image" panels (first run, Settings > Advanced): files only, no
+    /// packages (public.data excludes bundles and folders; a raw image of any name conforms).
+    static func configureDiskPanel(_ panel: NSOpenPanel) {
+        panel.title = String(localized: "Choose a SteamOS disk image")
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowedContentTypes = [.data]
     }
 
     /// The disk the next start uses (Settings value or default), nil if none is usable.
     static func configuredDisk(_ settings: LauncherSettings) -> String? {
         if !settings.diskImage.isEmpty {
-            return FileManager.default.isReadableFile(atPath: settings.diskImage) ? settings.diskImage : nil
+            return isDiskImage(settings.diskImage) ? settings.diskImage : nil
         }
         return defaultDisk()
     }
@@ -133,13 +154,9 @@ enum FirstRun {
                 chosen = CreateDiskWindowController.runModal(settings: settings)
             } else if choice == .alertSecondButtonReturn {
                 let panel = NSOpenPanel()
-                panel.title = String(localized: "Choose a SteamOS disk image")
+                AppBundle.configureDiskPanel(panel)
                 panel.message = String(localized: "Raw GPT disk image (e.g. steamos.img). It stays where it is.")
-                panel.canChooseFiles = true
-                panel.canChooseDirectories = false
-                panel.allowsMultipleSelection = false
-                panel.treatsFilePackagesAsDirectories = false
-                if panel.runModal() == .OK, let url = panel.url, FileManager.default.isReadableFile(atPath: url.path) {
+                if panel.runModal() == .OK, let url = panel.url, AppBundle.isDiskImage(url.path) {
                     chosen = url.path
                 }
             } else {

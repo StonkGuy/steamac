@@ -19,6 +19,26 @@ enum Supervisor {
     static var bootNumber: Int { Int(ProcessInfo.processInfo.environment[bootEnv] ?? "1") ?? 1 }
     static var windowFrame: String? { ProcessInfo.processInfo.environment[frameEnv] }
     static func rebootMarker(_ dir: String) -> String { dir + "/reboot" }
+    private static let profileDriverEnv = "STEAMAC_PROFILE_DRIVER"
+    private static let profileLaunchEnv = "STEAMAC_PROFILE_LAUNCH"
+    static var profileDriver: LauncherSettings.VulkanDriver? {
+        ProcessInfo.processInfo.environment[profileDriverEnv].flatMap(LauncherSettings.VulkanDriver.init(rawValue:))
+    }
+    static var profileLaunchAppID: Int? {
+        ProcessInfo.processInfo.environment[profileLaunchEnv].flatMap(Int.init)
+    }
+    private struct ProfileBoot: Codable { let driver: String; let appid: Int }
+    static func queueProfileBoot(driver: LauncherSettings.VulkanDriver, appid: Int) -> Bool {
+        guard let dir = runDir else { return false }
+        do {
+            try JSONEncoder().encode(ProfileBoot(driver: driver.rawValue, appid: appid))
+                .write(to: URL(fileURLWithPath: dir + "/profile-boot.json"), options: .atomic)
+            return true
+        } catch {
+            log("profiles: cannot queue driver restart: \(error)")
+            return false
+        }
+    }
 
     nonisolated(unsafe) private static var childPid: pid_t = 0
     /// The running VM process (0 between boots).
@@ -94,13 +114,21 @@ enum Supervisor {
         var boot = 1
         var frame: String?
         while true {
-            let o: Options
+            var o: Options
             do {
                 o = try resolve()
             } catch {
                 log("error: \(error)")
                 cleanup()
                 exit(2)
+            }
+            // Consume once: the following reboot returns to the saved global driver.
+            let profilePath = dir + "/profile-boot.json"
+            let profileBoot = (try? Data(contentsOf: URL(fileURLWithPath: profilePath)))
+                .flatMap { try? JSONDecoder().decode(ProfileBoot.self, from: $0) }
+            try? FileManager.default.removeItem(atPath: profilePath)
+            if let raw = profileBoot?.driver, let driver = LauncherSettings.VulkanDriver(rawValue: raw) {
+                o.vulkanDriver = driver
             }
             // Another launcher's VM writing this disk: refuse before anything starts (the VM process
             // holds the lock; see DiskLock).
@@ -152,6 +180,8 @@ enum Supervisor {
             env[bootEnv] = String(boot)
             env[netSockEnv] = gvproxy?.vfkitSocket
             env[frameEnv] = frame
+            env[profileDriverEnv] = profileBoot?.driver
+            env[profileLaunchEnv] = profileBoot.map { String($0.appid) }
             CrashReporting.supervisorBoot(o, boot: boot, runDir: dir, env: &env)
             let vmExit = spawnAndWait(exe, CommandLine.arguments, env)
             let status = vmExit.status
@@ -227,7 +257,7 @@ enum Supervisor {
             return VMExit(status: 1)
         }
         childPid = pid
-        var exit = VMExit(status: 1)
+        var exit = VMExit(status: 1, pid: pid)
         // NOTE_EXIT fires when the process becomes a zombie; its data carries NOTE_EXIT_DETAIL
         // bits (NOTE_EXIT_MEMORY = jetsam, the kernel's jetsam cause in the high bits). Not
         // registered if it already exited (ESRCH).

@@ -16,6 +16,12 @@ import SwiftUI
 enum SettingsSelfTest {
     static func run(_ o: Options, overrides: [LauncherSettings.Key: String]) -> Never {
         let settings = LauncherSettings.shared
+        let profileID = 2147483646
+        let savedProfile = settings.profile(for: profileID)
+        let savedName = settings.gameName(profileID)
+        settings.setGameName("A Profile self-test", for: profileID)
+        settings.setProfile(GameProfile(gfx: "dxmt", driver: LauncherSettings.VulkanDriver.preferred.rawValue,
+                                        env: "DXVK_HUD=fps"), for: profileID)
         settings.noteBoot(overrides: overrides, autoCapture: o.autoCapture)
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
@@ -29,8 +35,9 @@ enum SettingsSelfTest {
         let dir = o.selftestOut ?? "."
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         // Crash-report scrubbing: the user, host, computer and Bonjour names never leave the Mac.
-        var failures = CrashReporting.scrubSelfCheck() + CrashReporting.scannerSelfCheck() + VMSizing.selfCheck()
-            + UpdateChecker.selfCheck() + MacTime.selfCheck() + ClipboardSync.selfCheck()
+        var failures = CrashReporting.scrubSelfCheck() + CrashReporting.scannerSelfCheck() + CrashReporting.exitSelfCheck()
+            + VMSizing.selfCheck()
+            + UpdateChecker.selfCheck() + MacTime.selfCheck() + ClipboardSync.selfCheck() + GameProfile.selfCheck()
         var tabs = SettingsWindowController.Tab.allCases[...]
 
         func capture(_ name: String, _ rep: NSBitmapImageRep?) {
@@ -56,6 +63,10 @@ enum SettingsSelfTest {
         }
 
         func finish() {
+            settings.removeGame(profileID)
+            if settings.profile(for: profileID) != GameProfile() { failures.append("profiles: removeGame retained profile") }
+            if let savedName { settings.setGameName(savedName, for: profileID) }
+            settings.setProfile(savedProfile, for: profileID)
             log("selftest-settings: \(failures.isEmpty ? "PASS" : "FAIL: " + failures.joined(separator: ", "))")
             exit(failures.isEmpty ? 0 : 1)
         }
@@ -280,6 +291,9 @@ enum SettingsSelfTest {
             // Let the tab switch animation and SwiftUI layout settle.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 capture(tab.name, sw.snapshot())
+                if tab == .games && popups(in: sw.window.contentView).count < 3 {
+                    failures.append("profiles: graphics/driver/rating pickers not rendered")
+                }
                 next()
             }
         }

@@ -337,6 +337,7 @@ enum CrashReporting {
         if let rev = Bundle.main.object(forInfoDictionaryKey: "SteamacKosmicKrispRevision") as? String { t["kk_patch"] = rev }
         t["vulkan_driver"] = options.vulkanDriver.rawValue
         t["graphics_path"] = options.graphicsPath.rawValue
+        t["wmtr"] = options.wmtrLibrary == nil ? "off" : "on"
         for (tag, lib) in [("libkrun", "libkrun.1.dylib"), ("virglrenderer", "libvirglrenderer.1.dylib"),
                            ("moltenvk", "libMoltenVK.dylib"), ("kosmickrisp", "libvulkan_kosmickrisp.dylib")] {
             if let uuid = loadedImageUUID(suffix: "/" + lib) { t[tag] = uuid }
@@ -415,7 +416,8 @@ enum CrashReporting {
         env[runIdEnv] = run
         setTags(["run": run, "boot": String(boot), "vm_cpus": String(o.cpus), "vm_mem_mib": String(o.memMiB),
                  "vm_cpus_auto": String(o.cpusSource == .auto), "vm_mem_auto": String(o.memSource == .auto),
-                 "vulkan_driver": o.vulkanDriver.rawValue, "graphics_path": o.graphicsPath.rawValue])
+                 "vulkan_driver": o.vulkanDriver.rawValue, "graphics_path": o.graphicsPath.rawValue,
+                 "wmtr": o.wmtrLibrary == nil ? "off" : "on"])
         memoryWatch.reset()
         followSetting()
     }
@@ -426,17 +428,24 @@ enum CrashReporting {
         FileManager.default.createFile(atPath: dir + "/user-exit", contents: nil)
     }
 
+    /// Exit status of a force quit (a second shutdown request, the app menu's Force Quit). It tells
+    /// the supervisor the user asked for it without the user-exit marker, which is a file: with the
+    /// Mac's disk full it was never written, and a force quit during the guest's shutdown was
+    /// reported as "VM process exited with status 1" with the crash window (STEAMAC-15: libkrun
+    /// logged "No space left on device" flushing the guest disk just before).
+    static let forceQuitStatus: Int32 = 3
+
     /// Ways to ask a process to end (logout, `kill`, ^C, the terminal closing). The VM process
     /// handles them (guest power key); one that kills it came before its handlers were installed
     /// (first-run sheet, startup) and is no crash.
     static let terminationSignals: Set<Int32> = [SIGTERM, SIGINT, SIGHUP]
 
     /// The VM process ended in a way the user did not ask for: a crash signal, SIGKILL, or a
-    /// non-zero exit without a user request (window close, menu, signal, restart; Force Quit in
-    /// the app menu exits with status 1 after one). SIGPIPE (its output pipe closed; ignored since
-    /// STEAMAC-10, see main.swift) is no crash either.
+    /// non-zero exit without a user request (window close, menu, signal, restart; a force quit exits
+    /// with forceQuitStatus). SIGPIPE (its output pipe closed; ignored since STEAMAC-10, see
+    /// main.swift) is no crash either.
     static func unexpectedExit(status: Int32, runDir dir: String) -> Bool {
-        guard status != 0 else { return false }
+        guard status != 0, status != forceQuitStatus else { return false }
         let signal = status > 128 ? status - 128 : 0
         if terminationSignals.contains(signal) || signal == SIGPIPE { return false }
         let userExit = FileManager.default.fileExists(atPath: dir + "/user-exit")
@@ -487,7 +496,7 @@ enum CrashReporting {
             // jetsam (the kernel's memory kill) or someone's SIGKILL: Force Quit in the Dock or
             // the Force Quit window, Activity Monitor, kill -9.
             let host = HostMemory.current()
-            let pressure = memoryWatch.summary()
+            let pressure = memoryWatch.summary(including: host.pressure)
             let reason = exit.detail == nil ? "unknown" : exit.killedForMemory ? "jetsam" : "not-jetsam"
             let detail = exit.detail.map { " (exit detail 0x\(String($0, radix: 16)))" } ?? ""
             let lines = [
@@ -495,18 +504,34 @@ enum CrashReporting {
                 "killed by the kernel for memory (jetsam): \(reason == "jetsam" ? "yes" : reason == "unknown" ? "unknown" : "no")\(detail)",
                 "VM memory \(locked { tags["vm_mem_mib"] } ?? "?") MiB; VM process peak footprint "
                     + (exit.peakFootprint.map(gib) ?? "?"),
-                host.summary,
+                "host memory after exit: " + host.summary,
                 "memory pressure since the VM started: " + pressure.text,
             ]
             exitTags["kill_reason"] = reason
             exitTags["memory_pressure"] = host.pressure
             exitTags["memory_pressure_max"] = pressure.maxLevel
             if let pct = host.availablePercent { exitTags["host_mem_available_pct"] = String(pct) }
-            report(.vmKilled, key: reason, message: lines.joined(separator: "\n"), level: .warning, tags: exitTags)
+            report(.vmKilled, key: reason, message: lines.joined(separator: "\n"), level: .warning, tags: exitTags,
+                   extra: ["memory_history": memoryWatch.recentSamples()])
         } else {
             let lastError = last.map { ": \($0)" } ?? ""
-            report(.vmExited, key: signal != 0 ? signalName(signal) : "status \(exit.status)",
-                   message: exitSummary(status: exit.status) + lastError, tags: exitTags)
+            var key = signal != 0 ? signalName(signal) : "status \(exit.status)"
+            var lines = [exitSummary(status: exit.status) + lastError]
+            var extra: [String: String] = [:]
+            // macOS's report names the crash site, so crashes group by it instead of by signal, and
+            // carries what Sentry's report of the VM process leaves out: libmalloc's message on a
+            // heap corruption trap (STEAMAC-31/13: SIGTRAP in libsystem_malloc under
+            // mtl_new_compute_pipeline_state, no message).
+            if signal != 0, let crash = SystemCrashReport.find(pid: exit.pid, timeout: 8) {
+                if let site = crash.site {
+                    lines[0] = exitSummary(status: exit.status) + " in " + site + lastError
+                    key += " " + site
+                    exitTags["crash_site"] = String(site.prefix(200))
+                }
+                lines += crash.messages
+                extra["macos_crash_report"] = crash.summary
+            }
+            report(.vmExited, key: key, message: lines.joined(separator: "\n"), tags: exitTags, extra: extra)
         }
         flush()
     }
@@ -523,9 +548,11 @@ enum CrashReporting {
 
     // MARK: VM-process hooks
 
-    static func stallNotResponding(seconds: TimeInterval) {
-        report(.notResponding, key: "not-responding", message: "SteamOS not responding (no GPU work for \(Int(seconds)) s)",
-               tags: ["stall_seconds": String(Int(seconds))])
+    static func stallNotResponding(_ diagnostic: StallMonitor.Diagnostic) {
+        report(.notResponding, key: "not-responding", message: "SteamOS not responding (no GPU work for \(Int(diagnostic.idle)) s)",
+               tags: ["stall_seconds": String(Int(diagnostic.idle)),
+                      "heartbeat_age_seconds": String(Int(diagnostic.heartbeatAge))],
+               extra: ["stall_history": diagnostic.history])
     }
 
     static func provisionFailed(reason: String) {
@@ -537,8 +564,8 @@ enum CrashReporting {
     /// OptionError has no meaningful numeric code: retain its normalised diagnostic so bugs
     /// such as failed publication and bundle verification do not collapse into one issue.
     static func diskCreationReport(_ error: Error) -> (key: String, message: String, extra: [String: String])? {
-        guard !(error is DiskCreationFilesystem.Rejection), !(error is DiskCreator.Cancelled),
-              !(error is RaucBundle.DevelopmentSignature) else { return nil }
+        guard DiskCreationFilesystem.rejection(error) == nil, !NetworkFailure.isExpected(error),
+              !(error is DiskCreator.Cancelled), !(error is RaucBundle.DevelopmentSignature) else { return nil }
         let e = error as NSError
         let diagnostic = error is OptionError ? normalize("\(error)") : "\(e.domain) \(e.code)"
         return (diagnostic, "Disk creation failed: \(diagnostic)", ["error_detail": "\(error)"])
@@ -739,6 +766,50 @@ enum CrashReporting {
         }
         log("selftest-settings: scrub check: \(checked.joined(separator: ", ")) names, steamac.tz: "
             + (failures.isEmpty ? "all redacted" : failures.joined(separator: "; ")))
+        return failures
+    }
+
+    /// Settings self-test: a force quit is a requested exit without the user-exit marker (STEAMAC-15,
+    /// the Mac's disk full), a status-1 exit without it is not; a macOS crash report names the
+    /// crash site and libmalloc's message (STEAMAC-31); an app bundle is no disk image (STEAMAC-15).
+    static func exitSelfCheck() -> [String] {
+        var failures: [String] = []
+        let dir = NSTemporaryDirectory() + "steamac-exit-check-\(getpid())"
+        try? FileManager.default.createDirectory(atPath: dir + "/Apps.app/Contents", withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        if unexpectedExit(status: forceQuitStatus, runDir: dir) { failures.append("exit: force quit without marker reported") }
+        if !unexpectedExit(status: 1, runDir: dir) { failures.append("exit: status 1 without marker not reported") }
+        if !unexpectedExit(status: 128 + SIGSEGV, runDir: dir) { failures.append("exit: SIGSEGV not reported") }
+        FileManager.default.createFile(atPath: dir + "/steamos.img", contents: Data(count: 512))
+        if AppBundle.isDiskImage(dir + "/Apps.app") { failures.append("disk: an app bundle is a disk image") }
+        if !AppBundle.isDiskImage(dir + "/steamos.img") { failures.append("disk: a file is no disk image") }
+        let header = #"{"app_name":"steamac-vm","bug_type":"309","name":"steamac-vm"}"#
+        let body = #"""
+            {"pid": 4242, "exception": {"type": "EXC_BREAKPOINT", "signal": "SIGTRAP", "subtype": "Trace/BPT trap: 5"},
+             "asi": {"libsystem_malloc.dylib": ["BUG IN CLIENT OF LIBMALLOC: memory corruption of free block"]},
+             "faultingThread": 1,
+             "usedImages": [{"name": "libsystem_malloc.dylib", "path": "/usr/lib/system/libsystem_malloc.dylib"},
+                            {"name": "libobjc.A.dylib", "path": "/usr/lib/libobjc.A.dylib"},
+                            {"name": "libvulkan_kosmickrisp.dylib", "path": "/Applications/FX Steam Launcher.app/Contents/Frameworks/libvulkan_kosmickrisp.dylib"}],
+             "threads": [{"frames": [{"imageOffset": 16, "imageIndex": 0}]},
+                         {"frames": [{"imageOffset": 290148, "symbol": "_xzm_xzone_malloc_freelist_outlined", "symbolLocation": 868, "imageIndex": 0},
+                                     {"imageOffset": 58660, "symbol": "AutoreleasePoolPage::releaseUntil(objc_object**)", "symbolLocation": 196, "imageIndex": 1},
+                                     {"imageOffset": 3096316, "symbol": "mtl_new_compute_pipeline_state", "symbolLocation": 160, "imageIndex": 2},
+                                     {"imageOffset": 123, "imageIndex": 5}]}]}
+            """#
+        if SystemCrashReport.parse(header + "\n" + body, pid: 4243) != nil { failures.append("crash report: another pid's report used") }
+        if SystemCrashReport.parse(header + "\n" + body.prefix(100), pid: 4242) != nil { failures.append("crash report: a partial report used") }
+        let crash = SystemCrashReport.parse(header + "\n" + body, pid: 4242)
+        if crash?.site != "mtl_new_compute_pipeline_state" { failures.append("crash report: site \(crash?.site ?? "nil")") }
+        if crash?.messages != ["libsystem_malloc.dylib: BUG IN CLIENT OF LIBMALLOC: memory corruption of free block"] {
+            failures.append("crash report: messages \(crash?.messages ?? [])")
+        }
+        if crash?.exception != "EXC_BREAKPOINT SIGTRAP: Trace/BPT trap: 5" || crash?.frames.count != 4
+            || crash?.frames.last != "??? + 0x7b" {
+            failures.append("crash report: \(crash?.summary ?? "nil")")
+        }
+        log("selftest-settings: exit check: force quit, crash report, disk image: "
+            + (failures.isEmpty ? "ok" : failures.joined(separator: "; ")))
         return failures
     }
 
@@ -996,8 +1067,11 @@ private struct LineScanner {
     /// virglrenderer (patch 0010): another thread of a context that went fatal stops
     /// ("<command> stopped: the context went fatal on another thread", "…submit_cmd: stopping,
     /// the context went fatal on another thread"); the thread that raised it logs its own line.
+    /// The two "early bail" paths likewise only test an already-fatal context/decoder
+    /// (vkr_context.c / vkr_ring.c), including normal probe/session teardown (STEAMAC-G).
     static func isBystander(_ line: String) -> Bool {
         line.contains("went fatal on another thread")
+            || line.contains("submit_cmd: early bail due to fatal decoder state")
     }
 
     /// STEAMAC-G 2026-10-05 16:09:54: the user skipped Steam's shader processing (fossilize_replay
@@ -1013,6 +1087,8 @@ private struct LineScanner {
         "vkr: resource 77 destroyed while the context replies into it (CS error)",
         "vkr: vkCreateGraphicsPipelines stopped: the context went fatal on another thread",
         "vkr: ring_submit_cmd: stopping, the context went fatal on another thread",
+        "vkr: submit_cmd: early bail due to fatal decoder state",
+        "vkr: ring_submit_cmd: early bail due to fatal decoder state",
     ].map(LineScanner.virglLine)
 
     /// Lines that stay reports (one each).
@@ -1183,6 +1259,8 @@ final class StderrTap {
 struct VMExit {
     /// Exit status, or 128 + the signal that killed it.
     var status: Int32
+    /// The VM process (0 when it never started).
+    var pid: pid_t = 0
     /// kevent NOTE_EXIT_DETAIL bits, nil when the exit was not observed.
     var detail: UInt32?
     /// Lifetime peak phys_footprint, bytes (a zombie's current footprint is already 0).
@@ -1199,6 +1277,80 @@ struct VMExit {
             $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
         }
         return rc == 0 ? (ri.ri_phys_footprint, ri.ri_lifetime_max_phys_footprint) : nil
+    }
+}
+
+/// macOS's own report of a crashed VM process (ReportCrash writes
+/// ~/Library/Logs/DiagnosticReports/steamac-vm-<date>.ips a moment after the process died): the
+/// exception, the Application Specific Information libraries left for the crash (libmalloc's
+/// "BUG IN CLIENT OF LIBMALLOC: …" on a heap corruption trap, which the VM process's own Sentry
+/// report does not carry) and the crashed thread's frames, symbolicated from the binaries' symbol
+/// tables.
+struct SystemCrashReport {
+    var exception: String
+    /// "<image>: <message>" per Application Specific Information line.
+    var messages: [String]
+    /// The crashed thread's first frames, "<image> <symbol> + <offset>".
+    var frames: [String]
+    /// The first frame's symbol outside the system's libraries (/usr/lib, /System).
+    var site: String?
+
+    var summary: String { ([exception] + messages + frames).joined(separator: "\n") }
+
+    static let directory = NSHomeDirectory() + "/Library/Logs/DiagnosticReports"
+
+    /// The report of process `pid`, waiting up to `timeout` for ReportCrash to write it.
+    static func find(pid: pid_t, timeout: TimeInterval) -> SystemCrashReport? {
+        guard pid > 0 else { return nil }
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            for name in names where name.hasPrefix("steamac-vm") && name.hasSuffix(".ips") {
+                let path = directory + "/" + name
+                guard let modified = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date,
+                      Date().timeIntervalSince(modified) < 600,
+                      let text = try? String(contentsOfFile: path, encoding: .utf8),
+                      let report = parse(text, pid: pid) else { continue }
+                return report
+            }
+            guard Date() < deadline else { return nil }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+
+    /// An .ips file: a JSON header line, then the JSON report (nil if it is another process's or
+    /// not complete yet).
+    static func parse(_ text: String, pid: pid_t) -> SystemCrashReport? {
+        guard let newline = text.firstIndex(of: "\n"),
+              let body = try? JSONSerialization.jsonObject(with: Data(text[text.index(after: newline)...].utf8)) as? [String: Any],
+              (body["pid"] as? Int).map({ pid_t($0) }) == pid else { return nil }
+        let exc = body["exception"] as? [String: Any] ?? [:]
+        var exception = [exc["type"], exc["signal"]].compactMap { $0 as? String }.joined(separator: " ")
+        if let subtype = exc["subtype"] as? String { exception += ": " + subtype }
+        var messages: [String] = []
+        for (image, lines) in (body["asi"] as? [String: Any] ?? [:]).sorted(by: { $0.key < $1.key }) {
+            for line in lines as? [String] ?? [] {
+                messages.append(image + ": " + line.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+        let images = body["usedImages"] as? [[String: Any]] ?? []
+        let threads = body["threads"] as? [[String: Any]] ?? []
+        var frames: [String] = []
+        var site: String?
+        if let faulting = body["faultingThread"] as? Int, faulting >= 0, faulting < threads.count {
+            for frame in (threads[faulting]["frames"] as? [[String: Any]] ?? []).prefix(16) {
+                let image = (frame["imageIndex"] as? Int).flatMap { $0 >= 0 && $0 < images.count ? images[$0] : nil }
+                let name = image?["name"] as? String ?? "???"
+                if let symbol = frame["symbol"] as? String {
+                    frames.append("\(name) \(symbol) + \(frame["symbolLocation"] as? Int ?? 0)")
+                    let path = image?["path"] as? String ?? ""
+                    if site == nil && !path.hasPrefix("/usr/lib/") && !path.hasPrefix("/System/") { site = symbol }
+                } else {
+                    frames.append("\(name) + 0x\(String(frame["imageOffset"] as? Int ?? 0, radix: 16))")
+                }
+            }
+        }
+        return SystemCrashReport(exception: exception, messages: messages, frames: frames, site: site)
     }
 }
 
@@ -1265,8 +1417,11 @@ extension CrashReporting {
 private final class MemoryWatch: @unchecked Sendable {
     private let lock = NSLock()
     private var source: DispatchSourceMemoryPressure?
+    private var timer: DispatchSourceTimer?
     private var started = Date()
     private var events: [(at: Date, level: String, footprint: UInt64?)] = []
+    private var samples: [(at: Date, text: String)] = []
+    private var nextSample = 0
 
     func start() {
         guard source == nil else { return }
@@ -1277,6 +1432,11 @@ private final class MemoryWatch: @unchecked Sendable {
         }
         s.resume()
         source = s
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 10, repeating: 10, leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in self?.sample() }
+        timer.resume()
+        self.timer = timer
     }
 
     /// A new VM process: the history starts with the current level.
@@ -1285,6 +1445,9 @@ private final class MemoryWatch: @unchecked Sendable {
         lock.withLock {
             started = Date()
             events = [(started, level, nil)]
+            samples.removeAll(keepingCapacity: true)
+            samples.reserveCapacity(12)
+            nextSample = 0
         }
     }
 
@@ -1298,13 +1461,43 @@ private final class MemoryWatch: @unchecked Sendable {
         log("memory pressure: \(level)" + (footprint.map { " (VM process footprint \(CrashReporting.gib($0)))" } ?? ""))
     }
 
+    /// Host state must be sampled before a kill: sampling only after waitpid sees memory
+    /// already reclaimed from the VM (STEAMAC-S). Keep two minutes without per-tick logging.
+    private func sample() {
+        let pid = Supervisor.vmPid
+        guard pid > 0, let footprint = VMExit.footprint(pid: pid) else { return }
+        let at = Date()
+        let host = CrashReporting.HostMemory.current()
+        let text = "VM footprint \(CrashReporting.gib(footprint.current)); " + host.summary
+        lock.withLock {
+            // A sample taken across a guest reboot must not enter the new VM's history.
+            guard at >= started, Supervisor.vmPid == pid else { return }
+            if samples.count < 12 { samples.append((at, text)) }
+            else { samples[nextSample] = (at, text) }
+            nextSample = (nextSample + 1) % 12
+        }
+    }
+
+    func recentSamples() -> String {
+        lock.withLock {
+            let now = Date()
+            var lines = ["Pre-exit samples (every 10 s; values at report time may already be reclaimed):"]
+            for offset in 0..<samples.count {
+                let s = samples[(samples.count == 12 ? nextSample + offset : offset) % 12]
+                lines.append("\(Int(now.timeIntervalSince(s.at))) s ago: \(s.text)")
+            }
+            if samples.isEmpty { lines.append("none (VM ran less than one sampling interval)") }
+            return lines.joined(separator: "\n")
+        }
+    }
+
     /// "normal at start; warning 5m12s ago (VM 14.2 GiB); critical 40s ago (VM 15.1 GiB)" and the
     /// highest level seen.
-    func summary() -> (text: String, maxLevel: String) {
+    func summary(including currentLevel: String) -> (text: String, maxLevel: String) {
         let rank = ["normal": 1, "warning": 2, "critical": 3]
         return lock.withLock {
             let now = Date()
-            var max = "unknown"
+            var max = currentLevel
             var parts: [String] = []
             for (i, e) in events.enumerated() {
                 if rank[e.level, default: 0] > rank[max, default: 0] { max = e.level }

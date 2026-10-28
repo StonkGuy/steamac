@@ -14,6 +14,60 @@ enum DiskCreationFilesystem {
         var errorDescription: String? { localized ?? description }
     }
 
+    /// Includes failures after preflight: a drive can disappear, fill up, or change permissions
+    /// while desync or the disk writer runs. Match errno diagnostics only at their suffix.
+    static func rejection(_ error: Error) -> Rejection? {
+        if let rejection = error as? Rejection { return rejection }
+        let e = error as NSError
+        if e.domain == NSPOSIXErrorDomain { return rejection(errno: Int32(e.code), detail: "\(error)") }
+        if let underlying = e.userInfo[NSUnderlyingErrorKey] as? NSError,
+           let rejection = rejection(underlying) { return rejection }
+        if e.domain == NSCocoaErrorDomain {
+            switch e.code {
+            case NSFileWriteNoPermissionError, NSFileReadNoPermissionError:
+                return rejection(errno: EACCES, detail: "\(error)")
+            case NSFileWriteVolumeReadOnlyError:
+                return rejection(errno: EROFS, detail: "\(error)")
+            case NSFileWriteOutOfSpaceError:
+                return rejection(errno: ENOSPC, detail: "\(error)")
+            default: break
+            }
+        }
+        guard error is OptionError else { return nil }
+        let detail = "\(error)"
+        for code in [EROFS, EACCES, EPERM, ENOSPC, EDQUOT, ENXIO, ENODEV, EIO] {
+            if detail.lowercased().hasSuffix(": " + String(cString: strerror(code)).lowercased()) {
+                return rejection(errno: code, detail: detail)
+            }
+        }
+        return nil
+    }
+
+    static func rejection(errno code: Int32, detail: String) -> Rejection? {
+        let advice: String
+        switch code {
+        case EROFS:
+            advice = String(localized: "The location is read-only. Choose a writable folder, not the mounted FX Steam Launcher installer.")
+        case EACCES, EPERM:
+            advice = String(localized: "There is no permission to write to the disk or download cache. Choose a writable folder or check Finder → Get Info → Sharing & Permissions.")
+        case ENOSPC, EDQUOT:
+            advice = String(localized: "The volume ran out of space while creating SteamOS. Free some space or choose another volume, then try again.")
+        case ENXIO, ENODEV, EIO:
+            advice = String(localized: "The drive disconnected or reported an I/O error. Check its connection and run Disk Utility First Aid, then try again; use another drive if the error continues.")
+        default: return nil
+        }
+        return Rejection("\(advice) (\(detail))", localized: "\(advice)\n\n\(detail)")
+    }
+
+    static func diagnostic(directory: String) -> String {
+        var fs = statfs()
+        guard statfs(directory, &fs) == 0 else { return "statfs \(directory): \(String(cString: strerror(errno)))" }
+        let type = withUnsafePointer(to: &fs.f_fstypename) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSTYPENAMELEN)) { String(cString: $0) }
+        }
+        return "filesystem=\(type), block=\(fs.f_bsize), flags=0x\(String(fs.f_flags, radix: 16)), free=\(UInt64(fs.f_bavail) * UInt64(fs.f_bsize))"
+    }
+
     /// Before downloading: reject volumes that cannot hold the disk. Returns whether files
     /// occupy their full logical size (exFAT does not support sparse files).
     static func preflight(directory: String, diskBytes: UInt64, rootfsBytes: UInt64, existingBytes: UInt64 = 0) throws -> Bool {
@@ -49,6 +103,17 @@ enum DiskCreationFilesystem {
         return dense
     }
 
+    /// The volume of `directory` cannot hold `needed` more bytes (free space as it is now).
+    static func notEnoughSpace(needed: UInt64, directory: String) -> Rejection {
+        var fs = statfs()
+        let free = statfs(directory, &fs) == 0 ? UInt64(fs.f_bavail) * UInt64(fs.f_bsize) : 0
+        let gb = { (n: UInt64) in String(format: "%.1f GB", Double(n) / 1e9) }
+        let neededText = String(format: "%.1f", Double(needed) / 1e9)
+        let available = String(format: "%.1f", Double(free) / 1e9)
+        return Rejection("not enough free space: \(gb(needed)) needed on the volume of \(directory), \(gb(free)) free",
+            localized: String(localized: "not enough free space: \(neededText) GB needed on the volume of \(directory), \(available) GB free"))
+    }
+
     /// Before downloading: the folder must accept new files (the cache folder, the partial disk).
     /// Volumes that honour ownership can hold folders the user may not write to (STEAMAC-2H).
     static func requireWritable(directory: String) throws {
@@ -60,16 +125,10 @@ enum DiskCreationFilesystem {
             return
         }
         let error = errno
-        switch error {
-        case EACCES, EPERM:
-            throw Rejection("no permission to write in \(directory): choose a folder you can write to, "
-                + "or allow writing in Finder → Get Info → Sharing & Permissions",
-                localized: String(localized: "no permission to write in \(directory): choose a folder you can write to, or allow writing in Finder → Get Info → Sharing & Permissions"))
-        case EEXIST:
-            return
-        default:
-            throw OptionError("\(directory): \(String(cString: strerror(error)))")
-        }
+        if error == EEXIST { return }
+        let detail = "\(directory): \(String(cString: strerror(error)))"
+        if let rejection = rejection(errno: error, detail: detail) { throw rejection }
+        throw OptionError(detail)
     }
 
     /// The caller must hold creation.lock until publication is complete.

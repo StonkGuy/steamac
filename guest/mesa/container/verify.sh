@@ -6,7 +6,9 @@
 #      symbol version (GLIBC_*, ...) is defined by the library that provides it
 #   3. runtime: ldd -r and vkprobe (dlopen + ICD entry points + loader instance) inside chroots
 #      of the stock rootfs (aarch64) and of the fex-mesa provider (x86_64 via Rosetta, i386 via qemu)
-#   4. fault-report.so: deps against the provider, and a preloaded test program that faults after
+#   4. the zink GL stack (libgallium, GLX/EGL/GBM frontends, dri stubs): 1, 2 and ldd -r per root,
+#      the frontends resolving our libgallium
+#   5. fault-report.so: deps against the provider, and a preloaded test program that faults after
 #      installing and restoring its own handler must die by SIGSEGV with two reports naming its RIP
 set -eu
 : "${FEX_PROVIDER:?}"
@@ -133,23 +135,44 @@ check_runtime() {
     fi
 }
 
+# check_gl <root> <libdir> <machine> <class>: the GL files install_gl put into <root><libdir>
+# (no locals in sh, and check_deps/resolve set r, f, d, so this uses gl_* names)
+check_gl() {
+    gl_root=$1 gl_dir=$2 gl_machine=$3 gl_class=$4
+    gl_gallium=$(cd "$gl_root$gl_dir" && ls libgallium-*.so)
+    for gl_f in "$gl_gallium" libGLX_mesa.so.0 libEGL_mesa.so.0 libgbm.so.1 gbm/dri_gbm.so dri/zink_dri.so; do
+        gl_real=$(resolve "$gl_root" "$gl_dir/$gl_f") || { fail "gl $gl_dir/$gl_f (root ${gl_root#/merged}) missing"; continue; }
+        check_elf "$gl_root$gl_real" "$gl_machine" "$gl_class"
+        check_deps "$gl_root" "$gl_real" "$gl_dir"
+        check_ldd "$gl_root" "$gl_dir/$gl_f"
+    done
+    for gl_f in libGLX_mesa.so.0 libEGL_mesa.so.0 gbm/dri_gbm.so; do
+        gl_real=$(resolve "$gl_root" "$gl_dir/$gl_f")
+        if readelf -d "$gl_root$gl_real" | grep -qF "[$gl_gallium]"; then pass "gl $gl_dir/$gl_f needs $gl_gallium"
+        else fail "gl $gl_dir/$gl_f (root ${gl_root#/merged}) does not need $gl_gallium"; fi
+    done
+}
+
 echo "== aarch64 (stock rootfs)"
 check_elf /merged/usr/lib/libvulkan_virtio.so AArch64 ELF64
 check_json /merged /usr/share/vulkan/icd.d/virtio_icd.aarch64.json /usr/lib/libvulkan_virtio.so 64
 check_deps /merged /usr/lib/libvulkan_virtio.so /usr/lib
 check_runtime /merged /usr/lib/libvulkan_virtio.so vkprobe-aarch64
+check_gl /merged /usr/lib AArch64 ELF64
 
 echo "== x86_64 (fex-mesa provider $FEX_PROVIDER)"
 check_elf "$PROV/usr/lib/libvulkan_virtio.so" "Advanced Micro Devices X86-64" ELF64
 check_json "$PROV" /usr/share/vulkan/icd.d/virtio_icd.x86_64.json /usr/lib/libvulkan_virtio.so 64
 check_deps "$PROV" /usr/lib/libvulkan_virtio.so /usr/lib
 check_runtime "$PROV" /usr/lib/libvulkan_virtio.so vkprobe-x86_64
+check_gl "$PROV" /usr/lib "Advanced Micro Devices X86-64" ELF64
 
 echo "== i386 (fex-mesa provider $FEX_PROVIDER)"
 check_elf "$PROV/usr/lib32/libvulkan_virtio.so" "Intel 80386" ELF32
 check_json "$PROV" /usr/share/vulkan/icd.d/virtio_icd.x86.json /usr/lib32/libvulkan_virtio.so 32
 check_deps "$PROV" /usr/lib32/libvulkan_virtio.so /usr/lib32
 check_runtime "$PROV" /usr/lib32/libvulkan_virtio.so vkprobe-i386
+check_gl "$PROV" /usr/lib32 "Intel 80386" ELF32
 
 echo "== x86_64 fault reporter (/usr/lib/steamac/x86_64, run on the fex-mesa provider's glibc)"
 FR=/merged/usr/lib/steamac/x86_64/fault-report.so

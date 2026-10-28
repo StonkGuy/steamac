@@ -134,22 +134,26 @@ if (root / 'work/out/host/lib/libvulkan_kosmickrisp.dylib').is_file():
     source('KosmicKrisp-Mesa', mesa_commit.group(1)[:10], 'MIT', host + '/libvulkan_kosmickrisp.dylib',
            'https://gitlab.freedesktop.org/mesa/mesa/-/tree/' + mesa_commit.group(1), mesa,
            ['docs/license.rst'] + [str(p.relative_to(mesa)) for p in sorted((mesa / 'licenses').rglob('*')) if p.is_file()])
-# The DXMT graphics path (libwmtr_host.dylib, bundled when wmtr/ built it): DXMT with its airconv shader
-# compiler, the statically linked LLVM, and wmtr itself.
-if (root / 'work/out/host/lib/libwmtr_host.dylib').is_file():
-    pin = dict(re.findall(r'^([A-Z][A-Z0-9_]*)=(\S+)$', require(root / 'host/dxmt/pin.env').read_text(), re.M))
-    wmtr_lib = host + '/libwmtr_host.dylib'
-    dxmt_tar = root / 'work/cache/dxmt' / ('dxmt-' + pin['DXMT_COMMIT'] + '.tar.gz')
-    if not dxmt_tar.is_file():
-        dxmt_tar.parent.mkdir(parents=True, exist_ok=True)
-        dxmt_tar.write_bytes(subprocess.check_output(['curl', '-fsSL', '--retry', '3', pin['DXMT_URL']]))
-    archive('DXMT', pin['DXMT_COMMIT'][:10], 'LGPL-2.1-or-later', wmtr_lib,
-            pin['DXMT_REPO'] + '/tree/' + pin['DXMT_COMMIT'], dxmt_tar, ('COPYING.LIB', 'LICENSE', 'LICENSE.OLD'))
-    add('LLVM', pin['LLVM_VERSION'], 'Apache-2.0 WITH LLVM-exception', wmtr_lib + ' (static, airconv)',
-        'https://github.com/llvm/llvm-project/tree/llvmorg-' + pin['LLVM_VERSION'],
-        [('LICENSE.TXT', require(root / 'LICENSES/LLVM-15-Apache-2.0-WITH-LLVM-exception.txt').read_bytes())])
-    add('wmtr', '2026', 'BSD-3-Clause', wmtr_lib, 'https://github.com/StonkGuy/steamac/tree/main/wmtr',
-        [('LICENSE', require(root / 'LICENSES/BSD-3-Clause.txt').read_bytes())])
+# DXMT also ships in the guest layer; do not key its inventory only on the host dylib.
+wmtr_host = (root / 'work/out/host/lib/libwmtr_host.dylib').is_file()
+dxmt_payload = root / 'work/out/dxmt'
+dxmt_guest = (dxmt_payload / 'x86_64-unix/winemetal.so').is_file()
+if wmtr_host or dxmt_guest:
+    dxmt_pin = dict(re.findall(r'^([A-Z][A-Z0-9_]*)=(.*)$',
+                              require(root / 'host/dxmt/pin.env').read_text(), re.M))
+    dxmt_commit = dxmt_pin['DXMT_COMMIT']
+    dxmt_tar = root / f'work/cache/dxmt/dxmt-{dxmt_commit}.tar.gz'
+    dxmt_url = dxmt_pin['DXMT_REPO'] + '/tree/' + dxmt_commit
+    wmtr_docs = [('LICENSE', require(root / 'LICENSES/BSD-3-Clause.txt').read_bytes()),
+                 ('NOTICE', require(root / 'NOTICE').read_bytes())]
+    if wmtr_host:
+        archive('DXMT', dxmt_pin['DXMT_FORK_COMMIT'], 'LGPL-2.1-or-later',
+                host + '/libwmtr_host.dylib', dxmt_url, dxmt_tar, ('COPYING.LIB', 'LICENSE', 'LICENSE.OLD'))
+        add('LLVM', dxmt_pin['LLVM_VERSION'], 'Apache-2.0 WITH LLVM-exception',
+            host + '/libwmtr_host.dylib', 'https://github.com/llvm/llvm-project/tree/llvmorg-' + dxmt_pin['LLVM_VERSION'],
+            [('LICENSE', require(root / 'LICENSES/LLVM-15-Apache-2.0-WITH-LLVM-exception.txt').read_bytes())])
+        add('wmtr', '2026', 'BSD-3-Clause', host + '/libwmtr_host.dylib',
+            'https://github.com/StonkGuy/steamac/tree/fex-eac/wmtr', wmtr_docs)
 # The experimental VR host (Contents/MacOS/steamac-vrhost, bundled when host/vrhost/build.sh built it): a separate
 # GPL-3.0-or-later executable (WiVRn code) with a static libcrypto and header-only build dependencies.
 vrhost_bin = root / 'work/out/host/bin/steamac-vrhost'
@@ -320,6 +324,24 @@ add('Mesa', versions['MESA_COMMIT'], 'MIT', layer + ':/usr/lib and /usr/share/gu
     versions['MESA_URL'], [('license.rst', pinned_text(
         'mesa-' + versions['MESA_COMMIT'] + '-license.rst',
         'https://gitlab.freedesktop.org/mesa/mesa/-/raw/' + versions['MESA_COMMIT'] + '/docs/license.rst'))])
+if dxmt_guest:
+    dxmt_location = layer + ':/usr/lib/steamac/dxmt/'
+    for dll in ('d3d11', 'dxgi', 'd3d10core', 'winemetal'):
+        require(dxmt_payload / 'x86_64-windows' / (dll + '.dll'))
+    archive('DXMT-guest', dxmt_pin['DXMT_FORK_COMMIT'], 'LGPL-2.1-or-later',
+            dxmt_location + 'x86_64-windows/{d3d11,dxgi,d3d10core,winemetal}.dll',
+            dxmt_url, dxmt_tar, ('COPYING.LIB', 'LICENSE', 'LICENSE.OLD'))
+    add('wmtr-guest', '2026', 'BSD-3-Clause AND LGPL-2.1-or-later',
+        dxmt_location + 'x86_64-unix/winemetal.so',
+        'https://github.com/StonkGuy/steamac/tree/fex-eac/wmtr',
+        wmtr_docs + [('COPYING.LIB', require(root / 'LICENSES/LGPL-2.1-only.txt').read_bytes())])
+    dxmt_build = require(root / 'host/dxmt/build.sh').read_text()
+    headers_commit = re.search(r'^DXHEADERS_COMMIT=([0-9a-f]{40})$', dxmt_build, re.M).group(1)
+    archive('DXMT-mingw-directx-headers', headers_commit, 'LGPL-2.1-or-later',
+            dxmt_location + 'x86_64-windows/{d3d11,dxgi,d3d10core,winemetal}.dll',
+            'https://github.com/misyltoad/mingw-directx-headers/tree/' + headers_commit,
+            root / f'work/cache/dxmt/mingw-directx-headers-{headers_commit}.tar.gz',
+            ('COPYING.MinGW-w64.txt',))
 own_docs = []
 for filename in ('LICENSE', 'NOTICE'):
     path = root / filename

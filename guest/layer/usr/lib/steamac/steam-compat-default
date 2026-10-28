@@ -1,0 +1,303 @@
+#!/usr/bin/python3
+"""steamac: an x86-64 Proton for installed Windows games whose profiles request DXMT.
+
+DXMT's dlls are x86-64 Windows builds with a Wine unixlib, which only an x86-64 Proton can load (in
+Proton 11.0 (ARM64), ARM64EC Wine, d3d11.dll loads but winemetal's unix side does not come up and
+the game reports "could not load d3d11.dll"). The Steam client of this SteamOS maps every Windows
+title to "proton-stable", Proton 11.0 (ARM64), at priority 85. With the launcher's setting on
+(steamac.gfx=dxmt), steam-gfx-path runs `steam-compat-default dxmt` before Steam starts: an
+installed Windows game (libraryfolders.vdf's apps whose appinfo.vdf entry has type game/demo/
+application and an oslist with windows but not linux) with profile gfx=dxmt and no tool of its own
+gets a per-game CompatToolMapping entry in config.vdf for Proton 10.0 at priority 250, the entry Steam
+writes for a game set to a tool in its Properties. Steam downloads Proton 10.0 when such a game first
+needs it, and steam-gfx-path --watch fills it with DXMT. Proton 10.0 (proton_10, appid 3658110) is
+the newest x86-64 Proton this client installs: it runs in Steam Linux Runtime 3.0 under the FEX tool;
+Proton Experimental and the x86-64 Proton 11.0 need Steam Linux Runtime 4.0, which the arm64 client
+refuses ("Failed installing AppID 4183110 (Invalid platform)"). A game installed while Steam runs is
+mapped at the next Steam start.
+
+Never the wildcard ("0"): Steam applies a high-priority wildcard to its tools too, mapped the FEX
+tool (3127680) to Proton, "updated" it to zero depots and emptied it, after which every x86-64 Proton
+failed ("Tool 3127680 "fex" unsupported version 0").
+
+With the setting off (`vulkan`), or a profile no longer requesting DXMT, our entries are removed.
+The games it mapped are remembered in $STATE/compat-default.json; a game whose entry was changed in Steam since is left alone
+from then on. Steam is not running when this runs (ExecStartPre of steam.service); it rewrites
+config.vdf only when it exits. Every byte of config.vdf outside the entries is kept (the VDF helpers
+are mac-clock-format's).
+Usage: steam-compat-default dxmt|vulkan
+Test overrides: STEAMAC_STEAM_ROOT, STEAMAC_GFX_STATE.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import struct
+import sys
+import tempfile
+
+TOOL = "proton_10"
+# What Steam writes for a game set to a tool in its Properties (above its own mapping's 85).
+OURS = {"name": TOOL, "config": "", "priority": "250"}
+MAPPING = ("InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping")
+GAME_TYPES = {"game", "demo", "application"}
+
+
+def log(text):
+    print("steam-compat-default: " + text, file=sys.stderr)
+
+
+def atomic_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+        os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def vdf_unquote(token):
+    if not token.startswith('"'):
+        return token
+    return re.sub(r'\\([\\"nrt])', lambda m: {"n": "\n", "r": "\r", "t": "\t"}.get(m[1], m[1]), token[1:-1])
+
+
+def vdf_quote(value):
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + '"'
+
+
+def vdf_entries(text):
+    """Scalar spans, block closing offsets and block key offsets; every unrelated byte is retained."""
+    tokens = [m for m in re.finditer(r'//[^\n]*|"(?:\\.|[^"\\])*"|[{}]|[^\s{}"]+', text)
+              if not m[0].startswith("//")]
+    values, blocks, starts, stack = {}, {}, {}, []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token[0] == "}":
+            if not stack:
+                raise ValueError("unbalanced VDF closing brace")
+            blocks[tuple(stack)] = token.start()
+            stack.pop()
+            i += 1
+            continue
+        if token[0] == "{" or i + 1 == len(tokens):
+            raise ValueError("incomplete VDF key/value")
+        key = vdf_unquote(token[0]).lower()
+        value = tokens[i + 1]
+        if value[0] == "{":
+            stack.append(key)
+            starts[tuple(stack)] = token.start()
+        elif value[0] == "}":
+            raise ValueError("missing VDF value")
+        else:
+            path = (*stack, key)
+            if path in values:
+                raise ValueError("duplicate VDF value")
+            values[path] = (vdf_unquote(value[0]), value.start(), value.end())
+        i += 2
+    if stack:
+        raise ValueError("unbalanced VDF opening brace")
+    return values, blocks, starts
+
+
+def vdf_set(text, path, value):
+    values, blocks, _ = vdf_entries(text)
+    key = tuple(part.lower() for part in path)
+    if key in values:
+        _, start, end = values[key]
+        return text[:start] + vdf_quote(value) + text[end:]
+    # Add only missing containers, inside the deepest existing ancestor.
+    depth = len(key) - 1
+    while depth and key[:depth] not in blocks:
+        depth -= 1
+    if not depth:
+        raise ValueError("no " + path[0] + " block")
+    addition = "\n" + "\t" * depth + vdf_quote(path[-1]) + "\t\t" + vdf_quote(value) + "\n"
+    for level in range(len(key) - 2, depth - 1, -1):
+        addition = "\n" + "\t" * level + vdf_quote(path[level]) + "\n" + "\t" * level + "{" + addition + "\t" * level + "}\n"
+    pos = blocks[key[:depth]]
+    return text[:pos] + addition + text[pos:]
+
+
+def vdf_remove(text, path):
+    """Drop the block at path (its key through its closing brace and that line's newline)."""
+    _, blocks, starts = vdf_entries(text)
+    key = tuple(part.lower() for part in path)
+    if key not in starts:
+        return text
+    start, end = starts[key], blocks[key] + 1
+    while start and text[start - 1] in " \t":
+        start -= 1
+    if text[end:end + 1] == "\n":
+        end += 1
+    return text[:start] + text[end:]
+
+
+def mappings(text):
+    """appid -> {name, config, priority} of every CompatToolMapping entry."""
+    values, _, _ = vdf_entries(text)
+    parent = tuple(part.lower() for part in MAPPING)
+    found = {}
+    for path, (value, _, _) in values.items():
+        if len(path) == len(parent) + 2 and path[:len(parent)] == parent:
+            found.setdefault(path[-2], {})[path[-1]] = value
+    return found
+
+
+def set_mapping(text, appid, entry):
+    """The appid's entry becomes exactly `entry` (None: removed)."""
+    text = vdf_remove(text, (*MAPPING, appid))
+    for name, value in (entry or {}).items():
+        text = vdf_set(text, (*MAPPING, appid, name), value)
+    return text
+
+
+def installed_apps(steam):
+    """Appids of libraryfolders.vdf's "apps" in every library."""
+    folders = steam / "steamapps/libraryfolders.vdf"
+    if not folders.exists():
+        return set()
+    values, _, _ = vdf_entries(folders.read_text())
+    return {path[3] for path in values if len(path) == 4 and path[0] == "libraryfolders" and path[2] == "apps"}
+
+
+def read_appinfo(path, wanted):
+    """appid -> its appinfo KV (nested dicts, lowercase keys) for the appids in `wanted`.
+
+    appcache/appinfo.vdf: magic 0x07564428 (v28, keys inline) or 0x07564429 (v29, keys index a string
+    table at the offset after the header); per app: appid, size, then size bytes (state, last updated,
+    PICS token, SHA-1, change number, binary SHA-1: 60 bytes) of binary KeyValues.
+    """
+    data = path.read_bytes()
+    magic, = struct.unpack_from("<I", data, 0)
+    if magic not in (0x07564428, 0x07564429):
+        raise ValueError("unknown appinfo.vdf version %#x" % magic)
+    pos = 8
+    strings = None
+    if magic == 0x07564429:
+        table, = struct.unpack_from("<q", data, pos)
+        pos += 8
+        count, = struct.unpack_from("<I", data, table)
+        strings, at = [], table + 4
+        for _ in range(count):
+            end = data.index(b"\0", at)
+            strings.append(data[at:end].decode("utf-8", "replace"))
+            at = end + 1
+
+    def cstr(at):
+        end = data.index(b"\0", at)
+        return data[at:end].decode("utf-8", "replace"), end + 1
+
+    def kv(at):
+        out = {}
+        while True:
+            kind = data[at]
+            at += 1
+            if kind == 0x08:
+                return out, at
+            if strings is not None:
+                index, = struct.unpack_from("<I", data, at)
+                name, at = strings[index], at + 4
+            else:
+                name, at = cstr(at)
+            if kind == 0x00:
+                out[name.lower()], at = kv(at)
+            elif kind == 0x01:
+                out[name.lower()], at = cstr(at)
+            elif kind in (0x02, 0x03, 0x04, 0x06):
+                at += 4
+            elif kind in (0x07, 0x0a):
+                at += 8
+            else:
+                raise ValueError("unknown appinfo KeyValues type %#x" % kind)
+
+    found = {}
+    while True:
+        appid, = struct.unpack_from("<I", data, pos)
+        if appid == 0:
+            return found
+        size, = struct.unpack_from("<I", data, pos + 4)
+        if str(appid) in wanted:
+            found[str(appid)], _ = kv(pos + 8 + 60)
+        pos += 8 + size
+
+
+def windows_games(steam):
+    apps = installed_apps(steam)
+    info = steam / "appcache/appinfo.vdf"
+    if not apps or not info.exists():
+        return set()
+    games = set()
+    for appid, kv in read_appinfo(info, apps).items():
+        common = kv.get("appinfo", {}).get("common", {})
+        oslist = {os_name.strip() for os_name in str(common.get("oslist", "")).lower().split(",")}
+        if str(common.get("type", "")).lower() in GAME_TYPES and "windows" in oslist and "linux" not in oslist:
+            games.add(appid)
+    return games
+
+
+def profile_dxmt():
+    persisted = Path.home() / ".config/steamac/game-profiles.json"
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/" + str(os.getuid())) / "steamac/game-profiles.json"
+    path = runtime if runtime.exists() else persisted
+    if not path.exists() or not path.stat().st_size:
+        return set()
+    profiles = json.loads(path.read_text())
+    return {appid for appid, profile in profiles["games"].items() if profile.get("gfx") == "dxmt"}
+
+
+def main(mode):
+    steam = Path(os.environ.get("STEAMAC_STEAM_ROOT") or Path.home() / ".local/share/Steam")
+    state_dir = Path(os.environ.get("STEAMAC_GFX_STATE")
+                     or Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "steamac/gfx-path")
+    config = steam / "config/config.vdf"
+    marker = state_dir / "compat-default.json"
+    mapped = set(json.loads(marker.read_text()).get("mapped", [])) if marker.exists() else set()
+    if not config.exists():
+        if mode == "dxmt":
+            log("no " + str(config) + " yet; games are mapped at the next start")
+        return
+    text = config.read_text()
+    current = mappings(text)
+    # Entries changed in Steam since we wrote them belong to the user now.
+    for appid in sorted(mapped):
+        if current.get(appid) != OURS:
+            log("compatibility tool of " + appid + " changed in Steam; leaving it")
+            mapped.discard(appid)
+
+    wanted = windows_games(steam) & profile_dxmt() if mode == "dxmt" else set()
+    removed = sorted(mapped - wanted)
+    for appid in removed:
+        text = set_mapping(text, appid, None)
+        mapped.remove(appid)
+    if removed:
+        log("Steam's own compatibility tool again for " + " ".join(removed))
+    added = sorted(wanted - set(current))
+    for appid in added:
+        text = set_mapping(text, appid, OURS)
+        mapped.add(appid)
+    if added:
+        log(TOOL + " for " + " ".join(added))
+    changed = added + removed
+    if changed:
+        atomic_write(config, text)
+    if mapped:
+        atomic_write(marker, json.dumps({"mapped": sorted(mapped)}) + "\n")
+    elif marker.exists():
+        marker.unlink()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2 or sys.argv[1] not in ("dxmt", "vulkan"):
+        print("usage: steam-compat-default dxmt|vulkan", file=sys.stderr)
+        sys.exit(64)
+    try:
+        main(sys.argv[1])
+    except (OSError, ValueError, KeyError, IndexError, struct.error) as error:
+        log("leaving Steam's compatibility tools: " + str(error))
+        sys.exit(1)

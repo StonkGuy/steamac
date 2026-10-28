@@ -3,9 +3,9 @@
 # Read-only erofs image; its usr/ becomes the top lowerdir of the guest /usr
 # overlay (lowerdir=<layer>/usr:<rootfs>/usr), see guest/initramfs/init.
 # Contents: guest/layer/usr (steamac files) + work/out/mesa-venus/usr (Venus
-# ICDs and the x86_64 fault reporter from guest/mesa; required unless
-# ALLOW_NO_VENUS=1) + the fx-progress-agent binary built by step 25 from
-# guest/progress-agent.
+# ICDs, the patched zink GL stack and the x86_64 fault reporter from
+# guest/mesa; required unless ALLOW_NO_VENUS=1) + the fx-progress-agent binary
+# built by step 25 from guest/progress-agent.
 set -euo pipefail
 . /src/scripts/config.env
 
@@ -30,9 +30,9 @@ else
     exit 1
 fi
 
-# DXMT for the launcher's "Graphics path: DXMT" (steam-gfx-path): DXMT's PE dlls (Wine builtins:
+# DXMT for the launcher's D3D11 on Metal setting (steam-gfx-path): DXMT's PE dlls (Wine builtins:
 # d3d11, dxgi, d3d10core, winemetal) and the wmtr guest client winemetal.so, staged in /work/out/dxmt by
-# wmtr/ (make dxmt-payload). Optional: without it the layer offers only the Vulkan path.
+# host/dxmt/build.sh. Optional: without it the layer offers only the Vulkan path.
 DXMT=/work/out/dxmt
 if [[ -f $DXMT/x86_64-unix/winemetal.so ]]; then
     install -d "$ST/usr/lib/steamac/dxmt/x86_64-windows" "$ST/usr/lib/steamac/dxmt/x86_64-unix"
@@ -89,6 +89,11 @@ grep -q 'fx-progress-agent clock-sync' "$ST/usr/lib/systemd/system/fx-clock-sync
 grep -q 'fx-progress-agent pad$' "$ST/usr/lib/systemd/system/fx-pad.service" \
     && grep -q 'fx-pad.service' "$ST/usr/lib/udev/rules.d/70-fx-progress.rules" \
     || { echo "[layer] fx-pad.service / its udev rule missing" >&2; exit 1; }
+# ... and one instance per further player's port (fx.pad2, ...).
+grep -q 'fx-progress-agent pad$' "$ST/usr/lib/systemd/system/fx-pad@.service" \
+    && grep -q 'FX_PAD_PORT=/dev/virtio-ports/%i$' "$ST/usr/lib/systemd/system/fx-pad@.service" \
+    && grep -q 'fx-pad@\$attr{name}.service' "$ST/usr/lib/udev/rules.d/70-fx-progress.rules" \
+    || { echo "[layer] fx-pad@.service / its udev rule missing" >&2; exit 1; }
 # Same binary as systemd-suspend.service's ExecStart: the launcher pauses the VM instead.
 grep -q 'fx-progress-agent sleep suspend$' "$ST/usr/lib/systemd/system/systemd-suspend.service.d/50-steamac-sleep.conf" \
     || { echo "[layer] systemd-suspend.service drop-in (fx-progress-agent sleep) missing" >&2; exit 1; }
@@ -107,6 +112,9 @@ for f in usr/bin/splctl usr/lib/rauc/post-install.sh usr/lib/steamac/kernelsetup
     [[ -x $ST/$f ]] || { echo "[layer] $f missing or not executable" >&2; exit 1; }
     bash -n "$ST/$f"
 done
+# steam-gfx-path's Python helper (Proton Experimental as Steam's default tool while DXMT is on).
+[[ -x $ST/usr/lib/steamac/steam-compat-default ]] \
+    || { echo "[layer] usr/lib/steamac/steam-compat-default missing or not executable" >&2; exit 1; }
 [[ -f $ST/usr/lib/systemd/user/steam.service.d/50-steamac.conf ]] \
     || { echo "[layer] steam.service drop-in missing" >&2; exit 1; }
 [[ ! -e $ST/usr/lib/systemd/user/steam.service && ! -e $ST/usr/share/deckard/RUNSTEAM.sh ]] \
@@ -116,7 +124,9 @@ grep -q 'ExecStartPre=/usr/lib/steamac/steam-client' "$ST/usr/lib/systemd/user/s
     || { echo "[layer] steam.service client setup or watcher missing" >&2; exit 1; }
 ls "$ST"/usr/lib/steamac/masks.d/*.list >/dev/null
 grep -q 'ExecStartPre=-/usr/lib/steamac/steam-gfx-path' "$ST/usr/lib/systemd/user/steam.service.d/50-steamac.conf" \
-    && [[ -L $ST/usr/lib/systemd/user/gamescope-session.target.wants/steamac-gfx-path.service ]] \
+    && grep -q '^ExecStart=/usr/lib/steamac/steam-gfx-path --watch$' "$ST/usr/lib/systemd/user/steamac-gfx-path.service" \
+    && [[ -L $ST/usr/lib/systemd/user/gamescope-session.target.wants/steamac-gfx-path.service \
+          && -L $ST/usr/lib/systemd/user/plasma-session.target.wants/steamac-gfx-path.service ]] \
     || { echo "[layer] steam-gfx-path (steam.service ExecStartPre, steamac-gfx-path.service) missing" >&2; exit 1; }
 grep -q 'ExecStartPre=-/usr/lib/steamac/steam-vr-path' "$ST/usr/lib/systemd/user/steam.service.d/50-steamac.conf" \
     || { echo "[layer] steam-vr-path (steam.service ExecStartPre) missing" >&2; exit 1; }
