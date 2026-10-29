@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 23:35:24 +0200
+Subject: [PATCH 1/2] d3d12: d3d12.cpuVisibleHeapMemory backs buffer-only
+ CPU-visible heaps with a shared buffer
+
+Under a VM transport such as steamac's wmtr the memory of an MTLHeap stays on
+the host, so the contents of buffers placed in an upload or readback heap
+cannot reach the guest. With the option, such a heap is one shared buffer and
+its placed buffers alias that buffer's memory through the existing path for
+heaps with memory (write-watch heaps). Heaps that may hold textures keep the
+MTLHeap. Off by default.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ mullion.conf             |  8 ++++++++
+ src/d3d12/d3d12_heap.cpp | 19 +++++++++++++++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/mullion.conf b/mullion.conf
+index 5b66f7c41babe7bef7ffd31a16325b3251ec5ab0..9068adae65fcfbb8a08ed5b85f1fd3c687ea97fd 100644
+--- a/mullion.conf
++++ b/mullion.conf
+@@ -104,3 +104,11 @@
+ # Supported values: Any integer between 4 and 64
+ 
+ # d3d11.maxTessFactor = 64
++
++# Backs a CPU-visible Direct3D 12 heap that can hold only buffers (upload, readback, or a custom heap that denies
++# textures) with one shared buffer instead of an MTLHeap; buffers placed in it alias that buffer's memory. For a VM
++# transport whose host keeps an MTLHeap's memory out of the guest's reach (steamac's wmtr).
++#
++# Supported values: True, False
++
++# d3d12.cpuVisibleHeapMemory = False
+diff --git a/src/d3d12/d3d12_heap.cpp b/src/d3d12/d3d12_heap.cpp
+index e59c1a53dda58ebccb226c5ea6390215c97f1094..3767930ebc2815d71015410d329df741b912cf58 100644
+--- a/src/d3d12/d3d12_heap.cpp
++++ b/src/d3d12/d3d12_heap.cpp
+@@ -19,6 +19,7 @@
+ #include "d3d12_device.hpp"
+ #include "d3d12_pageable.hpp"
+ #include "com/com_pointer.hpp"
++#include "config/config.hpp"
+ 
+ namespace mullion {
+ 
+@@ -92,6 +93,24 @@ public:
+       return memory ? S_OK : FAIL(E_OUTOFMEMORY);
+     }
+ 
++    // d3d12.cpuVisibleHeapMemory: a heap the CPU reaches that can hold only buffers (upload, readback, or a custom heap
++    // that denies textures) is one shared buffer, and the buffers placed in it alias its memory (the write-watch path
++    // above). For a VM transport such as steamac's, where an MTLHeap's memory stays on the host and the contents of
++    // buffers placed in it cannot reach the guest. Off by default: elsewhere an MTLHeap is the cheaper choice.
++    const bool buffers_only = desc_.Properties.Type == D3D12_HEAP_TYPE_UPLOAD || desc_.Properties.Type == D3D12_HEAP_TYPE_READBACK ||
++                              ((pDesc->Flags & D3D12_HEAP_FLAG_DENY_RT_DS_TEXTURES) &&
++                               (pDesc->Flags & D3D12_HEAP_FLAG_DENY_NON_RT_DS_TEXTURES));
++    if (buffers_only && IsCpuVisibleHeap(&desc_.Properties) &&
++        Config::getInstance().getOption<bool>("d3d12.cpuVisibleHeapMemory", false)) {
++      WMTBufferInfo backing_info{size_aligned, WMTResourceStorageModeShared};
++      auto backing = device_->GetMTLDevice().newBuffer(backing_info);
++      if (!backing || !backing_info.memory.get())
++        return FAIL(E_OUTOFMEMORY);
++      // the shared pointer keeps the buffer that owns the memory alive as long as the heap or a buffer placed in it
++      memory = std::shared_ptr<void>(backing_info.memory.get(), [backing](void *) {});
++      return S_OK;
++    }
++
+     WMTHeapInfo info;
+     info.options = {}; // FIXME: ensure this agrees with {Buffer|Texture}AllocationFlag?
+     info.size = size_aligned;
