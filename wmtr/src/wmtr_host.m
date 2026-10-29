@@ -26,11 +26,15 @@
 #include "wmtr_vr.h"
 
 #ifdef WMTR_MULLION
-/* the guest sizes Metal 4's mapping-operation arrays with these (wmtr_proto.h); Mullion needs the macOS 26 SDK */
+/* the guest sizes Metal 4's mapping-operation arrays with these (wmtr_proto.h); Mullion needs the macOS 26 SDK.
+ * Compile-time sizes only (nothing here runs on an older macOS), so no availability check is needed. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
 _Static_assert(sizeof(MTL4UpdateSparseBufferMappingOperation) == WMTR_MTL4_UPDATE_BUFFER_OP, "MTL4 update buffer op");
 _Static_assert(sizeof(MTL4UpdateSparseTextureMappingOperation) == WMTR_MTL4_UPDATE_TEXTURE_OP, "MTL4 update texture op");
 _Static_assert(sizeof(MTL4CopySparseBufferMappingOperation) == WMTR_MTL4_COPY_BUFFER_OP, "MTL4 copy buffer op");
 _Static_assert(sizeof(MTL4CopySparseTextureMappingOperation) == WMTR_MTL4_COPY_TEXTURE_OP, "MTL4 copy texture op");
+#pragma clang diagnostic pop
 #endif
 
 typedef int NTSTATUS;
