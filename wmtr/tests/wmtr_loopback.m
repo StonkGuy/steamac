@@ -380,7 +380,10 @@ static void test_vr(id<MTLDevice> dev) {
         ok && sum == (uint64_t)(u.s.ready_time - u.s.app_submit_time),
         "stages of frame 7: %llu frames, encode %llu render %llu sum %llu", sg.stage_frames, sg.stage_ns[0], sg.stage_ns[1], sum);
   /* a frame whose rendering is still being encoded when the submit arrives (the normal live order): the signal
-   * goes through the executor (call 17) 60 ms after the submit, the GPU reaches it 60 ms later */
+   * goes through the executor (call 17) 60 ms after the submit, the GPU reaches it 60 ms later. The bounds come from
+   * the times measured here, not from the 60 ms sleeps, which overshoot by 2x on loaded CI machines: encode covers
+   * at least submit -> call 17 and must not reach the gate (render counted as encode), render at least call 17 ->
+   * gate; 2 ms for the host's own timestamps */
   if (ok) {
     struct vrl_release r7 = {{VRL_RELEASE, sizeof r7}, u.s.eye[0].swapchain, u.s.eye[0].image, u.s.frame_id, 0};
     send(sv[1], &r7, sizeof r7, 0);
@@ -391,19 +394,24 @@ static void test_vr(id<MTLDevice> dev) {
     [gcb encodeWaitForEvent:gate value:1];
     sub.info.frame_id = 30; sub.info.wait_value = 2;
     remote(146, &sub); remote(39, &sync);
+    const uint64_t t_sub = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     usleep(60000);
     struct unixcall_generic_obj_obj_uint64_noret se = {(obj_handle_t)gcb, (obj_handle_t)ev, 2};
+    const uint64_t t_enc0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     remote(17, &se); remote(39, &sync);
+    const uint64_t t_enc1 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     [gcb commit];
     usleep(60000);
+    const uint64_t t_gate = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     gate.signaledValue = 1;
     int ok30 = vr_next(sv[1], VRL_SUBMIT, &u, sizeof u);
     struct wmtr_vr_stats s2; wmtr_vr_get_stats(vr, &s2);
     uint64_t enc = s2.stage_ns[WMTR_VR_STAGE_ENCODE] - sg.stage_ns[WMTR_VR_STAGE_ENCODE], ren = s2.stage_ns[WMTR_VR_STAGE_RENDER] - sg.stage_ns[WMTR_VR_STAGE_RENDER];
     uint64_t sum2 = 0; for (int i = 0; i < WMTR_VR_STAGES; i++) sum2 += s2.stage_ns[i];
-    CHECK(ok30 && u.s.frame_id == 30 && s2.stage_frames == 2 && enc >= 55000000ull && enc < 120000000ull && ren >= 55000000ull &&
-          sum2 - sum == (uint64_t)(u.s.ready_time - u.s.app_submit_time),
-          "stages of frame 30: sent %d, encode %llu render %llu", ok30, enc, ren);
+    CHECK(ok30 && u.s.frame_id == 30 && s2.stage_frames == 2 && enc + 2000000 >= t_enc0 - t_sub && enc < t_gate - t_sub &&
+          ren + 2000000 >= t_gate - t_enc1 && sum2 - sum == (uint64_t)(u.s.ready_time - u.s.app_submit_time),
+          "stages of frame 30: sent %d, encode %llu render %llu (measured: submit->call 17 %llu, call 17->gate %llu)", ok30,
+          enc, ren, t_enc0 - t_sub, t_gate - t_enc1);
     [gq release]; [gate release];
   }
   /* back-pressure: 3 images per eye, one still held by the host -> of 3 more frames, 2 go out and 1 drops */
