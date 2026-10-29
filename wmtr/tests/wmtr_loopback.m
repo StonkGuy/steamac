@@ -315,6 +315,7 @@ static void test_vr_query(struct wmtr_vr *vr, int host_fd) {
   CHECK(s.queries >= 6 && s.haptics == 1, "query stats %llu/%llu", s.queries, s.haptics);
 }
 
+#ifndef WMTR_MULLION /* the eye texture export (WMTVRSubmit, DXMT flavour only) */
 static void test_vr(id<MTLDevice> dev) {
   struct unixcall_wmtvr_submit sub;
   memset(&sub, 0, sizeof sub);
@@ -468,6 +469,7 @@ static void test_vr(id<MTLDevice> dev) {
   [tex[0] release]; [tex[1] release]; [ev release];
   printf("vr: submits=%llu sent=%llu dropped=%llu released=%llu swapchains=%llu\n", st.submits, st.sent, st.dropped, st.released, st.swapchains);
 }
+#endif
 
 /* WMTR_VR_FD (steamac-vm's attach path): one link per process (a dup of the launcher's socketpair end, one
  * VRL_HELLO) shared by every context: a second context (the game after Proton's steam.exe did VR_Init) uses the
@@ -837,7 +839,9 @@ int main(void) {
       CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
       if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
     }
+#ifndef WMTR_MULLION /* Mullion has no WMTVRSubmit */
     test_vr(dev);
+#endif
     test_vr_fd();
     /* 8. client-assigned handles: a frame's pool + encoder creations do not wait for the host (one sync call
           apart from the calls that return values); each use reaches the host after its creation and gets the object;

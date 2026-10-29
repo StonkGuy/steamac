@@ -9,7 +9,20 @@
 #   make guest-tests   static wmtr_ping_static / wmtr_wait_test for the VM guest (run there under FEX)
 # Inputs: DXMT source at the pinned revision (DXMT=), its native build dir with libairconv.a (DXMT_BUILD=),
 # LLVM 15 static libs (LLVM=), static zstd (ZSTD_LIB=). Machine-specific values can go in local.mk (not tracked).
+# MULLION=1 builds the same targets for Mullion (github.com/dttdrv/mullion, a DXMT fork with Direct3D 12;
+# host/mullion/build.sh) into build/mullion: DXMT= is then the Mullion tree, the unix-call table Mullion's
+# (-DWMTR_MULLION, src/wmtr_calls_mullion.inc). Its unix side uses Metal 4: the host targets need the macOS 26 SDK.
 -include local.mk
+ifeq ($(MULLION),1)
+DXMT ?= ../work/src/mullion
+OUT ?= build/mullion
+FLAVOUR = -DWMTR_MULLION
+FLAVOUR_FRAMEWORKS = -framework IOKit
+DXMT_PE ?= ../work/out/mullion-pe
+PAYLOAD ?= ../work/out/mullion
+PAYLOAD_DLLS = d3d11 dxgi d3d10core d3d12 d3d12core winemetal
+SDK_CHECK = mullion-sdk
+endif
 DXMT ?= ../work/src/dxmt
 DXMT_BUILD ?= $(DXMT)/build-native
 LLVM ?= ../work/out/host/llvm15
@@ -18,9 +31,9 @@ OUT ?= build
 CC = clang
 
 INC = -Iinclude -Isrc -I../host/vrhost/include -I../guest/vr/include -I$(DXMT)/src/winemetal -I$(DXMT)/src/airconv
-CFLAGS = -O2 -g -Wall -Wno-unused-function $(INC)
+CFLAGS = -O2 -g -Wall -Wno-unused-function $(FLAVOUR) $(INC)
 FRAMEWORKS = -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore -framework Cocoa \
-             -framework CoreGraphics -framework ColorSync -framework CoreFoundation -framework IOSurface
+             -framework CoreGraphics -framework ColorSync -framework CoreFoundation -framework IOSurface $(FLAVOUR_FRAMEWORKS)
 LLVM_LIBS = -L$(LLVM)/lib -lLLVMPasses -lLLVMTarget -lLLVMObjCARCOpts -lLLVMCoroutines -lLLVMipo \
   -lLLVMInstrumentation -lLLVMVectorize -lLLVMLinker -lLLVMIRReader -lLLVMAsmParser -lLLVMFrontendOpenMP \
   -lLLVMScalarOpts -lLLVMInstCombine -lLLVMAggressiveInstCombine -lLLVMTransformUtils -lLLVMBitWriter \
@@ -35,13 +48,18 @@ all: host server client-macos
 $(OUT):
 	mkdir -p $(OUT)
 
+# Mullion's unix side and wmtr_host.m's checks of the Metal 4 operation sizes need the macOS 26 SDK's MTL4 types
+mullion-sdk:
+	@v=$$(xcrun --sdk macosx --show-sdk-version 2>/dev/null); [ "$${v%%.*}" -ge 26 ] 2>/dev/null || \
+	  { echo "MULLION=1: the host side needs the macOS 26 SDK or newer (this one: $${v:-none}; Xcode 26)" >&2; exit 1; }
+
 # DXMT's unix side, unchanged; its unix-call table becomes wmtr_impl_funcs
-$(OUT)/winemetal_unix.o: $(DXMT)/src/winemetal/unix/winemetal_unix.c | $(OUT)
+$(OUT)/winemetal_unix.o: $(DXMT)/src/winemetal/unix/winemetal_unix.c | $(OUT) $(SDK_CHECK)
 	$(CC) $(CFLAGS) -ObjC -D__wine_unix_call_funcs=wmtr_impl_funcs -D__wine_unix_call_wow64_funcs=wmtr_impl_wow64_funcs \
 	  -Wno-deprecated-declarations -c $< -o $@
 $(OUT)/cache.o: $(DXMT)/src/winemetal/unix/cache.c | $(OUT)
 	$(CC) $(CFLAGS) -ObjC -c $< -o $@
-$(OUT)/wmtr_host.o: src/wmtr_host.m include/*.h src/wmtr_calls.inc | $(OUT)
+$(OUT)/wmtr_host.o: src/wmtr_host.m include/*.h src/*.inc | $(OUT) $(SDK_CHECK)
 	$(CC) $(CFLAGS) -ObjC -c $< -o $@
 $(OUT)/wmtr_vr.o: src/wmtr_vr.m include/wmtr_vr.h ../host/vrhost/include/vrlink.h | $(OUT)
 	$(CC) $(CFLAGS) -ObjC -c $< -o $@
@@ -72,12 +90,12 @@ $(OUT)/wmtr_spin_test: tests/wmtr_spin_test.c include/wmtr_spin.h | $(OUT)
 	$(CC) -O2 -Wall $(INC) -o $@ tests/wmtr_spin_test.c -lpthread
 $(OUT)/wmtr_present_test: tests/wmtr_present_test.m $(OUT)/libwmtr_host.dylib
 	$(CC) $(CFLAGS) -o $@ tests/wmtr_present_test.m -L$(OUT) -lwmtr_host -Wl,-rpath,@executable_path -framework Cocoa -framework Metal -framework QuartzCore
-$(OUT)/wmtr_loopback: tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_vr.m src/wmtr_client.c include/*.h | $(OUT)
+$(OUT)/wmtr_loopback: tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_vr.m src/wmtr_client.c include/*.h src/*.inc | $(OUT) $(SDK_CHECK)
 	$(CC) $(CFLAGS) -o $@ tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_vr.m src/wmtr_client.c -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore -framework IOSurface
 
 # -mtls-dialect=gnu: newer GCC defaults to TLS descriptors, which need GLIBC_ABI_GNU2_TLS (absent in the
 # Steam Runtime's and the FEX rootfs's glibc), so the unixlib would not load
-LINUX_CFLAGS = -O2 -g -Wall -Wno-unused-function -mtls-dialect=gnu $(INC) -include include/wmtr_glibc_compat.h
+LINUX_CFLAGS = -O2 -g -Wall -Wno-unused-function -mtls-dialect=gnu $(FLAVOUR) $(INC) -include include/wmtr_glibc_compat.h
 client-linux: $(OUT)/x86_64-linux/winemetal.so
 $(OUT)/x86_64-linux/winemetal.so: src/wmtr_client.c src/transport_virtgpu.c include/*.h src/*.inc
 	mkdir -p $(OUT)/x86_64-linux
@@ -86,7 +104,7 @@ $(OUT)/x86_64-linux/winemetal.so: src/wmtr_client.c src/transport_virtgpu.c incl
 guest-tests: $(OUT)/x86_64-linux/wmtr_ping_static $(OUT)/x86_64-linux/wmtr_wait_test
 $(OUT)/x86_64-linux/wmtr_%: tests/wmtr_%.c src/wmtr_client.c src/transport_virtgpu.c include/*.h src/*.inc
 	mkdir -p $(OUT)/x86_64-linux
-	$(CC) -O2 -Wall -Wno-unused-function $(INC) -static -pthread -o $@ $< src/wmtr_client.c src/transport_virtgpu.c
+	$(CC) -O2 -Wall -Wno-unused-function $(FLAVOUR) $(INC) -static -pthread -o $@ $< src/wmtr_client.c src/transport_virtgpu.c
 test-linux: $(OUT)/x86_64-linux/winemetal.so
 	mkdir -p $(OUT)/x86_64-linux/standin
 	$(CC) -shared -fPIC -o $(OUT)/x86_64-linux/standin/ntdll.so tests/ntdll_standin.c
@@ -97,12 +115,14 @@ test-linux: $(OUT)/x86_64-linux/winemetal.so
 	@echo "glibc requirements: ok"
 
 # guest payload for the steamac layer (scripts/steps/30-layer.sh): DXMT's PE dlls (DXMT_PE=, Wine builtins from
-# DXMT's mingw build) and the Linux wmtr client (client-linux, built on an x86_64 Linux host)
+# DXMT's mingw build) and the Linux wmtr client (client-linux, built on an x86_64 Linux host). MULLION=1: Mullion's
+# dlls (its d3d12 and d3d12core too) and the Mullion-flavour client.
 DXMT_PE ?= ../work/out/dxmt-pe
 PAYLOAD ?= ../work/out/dxmt
+PAYLOAD_DLLS ?= d3d11 dxgi d3d10core winemetal
 dxmt-payload:
 	install -d $(PAYLOAD)/x86_64-windows $(PAYLOAD)/x86_64-unix
-	for f in d3d11 dxgi d3d10core winemetal; do install -m 644 $(DXMT_PE)/$$f.dll $(PAYLOAD)/x86_64-windows/$$f.dll; done
+	for f in $(PAYLOAD_DLLS); do install -m 644 $(DXMT_PE)/$$f.dll $(PAYLOAD)/x86_64-windows/$$f.dll; done
 	@# optional: DXMT's D3D12 (steam-gfx-path routes it over vkd3d-proton only when the payload has it)
 	if [ -f $(DXMT_PE)/d3d12.dll ]; then install -m 644 $(DXMT_PE)/d3d12.dll $(PAYLOAD)/x86_64-windows/d3d12.dll; fi
 	install -m 644 $(OUT)/x86_64-linux/winemetal.so $(PAYLOAD)/x86_64-unix/winemetal.so
@@ -115,4 +135,4 @@ install: $(OUT)/libwmtr_host.dylib
 
 clean:
 	rm -rf $(OUT)
-.PHONY: all host server client-macos client-linux guest-tests test test-linux install dxmt-payload clean
+.PHONY: all host server client-macos client-linux guest-tests test test-linux install dxmt-payload clean mullion-sdk

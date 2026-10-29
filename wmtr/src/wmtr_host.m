@@ -952,8 +952,10 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
   case 124: /* newSharedEventWithMachPort */
     if (!shared_known(((struct unixcall_mtldevice_newsharedeventwithmachport *)params)->mach_port)) return STATUS_INVALID_PARAMETER;
     break;
+#ifndef WMTR_MULLION /* Mullion's table has no WMTVRSubmit (its 146 is a call of its own) */
   case 146: /* WMTVRSubmit: the executor's VR exporter (not DXMT's unix side, which has no VR host) */
     return wmtr_vr_submit(atomic_load(&h->vr), &((struct unixcall_wmtvr_submit *)params)->info);
+#endif
   case 112: case 113: case 115: case 117: case 119: if (h->ops->map_path) {
     /* the path is the first relocated field of these calls */
     for (int i = 0; i < r->n_reloc; i++) {
@@ -980,7 +982,10 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     else if (call == 12) pp_commit((id<MTLCommandBuffer>)((struct unixcall_generic_obj_noret *)params)->handle);
     else if (call == 31) pp_event("C");
     else if (call == 30 || call == 129) pp_event("B");
-    else if (call == 47 || call == 48 || call == 146) pp_event(call == 146 ? "V" : "|");
+#ifndef WMTR_MULLION
+    else if (call == 146) pp_event("V");
+#endif
+    else if (call == 47 || call == 48) pp_event("|");
   }
   if (call == 47 || call == 48) { /* presentDrawable (both param structs start with buffer, drawable) */
     id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)((struct unixcall_generic_obj_obj_noret *)params)->handle;
