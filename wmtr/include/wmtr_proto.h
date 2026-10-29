@@ -23,8 +23,23 @@
 #define WMTR_SLOT_BYTES (64u << 10)      /* reply slot payload */
 #define WMTR_ARENA_BLOB_BYTES (64u << 20)/* arena blob size */
 #define WMTR_MAX_BLOBS 1024
+#ifdef WMTR_MULLION
+/* winemetal unix calls: Mullion v0.4's table (src/wmtr_calls_mullion.inc: DXMT's 0..145 in the same order, then
+ * 146..173) */
+#define WMTR_NCALLS 174
+#define WMTR_CALLS_INC "wmtr_calls_mullion.inc"
+#define WMTR_CMDS_INC "wmtr_cmds_mullion.inc"
+/* element sizes of Metal 4's sparse mapping operations (MTL4CommandQueue.h; checked against the SDK in wmtr_host.m) */
+#define WMTR_MTL4_UPDATE_BUFFER_OP 32  /* MTL4UpdateSparseBufferMappingOperation */
+#define WMTR_MTL4_UPDATE_TEXTURE_OP 80 /* MTL4UpdateSparseTextureMappingOperation */
+#define WMTR_MTL4_COPY_BUFFER_OP 24    /* MTL4CopySparseBufferMappingOperation */
+#define WMTR_MTL4_COPY_TEXTURE_OP 104  /* MTL4CopySparseTextureMappingOperation */
+#else
 /* winemetal unix calls: DXMT's table (src/wmtr_calls.inc, 0..145) plus WMTVRSubmit (146) */
 #define WMTR_NCALLS 147
+#define WMTR_CALLS_INC "wmtr_calls.inc"
+#define WMTR_CMDS_INC "wmtr_cmds.inc"
+#endif
 
 /* a pointer field in params/extra rewritten on the wire */
 #define WMTR_REF_EXTRA 0x5752000000000000ull /* | offset into this request's extra bytes */

@@ -25,6 +25,14 @@
 #include "wmtr_host.h"
 #include "wmtr_vr.h"
 
+#ifdef WMTR_MULLION
+/* the guest sizes Metal 4's mapping-operation arrays with these (wmtr_proto.h); Mullion needs the macOS 26 SDK */
+_Static_assert(sizeof(MTL4UpdateSparseBufferMappingOperation) == WMTR_MTL4_UPDATE_BUFFER_OP, "MTL4 update buffer op");
+_Static_assert(sizeof(MTL4UpdateSparseTextureMappingOperation) == WMTR_MTL4_UPDATE_TEXTURE_OP, "MTL4 update texture op");
+_Static_assert(sizeof(MTL4CopySparseBufferMappingOperation) == WMTR_MTL4_COPY_BUFFER_OP, "MTL4 copy buffer op");
+_Static_assert(sizeof(MTL4CopySparseTextureMappingOperation) == WMTR_MTL4_COPY_TEXTURE_OP, "MTL4 copy texture op");
+#endif
+
 typedef int NTSTATUS;
 typedef NTSTATUS (*impl_fn)(void *);
 extern const void *wmtr_impl_funcs[];
@@ -40,13 +48,13 @@ extern const void *wmtr_impl_funcs[];
 #define WMTR_CLASS_N 4
 static const uint8_t call_class[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = WMTR_CLASS_##c,
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 /* the params struct each call's implementation reads and writes (the client sends exactly this) */
 static const uint32_t call_params_size[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = sizeof(t),
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 /* zeroed bytes after every request copy: a WMTR_REF_EXTRA pointer is only checked to start inside the payload,
@@ -173,7 +181,7 @@ frames_out(void) {
  * running game (presentDrawable = calls 47/48) without touching the guest. Off (one getenv) unless set. */
 static const char *const call_name[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = #n,
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 static _Atomic uint64_t cs_count[WMTR_NCALLS], cs_sync[WMTR_NCALLS], cs_ns[WMTR_NCALLS];
