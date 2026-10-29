@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 23:56:35 +0200
+Subject: [PATCH 2/2] build: build_unixlib option for a cross build of the
+ Windows dlls only
+
+A cross build also builds the macOS unixlib (winemetal.so) and the native
+airconv it links, which needs LLVM 15 built for that architecture (x86_64
+for the x86_64 dlls). A build whose unix side comes from elsewhere (steamac
+builds winemetal_unix.c into its own arm64 host library) needs only the
+dlls: -Dbuild_unixlib=false skips both. Default true, as before. The host
+tests link the native airconv, so they ask for it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ meson.build               | 4 ++++
+ meson.options             | 3 ++-
+ src/airconv/meson.build   | 2 +-
+ src/winemetal/meson.build | 2 +-
+ 4 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index f4927b0a6ecd03454c2710215c194c500a958e0b..c6618ff1fab0b3dbbb7ed42926a235d8c45d77ee 100644
+--- a/meson.build
++++ b/meson.build
+@@ -217,5 +217,9 @@ subdir('libs')
+ subdir('src')
+ 
+ if get_option('enable_tests')
++# the host tests link the native airconv
++if mullion_crossbuild and not get_option('build_unixlib')
++  error('-Denable_tests=true needs -Dbuild_unixlib=true')
++endif
+ subdir('tests')
+ endif
+diff --git a/meson.options b/meson.options
+index f9552bb573ce3966c5ac1a6b6fdf8a00634c280a..429edf115f6eb96ff59f024fb6ddc5a8eadfa656 100644
+--- a/meson.options
++++ b/meson.options
+@@ -10,4 +10,5 @@ option('wine_builtin_dll', type : 'boolean', value : true)
+ option('enable_tests', type : 'boolean', value : false)
+ option('enable_nvapi', type : 'boolean', value : false)
+ option('enable_nvngx', type : 'boolean', value : false)
+-option('enable_d3d12', type : 'boolean', value : true)
+\ No newline at end of file
++option('enable_d3d12', type : 'boolean', value : true)
++option('build_unixlib', type : 'boolean', value : true, description : 'In a cross build, also build the macOS unixlib (winemetal.so) and the airconv it links, which need LLVM 15 for that architecture; false builds only the Windows dlls')
+\ No newline at end of file
+diff --git a/src/airconv/meson.build b/src/airconv/meson.build
+index ae2d1a506318c2ad4c55e67352592d82217c46b5..91c6c346c0ed68540f3d457fac364e757f884707 100644
+--- a/src/airconv/meson.build
++++ b/src/airconv/meson.build
+@@ -108,6 +108,6 @@ executable('airconv', airconv_src + airconv_cli_src,
+ 
+ endif
+ 
+-if cpu_family == 'x86_64' or cpu_family == 'aarch64' or not mullion_crossbuild
++if not mullion_crossbuild or ((cpu_family == 'x86_64' or cpu_family == 'aarch64') and get_option('build_unixlib'))
+   subdir('darwin')
+ endif
+\ No newline at end of file
+diff --git a/src/winemetal/meson.build b/src/winemetal/meson.build
+index e17498fd2b4370dd95aecca477f9464c838cb2cc..b29e9f375d84ed8cd2da0f00d3cf6cf526a477d7 100644
+--- a/src/winemetal/meson.build
++++ b/src/winemetal/meson.build
+@@ -57,6 +57,6 @@ custom_target('postprocess_lib',
+   build_by_default : true
+ )
+ 
+-if cpu_family == 'x86_64' or cpu_family == 'aarch64'
++if (cpu_family == 'x86_64' or cpu_family == 'aarch64') and get_option('build_unixlib')
+   subdir('unix')
+ endif
