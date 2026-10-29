@@ -4,11 +4,14 @@
 #                                           uses) + make test
 #   pe      macOS  fetch pe                 Mullion's x86_64-windows dlls (Wine builtins)
 #   client  Linux  fetch client             the guest's winemetal.so (Mullion's unix-call table) + make test-linux
-# Each uploads a workflow artifact; nothing is released. By hand only (Actions > Mullion > Run workflow).
+# Each uploads a workflow artifact; nothing is released. By hand (Actions > Mullion > Run workflow), and on pushes to
+# the mullion-wmtr branch: GitHub dispatches only workflows that are on the default branch, which this one is not yet.
 name: Mullion
 
 on:
   workflow_dispatch:
+  push:
+    branches: [mullion-wmtr]
 
 permissions:
   contents: read
