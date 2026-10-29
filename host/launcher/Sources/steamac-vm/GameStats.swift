@@ -408,10 +408,12 @@ final class GameSessionTracker {
         updateActivity()
         guard let s = live.removeValue(forKey: id) else { return }
         let report = makeReport(s, end: how)
-        log("game stats: \(id) ended (\(how.rawValue)): ran \(report.runS) s, played \(report.playS) s, "
-            + "window \(report.launched ? "yes" : "no")"
-            + (report.fps.map { String(format: ", %.1f FPS avg, 1%% low %.1f", $0.avg, $0.low1) } ?? "")
-            + (report.mem?.hostMiB.map { ", host peak \($0) MiB" } ?? ""))
+        // Built in steps: as one expression it exceeds the type checker's time limit on Xcode 26.6 (release CI).
+        var line = "game stats: \(id) ended (\(how.rawValue)): ran \(report.runS) s, played \(report.playS) s, "
+        line += "window \(report.launched ? "yes" : "no")"
+        if let fps = report.fps { line += String(format: ", %.1f FPS avg, 1%% low %.1f", fps.avg, fps.low1) }
+        if let peak = report.mem?.hostMiB { line += ", host peak \(peak) MiB" }
+        log(line)
         store.record(report)
         // Offer sharing once, after a game the player saw (never while the VM shuts down).
         if how != .shutdown && report.launched { store.offerSharingIfNeeded(beside: vmWindow()) }
@@ -435,10 +437,15 @@ final class GameSessionTracker {
 
     /// Control FIFO `stats state`.
     func describe() -> String {
-        live.values.sorted { $0.appid < $1.appid }.map { s in
-            "\(s.appid)\(s.appid == activeGame ? " (active)" : "")\(s.appid == focused ? " (focused)" : ""): "
-                + "\(Int(Date().timeIntervalSince(s.started))) s, \(s.frames.intervals) intervals counted, "
-                + "window \(s.firstWindow != nil ? "yes" : "no"), anon peak \(s.anonPeakKiB) KiB"
+        // Built in steps to stay within the type checker's time limit (see end(_:_:)).
+        live.values.sorted { $0.appid < $1.appid }.map { (s: Live) -> String in
+            let active: String = s.appid == activeGame ? " (active)" : ""
+            let focus: String = s.appid == focused ? " (focused)" : ""
+            let window: String = s.firstWindow != nil ? "yes" : "no"
+            var line = "\(s.appid)\(active)\(focus): "
+            line += "\(Int(Date().timeIntervalSince(s.started))) s, \(s.frames.intervals) intervals counted, "
+            line += "window \(window), anon peak \(s.anonPeakKiB) KiB"
+            return line
         }.joined(separator: "; ")
     }
 }

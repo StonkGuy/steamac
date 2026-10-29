@@ -325,13 +325,21 @@ final class GameStatsStore: ObservableObject {
     func control(_ args: [String], tracker: GameSessionTracker?) {
         switch args.first {
         case "state":
-            log("control: stats: sharing \(LauncherSettings.shared.shareGameStats ? "on" : "off"), asked \(asked), "
-                + "service \(GameStatsStore.serviceURL?.absoluteString ?? "none"), file \(path), pending \(pendingCount), "
-                + "busy \(busy), status \"\(status)\"; live: \(tracker?.describe() ?? "-")")
+            // Built in steps to stay within the type checker's time limit (GameStats.swift end(_:_:)).
+            let sharing: String = LauncherSettings.shared.shareGameStats ? "on" : "off"
+            let service: String = GameStatsStore.serviceURL?.absoluteString ?? "none"
+            let live: String = tracker?.describe() ?? "-"
+            var state = "control: stats: sharing \(sharing), asked \(asked), service \(service), file \(path), "
+            state += "pending \(pendingCount), busy \(busy), status \"\(status)\"; live: \(live)"
+            log(state)
             for g in games {
-                log("control: stats: \(g.appid) \"\(g.name ?? "")\" sharing \(g.sharing) rating \(g.rating?.rawValue ?? "-") "
-                    + "sent rating \(g.sentRating?.rawValue ?? "-") sessions \(g.totalSessions) "
-                    + g.sessions.map { "\($0.report.sid.prefix(8)):\($0.state.rawValue)" }.joined(separator: ","))
+                let name: String = g.name ?? ""
+                let rating: String = g.rating?.rawValue ?? "-"
+                let sent: String = g.sentRating?.rawValue ?? "-"
+                let sessions: String = g.sessions.map { "\($0.report.sid.prefix(8)):\($0.state.rawValue)" }.joined(separator: ",")
+                var line = "control: stats: \(g.appid) \"\(name)\" sharing \(g.sharing) rating \(rating) "
+                line += "sent rating \(sent) sessions \(g.totalSessions) \(sessions)"
+                log(line)
             }
         case "flush": flush()
         case "ask": showConsent(beside: NSApp.windows.first { $0.isVisible && $0 !== panel?.window })
