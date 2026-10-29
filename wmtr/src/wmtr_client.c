@@ -342,23 +342,23 @@ b_in(uint32_t field_off, const void *src, uint64_t size) {
   return o;
 }
 
-static void
+static uint32_t
 b_out(uint32_t field_off, void *dst, uint64_t size, int inout) {
-  if (!dst) { uint64_t z = 0; memcpy(B.buf + field_off, &z, 8); return; }
-  if (B.n_out == MAX_OUT) { B.error = 1; return; }
+  if (!dst) { uint64_t z = 0; memcpy(B.buf + field_off, &z, 8); return UINT32_MAX; }
+  if (B.n_out == MAX_OUT) { B.error = 1; return UINT32_MAX; }
   B.force_sync = 1;
   uint32_t used = 0;
   for (int i = 0; i < B.n_out; i++) if (!B.dsts[i].arena) used += B.outs[i].size;
   if (size > INLINE_OUT_MAX || used + size + B.params_size > WMTR_SLOT_BYTES) {
     uint32_t blob, off;
     uint8_t *p = (B.n_stage < MAX_STAGE) ? arena_alloc(size, &blob, &off) : NULL;
-    if (!p) { B.error = 1; return; }
+    if (!p) { B.error = 1; return UINT32_MAX; }
     if (inout) memcpy(p, dst, size);
     B.stages[B.n_stage++] = (struct stage){blob, off, size};
     B.dsts[B.n_out] = (struct out_dst){dst, (uint32_t)size, p};
     B.outs[B.n_out++] = (struct wmtr_out){0, 0}; /* not copied through the slot */
     b_reloc(field_off, WMTR_REF_ARENA | ((uint64_t)blob << 32) | off);
-    return;
+    return UINT32_MAX;
   }
   uint32_t o = b_grow(size ? (uint32_t)size : 8); /* a zero-length output still needs an in-bounds address */
   if (inout) memcpy(B.buf + o, dst, size);
@@ -366,6 +366,7 @@ b_out(uint32_t field_off, void *dst, uint64_t size, int inout) {
   B.dsts[B.n_out] = (struct out_dst){dst, (uint32_t)size, NULL};
   B.outs[B.n_out++] = (struct wmtr_out){o, (uint32_t)size};
   b_reloc(field_off, WMTR_REF_EXTRA | o);
+  return o;
 }
 
 static void
@@ -391,7 +392,7 @@ static NTSTATUS send_built_flags(uint16_t call, uint16_t extra_flags, void *para
 #define WMTR_CLS_N 1
 static const uint8_t call_cls[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = WMTR_CLS_##c,
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 
@@ -605,8 +606,8 @@ listener_run(uint64_t listener) {
 static uint32_t
 cmd_size(int kind, uint16_t type) {
 #define CMD(k, e, s) if (kind == WMTR_KIND_##k && type == e) return sizeof(struct s);
-  enum { WMTR_KIND_BLIT, WMTR_KIND_COMPUTE, WMTR_KIND_RENDER };
-#include "wmtr_cmds.inc"
+  enum { WMTR_KIND_BLIT, WMTR_KIND_COMPUTE, WMTR_KIND_RENDER, WMTR_KIND_ACCEL };
+#include WMTR_CMDS_INC
 #undef CMD
   if (type == 0) return sizeof(struct wmtcmd_base);
   return 0;
@@ -627,7 +628,12 @@ marshal_cmds(int kind, uint32_t head_field_off, const struct wmtcmd_base *c) {
     if (kind == 1 && c->type == WMTComputeCommandSetBytes) {
       const struct wmtcmd_compute_setbytes *b = (const void *)c;
       b_in(o + OFF(struct wmtcmd_compute_setbytes, bytes), b->bytes.ptr, b->length);
+#ifdef WMTR_MULLION
+    } else if (kind == 2 && (c->type == WMTRenderCommandSetFragmentBytes || c->type == WMTRenderCommandSetVertexBytes ||
+                             c->type == WMTRenderCommandSetMeshBytes)) {
+#else
     } else if (kind == 2 && c->type == WMTRenderCommandSetFragmentBytes) {
+#endif
       const struct wmtcmd_render_setbytes *b = (const void *)c;
       b_in(o + OFF(struct wmtcmd_render_setbytes, bytes), b->bytes.ptr, b->length);
     } else if (kind == 2 && c->type == WMTRenderCommandSetViewports) {
@@ -638,6 +644,12 @@ marshal_cmds(int kind, uint32_t head_field_off, const struct wmtcmd_base *c) {
       const struct wmtcmd_render_setscissorrects *b = (const void *)c;
       b_in(o + OFF(struct wmtcmd_render_setscissorrects, scissor_rects), b->scissor_rects.ptr,
            (uint64_t)b->rect_count * sizeof(struct WMTScissorRect));
+#ifdef WMTR_MULLION
+    } else if (kind == 3 && c->type == WMTAccelerationStructureCommandBuild) {
+      const struct wmtcmd_accelerationstructure_build *b = (const void *)c;
+      b_in(o + OFF(struct wmtcmd_accelerationstructure_build, info.geometries), b->info.geometries.ptr,
+           (uint64_t)b->info.geometry_count * sizeof(struct WMTAccelerationStructureGeometry));
+#endif
     }
   }
 }
@@ -650,7 +662,14 @@ marshal_sm50_args(uint32_t field_off, const struct SM50_SHADER_COMPILATION_ARGUM
   for (; a; a = a->next) {
     uint32_t sz;
     switch (a->type) {
+#ifdef WMTR_MULLION
+    case SM50_SHADER_STREAM_OUTPUT: sz = sizeof(struct SM50_SHADER_STREAM_OUTPUT_DATA); break;
+    case SM50_SHADER_MESH_SHADER: sz = sizeof(struct SM50_SHADER_MESH_SHADER_DATA); break;
+    case SM50_SHADER_RAY_SHADER: sz = sizeof(struct SM50_SHADER_RAY_SHADER_DATA); break;
+    case SM50_SHADER_LIBRARIES: sz = sizeof(struct SM50_SHADER_LIBRARIES_DATA); break;
+#else
     case SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT: sz = sizeof(struct SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA); break;
+#endif
     case SM50_SHADER_COMMON: sz = sizeof(struct SM50_SHADER_COMMON_DATA); break;
     case SM50_SHADER_PSO_PIXEL_SHADER: sz = sizeof(struct SM50_SHADER_PSO_PIXEL_SHADER_DATA); break;
     case SM50_SHADER_IA_INPUT_LAYOUT: sz = sizeof(struct SM50_SHADER_IA_INPUT_LAYOUT_DATA); break;
@@ -666,11 +685,32 @@ marshal_sm50_args(uint32_t field_off, const struct SM50_SHADER_COMPILATION_ARGUM
     b_reloc(link, WMTR_REF_EXTRA | o);
     link = o; /* next is the first member */
     uint64_t z = 0; memcpy(B.buf + link, &z, 8);
+#ifdef WMTR_MULLION
+    if (a->type == SM50_SHADER_STREAM_OUTPUT) {
+      const struct SM50_SHADER_STREAM_OUTPUT_DATA *d = (const void *)a;
+      b_in(o + OFF(struct SM50_SHADER_STREAM_OUTPUT_DATA, elements), d->elements,
+           (uint64_t)d->num_elements * sizeof(struct SM50_STREAM_OUTPUT_ELEMENT2));
+    } else if (a->type == SM50_SHADER_MESH_SHADER) {
+      /* the pixel shader's DXBC container; its header holds the total size (offset 24) */
+      const struct SM50_SHADER_MESH_SHADER_DATA *d = (const void *)a;
+      const uint32_t *bc = d->pixel_shader_bytecode;
+      if (bc && bc[0] != 0x43425844) { LOG(0, "mesh pipeline: pixel shader is not a DXBC container\n"); B.error = 1; return; }
+      b_in(o + OFF(struct SM50_SHADER_MESH_SHADER_DATA, pixel_shader_bytecode), bc, bc ? bc[6] : 0);
+    } else if (a->type == SM50_SHADER_RAY_SHADER) {
+      const struct SM50_SHADER_RAY_SHADER_DATA *d = (const void *)a;
+      b_cstr(o + OFF(struct SM50_SHADER_RAY_SHADER_DATA, name), d->name);
+    } else if (a->type == SM50_SHADER_LIBRARIES) {
+      const struct SM50_SHADER_LIBRARIES_DATA *d = (const void *)a;
+      b_in(o + OFF(struct SM50_SHADER_LIBRARIES_DATA, libraries), d->libraries, (uint64_t)d->count * sizeof(sm50_shader_t));
+    } else
+#else
     if (a->type == SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT) {
       const struct SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA *d = (const void *)a;
       b_in(o + OFF(struct SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA, elements), d->elements,
            (uint64_t)d->num_elements * sizeof(struct SM50_STREAM_OUTPUT_ELEMENT));
-    } else if (a->type == SM50_SHADER_ROOT_SIGNATURE || a->type == SM50_SHADER_ROOT_SIGNATURE2) {
+    } else
+#endif
+    if (a->type == SM50_SHADER_ROOT_SIGNATURE || a->type == SM50_SHADER_ROOT_SIGNATURE2) {
       const struct SM50_SHADER_ROOT_SIGNATURE_DATA *d = (const void *)a;
       b_in(o + OFF(struct SM50_SHADER_ROOT_SIGNATURE_DATA, bytecode), d->bytecode, (uint64_t)d->bytecode_length);
     } else if (a->type == SM50_SHADER_IA_INPUT_LAYOUT) {
@@ -922,6 +962,45 @@ dispatch(uint16_t call, void *params, uint32_t size, int sync) {
   case 144: { struct unixcall_mtldevice_newlibrarywithsource *p = params; b_begin(p, size); b_in(OFF(struct unixcall_mtldevice_newlibrarywithsource, source), p->source.ptr, p->length); break; }
   case 109: return listener_run(((struct unixcall_generic_obj_noret *)params)->handle);
   case 121: case 122: case 123: case 124: return STATUS_NOT_SUPPORTED; /* mach ports do not cross the VM */
+#ifdef WMTR_MULLION
+  /* Mullion v0.4's own calls (146..173, gen/gen_table.py); those without pointer fields take the default */
+  case 155: case 156: { /* MTL4CommandQueue_update/copyMappings: arrays of Metal 4's mapping operations */
+    struct unixcall_mtl4_mappings *p = params; b_begin(p, size);
+    static const uint8_t op_size[2][2] = {{WMTR_MTL4_UPDATE_BUFFER_OP, WMTR_MTL4_UPDATE_TEXTURE_OP},
+                                          {WMTR_MTL4_COPY_BUFFER_OP, WMTR_MTL4_COPY_TEXTURE_OP}};
+    b_in(OFF(struct unixcall_mtl4_mappings, operations), p->operations.ptr, p->count * op_size[call == 156][p->texture != 0]);
+    break; }
+  case 158: { /* accelerationStructureSizes: the info is in and out (sizes), its geometries are in */
+    struct unixcall_mtldevice_accelerationstructuresizes *p = params; struct WMTAccelerationStructureInfo *i = p->info.ptr;
+    b_begin(p, size);
+    uint32_t o = b_out(OFF(struct unixcall_mtldevice_accelerationstructuresizes, info), i, sizeof *i, 1);
+    if (i && o != UINT32_MAX)
+      b_in(o + OFF(struct WMTAccelerationStructureInfo, geometries), i->geometries.ptr,
+           (uint64_t)i->geometry_count * sizeof(struct WMTAccelerationStructureGeometry));
+    break; }
+  case 161: { struct unixcall_generic_obj_cmd_noret *p = params; b_begin(p, size);
+    marshal_cmds(3, OFF(struct unixcall_generic_obj_cmd_noret, cmd_head), p->cmd_head.ptr); break; }
+  case 162: { struct unixcall_mtldevice_newlinkedcomputepso *p = params; const struct WMTLinkedComputePipelineInfo *i = p->info.ptr;
+    b_begin(p, size);
+    uint32_t o = b_in(OFF(struct unixcall_mtldevice_newlinkedcomputepso, info), i, sizeof *i);
+    if (i && o != UINT32_MAX)
+      b_in(o + OFF(struct WMTLinkedComputePipelineInfo, functions), i->functions.ptr, 8ull * i->function_count);
+    break; }
+  case 163: { struct unixcall_mtlcomputepso_newvisiblefunctiontable *p = params; b_begin(p, size);
+    b_in(OFF(struct unixcall_mtlcomputepso_newvisiblefunctiontable, functions), p->functions.ptr, 8ull * p->function_count);
+    break; }
+  case 167: { struct unixcall_mtlcommandbuffer_sampledcommandencoder *p = params; b_begin(p, size);
+    b_in(OFF(struct unixcall_mtlcommandbuffer_sampledcommandencoder, samples), p->samples.ptr, sizeof(struct WMTSampleBufferAttachmentInfo));
+    b_in(OFF(struct unixcall_mtlcommandbuffer_sampledcommandencoder, render_info), p->render_info.ptr, sizeof(struct WMTRenderPassInfo));
+    break; }
+  case 164: { struct sm50_get_ray_shader_params *p = params; b_begin(p, size); /* SM50GetRayShader: name and info out */
+    b_out(OFF(struct sm50_get_ray_shader_params, name), p->name, p->name_size, 0);
+    b_out(OFF(struct sm50_get_ray_shader_params, info), p->info, sizeof(struct SM50_RAY_SHADER_INFO), 0);
+    break; }
+  case 168: return STATUS_SUCCESS; /* WMTDiagWrite: diagnostic files at host paths, nothing written (ret 0) */
+  case 169: { struct unixcall_dispatchdata_bytes *p = params; b_begin(p, size);
+    b_out(OFF(struct unixcall_dispatchdata_bytes, buffer), p->buffer.ptr, p->size, 0); break; }
+#endif
   default: b_begin(params, size); break;
   }
   return send_built(call, sync, params, size);
@@ -936,7 +1015,7 @@ dispatch(uint16_t call, void *params, uint32_t size, int sync) {
 #define WMTR_SYNC_N 1
 static const uint8_t call_sync[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = WMTR_SYNC_##c,
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 static const uint32_t call_size[WMTR_NCALLS] = {
@@ -946,7 +1025,7 @@ static const uint32_t call_size[WMTR_NCALLS] = {
 #define WMTR_SIZEOF_B(t) sizeof(t)
 #define WMTR_SIZEOF_C(t) sizeof(t)
 #define WMTR_SIZEOF_N(t) 0
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 
@@ -976,12 +1055,23 @@ entry(uint16_t call, void *params) {
 #define E10(n) E(n##0) E(n##1) E(n##2) E(n##3) E(n##4) E(n##5) E(n##6) E(n##7) E(n##8) E(n##9)
 E(0) E(1) E(2) E(3) E(4) E(5) E(6) E(7) E(8) E(9) E10(1) E10(2) E10(3) E10(4) E10(5) E10(6) E10(7) E10(8) E10(9)
 E10(10) E10(11) E10(12) E10(13) E(140) E(141) E(142) E(143) E(144) E(145) E(146)
+#ifdef WMTR_MULLION
+E(147) E(148) E(149) E10(15) E10(16) E(170) E(171) E(172) E(173)
+#endif
 #define P(n) e##n,
 #define P10(n) P(n##0) P(n##1) P(n##2) P(n##3) P(n##4) P(n##5) P(n##6) P(n##7) P(n##8) P(n##9)
 __attribute__((visibility("default"))) const void *__wine_unix_call_funcs[WMTR_NCALLS] = {
     P(0) P(1) P(2) P(3) P(4) P(5) P(6) P(7) P(8) P(9) P10(1) P10(2) P10(3) P10(4) P10(5) P10(6) P10(7) P10(8) P10(9)
-        P10(10) P10(11) P10(12) P10(13) P(140) P(141) P(142) P(143) P(144) P(145) P(146)};
+        P10(10) P10(11) P10(12) P10(13) P(140) P(141) P(142) P(143) P(144) P(145) P(146)
+#ifdef WMTR_MULLION
+        P(147) P(148) P(149) P10(15) P10(16) P(170) P(171) P(172) P(173)
+#endif
+};
+#ifdef WMTR_MULLION
+_Static_assert(WMTR_NCALLS == 174, "add entries for new calls above");
+#else
 _Static_assert(WMTR_NCALLS == 147, "add entries for new calls above");
+#endif
 
 /* test hook: wait through the transport for *done >= seq on reply slot `slot` */
 __attribute__((visibility("default"))) int
