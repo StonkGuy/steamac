@@ -1,0 +1,131 @@
+# Mullion flavour of the DXMT graphics path (host/mullion/build.sh), built from the sources of the dispatched ref:
+#   host    macOS  fetch llvm native host   libwmtr_host.dylib with MULLION=1 (Mullion's winemetal_unix.c: Metal 4,
+#                                           macOS 26 SDK; wmtr_host.m checks the Metal 4 operation sizes the guest
+#                                           uses) + make test
+#   pe      macOS  fetch pe                 Mullion's x86_64-windows dlls (Wine builtins)
+#   client  Linux  fetch client             the guest's winemetal.so (Mullion's unix-call table) + make test-linux
+# Each uploads a workflow artifact; nothing is released. By hand only (Actions > Mullion > Run workflow).
+name: Mullion
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mullion-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned toolchain: the macos-26 image's Xcode 26.6 (macOS 26 SDK, Metal toolchain), as in release.yml.
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
+
+jobs:
+  host:
+    name: Mullion host library
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - &xcode
+        name: Xcode, Metal toolchain, Rosetta
+        run: |
+          echo "runner image: $ImageOS $ImageVersion"
+          sw_vers
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+          echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version)"
+          xcrun -sdk macosx -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+          xcrun -sdk macosx -f metal
+          arch -x86_64 /usr/bin/true 2>/dev/null || softwareupdate --install-rosetta --agree-to-license
+      # the LLVM 15 install is host/dxmt/build.sh's (shared): the same cache as release.yml's dxmt job
+      - name: LLVM 15 cache
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: llvm15-${{ runner.os }}-${{ runner.arch }}-xcode26.6-${{ hashFiles('host/dxmt/build.sh', 'host/dxmt/pin.env') }}
+      - name: Mullion source, LLVM 15
+        run: host/mullion/build.sh fetch llvm
+      - if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+      - name: Mullion native (airconv)
+        run: host/mullion/build.sh native
+      - name: wmtr host library (MULLION=1) and its tests
+        run: host/mullion/build.sh host
+      # the library is installed before its tests run: kept when a test fails
+      - name: Pack
+        if: ${{ !cancelled() }}
+        run: |
+          f=work/out/mullion-host/lib/libwmtr_host.dylib
+          if [ -f "$f" ]; then otool -l "$f" | grep -A4 LC_BUILD_VERSION; shasum -a 256 "$f"; tar -cf mullion-host.tar "$f"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: mullion-host
+          path: mullion-host.tar
+          retention-days: 7
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: mullion-host-logs
+          path: work/build/mullion-native/meson-logs
+          retention-days: 7
+          if-no-files-found: ignore
+
+  pe:
+    name: Mullion PE dlls
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - *xcode
+      - name: Mullion source, PE dlls
+        run: host/mullion/build.sh fetch pe
+      - name: Pack
+        run: |
+          (cd work/out/mullion-pe && shasum -a 256 *.dll)
+          tar -cf mullion-pe.tar work/out/mullion-pe
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mullion-pe
+          path: mullion-pe.tar
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: mullion-pe-logs
+          path: work/build/mullion-pe/meson-logs
+          retention-days: 7
+          if-no-files-found: ignore
+
+  client:
+    name: Mullion guest client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Mullion source, guest client
+        run: host/mullion/build.sh fetch client
+      - name: Pack
+        run: tar -cf mullion-client.tar wmtr/build/mullion/x86_64-linux/winemetal.so
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mullion-client
+          path: mullion-client.tar
+          retention-days: 7
+          if-no-files-found: error
