@@ -788,6 +788,14 @@ keep_autoreleased(uint32_t slot, uint16_t call, uint8_t *params) {
     vpool_keep(slot, ret);
     break;
   }
+#ifdef WMTR_MULLION
+  /* Mullion's own calls that return autoreleased encoders (its winemetal_unix.c): accelerationStructureCommandEncoder,
+   * and sampledCommandEncoder's compute, acceleration-structure or render encoder with sample buffers. Its D3D12 runtime
+   * keeps them across calls, so without this the request's pool released them before endEncoding and Metal aborted
+   * the VM ("Command encoder released without endEncoding"). */
+  case 160: vpool_keep(slot, ((struct unixcall_generic_obj_obj_ret *)params)->ret); break;
+  case 167: vpool_keep(slot, ((struct unixcall_mtlcommandbuffer_sampledcommandencoder *)params)->ret); break;
+#endif
   default: break;
   }
 }
