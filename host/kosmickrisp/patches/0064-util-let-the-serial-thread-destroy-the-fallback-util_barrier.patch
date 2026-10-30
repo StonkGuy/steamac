@@ -1,0 +1,380 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Fri, 30 Oct 2026 03:40:00 +0200
+Subject: [PATCH] util: let the serial thread destroy the fallback util_barrier
+
+util_queue_finish queues one job per queue thread that waits on a
+util_barrier, and the job whose util_barrier_wait returns true destroys
+the barrier (04c90f292e1, "util/queue: fix a data race detected by TSAN
+when finishing the queue", Mesa 22.0). That relies on pthread_barrier_t:
+one thread of each round gets PTHREAD_BARRIER_SERIAL_THREAD, and glibc
+lets it destroy the barrier right away. macOS (also Haiku and Windows)
+uses the mutex + condvar fallback in u_thread.c instead, whose
+util_barrier_wait returns true in every thread: every thread destroys
+the barrier, the first of them (the thread completing the round) while
+the threads it has just released are still waking up in cnd_wait.
+
+On macOS that deadlocks. pthread_mutex_destroy of the unlocked mutex
+succeeds; a thread woken in pthread_cond_wait still re-acquires the
+destroyed mutex, but its pthread_mutex_unlock then fails with EINVAL
+and the mutex stays locked, so the next released thread blocks in
+_pthread_mutex_firstfit_lock_slow forever and util_queue_finish waits
+for its fence forever. A queue needs 3+ threads for it (2+ released
+waiters). KosmicKrisp creates a disk cache per physical device (0055),
+whose queue scales up to 4 threads while shaders are stored, and
+vkDestroyInstance -> kk_physical_device_destroy -> disk_cache_destroy
+runs util_queue_finish. Seen live under virglrenderer (steamac,
+2026-10-29, after ~6 game launches in one VM boot): a Venus context's
+destroy hung in util_queue_finish -> _util_queue_fence_wait with its
+disk$3 thread in util_barrier_wait -> cnd_wait ->
+_pthread_mutex_firstfit_lock_slow and disk$0-2 idle; it held the render
+server's state lock, so every other context and the guest's virtio-gpu
+blob maps stopped with it.
+
+Fix the fallback and keep util_queue as it is: util_barrier_wait returns
+true only in the thread that completes the round (as
+PTHREAD_BARRIER_SERIAL_THREAD), and util_barrier_destroy first waits
+until the threads released by the last round have left
+util_barrier_wait, as glibc's pthread_barrier_destroy does. That costs a
+counter per round; the extra broadcast only happens while a destroy
+waits. Platforms with pthread barriers (Linux, the BSDs) are unchanged.
+
+Upstream state: Mesa main (2026-10-29) has the same fallback. Open MR
+!32068 (2024-11, not merged) makes only the serial thread return true;
+that alone still lets it destroy the mutex under the released threads,
+and the new tests still deadlock with it (below). 74920caa (2026-10-21,
+util_queue_finish vs util_queue_kill_threads) is a different deadlock.
+
+Test: src/util/tests/u_queue_test.cpp in util_tests:
+util_barrier.one_serial_thread_per_round (4 threads, 1000 rounds),
+util_barrier.destroyed_by_serial_thread (util_queue_finish_execute's
+pattern on 10000 barriers, 4 threads) and util_queue.finish (a queue at
+its 4 threads, 10000 rounds of 4 jobs + util_queue_finish). The two that
+can deadlock run in a death test child whose watchdog thread ends it
+after 10 s without progress.
+
+Measured on an Apple M2, macOS 27.0.1, -Db_ndebug=true (as build.sh):
+  stock         one_serial_thread_per_round 0/3 passed (all 4 threads
+                get true), destroyed_by_serial_thread 0/3 and
+                util_queue.finish 0/3: deadlocked after 7-551 of 10000
+                iterations. A sample of the hung test child is the
+                live stack: util_queue_finish -> _util_queue_fence_wait,
+                one queue thread in util_queue_finish_execute ->
+                util_barrier_wait -> cnd_wait ->
+                _pthread_mutex_firstfit_lock_slow, three idle.
+  !32068 alone  5/5 passed, 0/5 (deadlocked after 7-1984), 0/5
+                (deadlocked after 23-1480).
+  this patch    100/100 passed each (0.9 s per repeat of the three).
+                The existing util_tests pass 255/255 before and after.
+---
+ src/util/meson.build            |   1 +
+ src/util/tests/u_queue_test.cpp | 194 ++++++++++++++++++++++++++++++++
+ src/util/u_thread.c             |  26 ++++-
+ src/util/u_thread.h             |   5 +
+ 4 files changed, 225 insertions(+), 1 deletion(-)
+ create mode 100644 src/util/tests/u_queue_test.cpp
+
+diff --git a/src/util/meson.build b/src/util/meson.build
+index 72d8660..c2b05ca 100644
+--- a/src/util/meson.build
++++ b/src/util/meson.build
+@@ -505,6 +505,7 @@ if with_tests
+     'tests/u_memstream_test.cpp',
+     'tests/u_printf_test.cpp',
+     'tests/u_qsort_test.cpp',
++    'tests/u_queue_test.cpp',
+     'tests/u_ycbcr_test.cpp',
+     'tests/vector_test.cpp',
+   )
+diff --git a/src/util/tests/u_queue_test.cpp b/src/util/tests/u_queue_test.cpp
+new file mode 100644
+index 0000000..732c160
+--- /dev/null
++++ b/src/util/tests/u_queue_test.cpp
+@@ -0,0 +1,194 @@
++/*
++ * Copyright 2026 steamac contributors
++ * SPDX-License-Identifier: MIT
++ *
++ * util_barrier and util_queue_finish.
++ *
++ * util_queue_finish queues one job per thread that waits on a barrier, and
++ * the thread that util_barrier_wait returns true to destroys it. That needs
++ * the pthread_barrier_t semantics on every platform: exactly one thread of
++ * each round gets true, and it may destroy the barrier at once while the
++ * other threads are still on their way out of util_barrier_wait.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <gtest/gtest.h>
++
++#include "c11/threads.h"
++#include "util/os_time.h"
++#include "util/u_atomic.h"
++#include "util/u_queue.h"
++#include "util/u_thread.h"
++
++#define NUM_THREADS 4
++#define NUM_ROUNDS 1000
++#define NUM_ITERATIONS 10000
++
++/* A deadlock would hang the whole test binary, so the workloads that can
++ * deadlock run in a death test child with a watchdog thread that ends it
++ * when the workload makes no progress for that long.
++ */
++#define WATCHDOG_SECONDS 10
++
++static unsigned iterations_done;
++
++static int
++watchdog(void *name)
++{
++   unsigned last = 0, idle = 0;
++
++   while (idle < WATCHDOG_SECONDS) {
++      os_time_sleep(1000000);
++      unsigned done = p_atomic_read(&iterations_done);
++      idle = done == last ? idle + 1 : 0;
++      last = done;
++   }
++   fprintf(stderr, "%s: deadlocked after %u of %u iterations\n",
++           (const char *)name, last, NUM_ITERATIONS);
++   fflush(stderr);
++   _exit(2);
++}
++
++static void
++run_with_watchdog(bool (*workload)(void), const char *name)
++{
++   thrd_t thread;
++   if (thrd_create(&thread, watchdog, (void *)name) != thrd_success)
++      exit(3);
++   exit(workload() ? 0 : 1);
++}
++
++#define EXPECT_NO_DEADLOCK(workload) \
++   EXPECT_EXIT(run_with_watchdog(workload, #workload), \
++               ::testing::ExitedWithCode(0), "")
++
++struct barrier_rounds {
++   util_barrier barrier;
++   unsigned serial[NUM_ROUNDS];
++};
++
++static int
++barrier_rounds_thread(void *data)
++{
++   struct barrier_rounds *t = (struct barrier_rounds *)data;
++
++   for (unsigned i = 0; i < NUM_ROUNDS; i++) {
++      if (util_barrier_wait(&t->barrier))
++         p_atomic_inc(&t->serial[i]);
++   }
++   return 0;
++}
++
++/* pthread_barrier_wait returns PTHREAD_BARRIER_SERIAL_THREAD to one thread
++ * of each round, so util_barrier_wait must return true exactly once.
++ */
++TEST(util_barrier, one_serial_thread_per_round)
++{
++   struct barrier_rounds *t =
++      (struct barrier_rounds *)calloc(1, sizeof(*t));
++   thrd_t threads[NUM_THREADS];
++
++   util_barrier_init(&t->barrier, NUM_THREADS);
++   for (unsigned i = 0; i < NUM_THREADS; i++)
++      ASSERT_EQ(thrd_create(&threads[i], barrier_rounds_thread, t),
++                thrd_success);
++   for (unsigned i = 0; i < NUM_THREADS; i++)
++      thrd_join(threads[i], NULL);
++   util_barrier_destroy(&t->barrier);
++
++   for (unsigned i = 0; i < NUM_ROUNDS; i++)
++      ASSERT_EQ(t->serial[i], 1u) << "round " << i;
++   free(t);
++}
++
++struct barrier_thread {
++   util_barrier *barriers;
++   bool counts_progress;
++};
++
++static int
++barrier_wait_and_destroy_thread(void *data)
++{
++   struct barrier_thread *t = (struct barrier_thread *)data;
++
++   for (unsigned i = 0; i < NUM_ITERATIONS; i++) {
++      /* What util_queue_finish_execute does. */
++      if (util_barrier_wait(&t->barriers[i]))
++         util_barrier_destroy(&t->barriers[i]);
++      if (t->counts_progress)
++         p_atomic_inc(&iterations_done);
++   }
++   return 0;
++}
++
++static bool
++barrier_destroyed_by_serial_thread(void)
++{
++   util_barrier *barriers =
++      (util_barrier *)calloc(NUM_ITERATIONS, sizeof(*barriers));
++   struct barrier_thread args[NUM_THREADS];
++   thrd_t threads[NUM_THREADS];
++
++   if (!barriers)
++      return false;
++   for (unsigned i = 0; i < NUM_ITERATIONS; i++)
++      util_barrier_init(&barriers[i], NUM_THREADS);
++   for (unsigned i = 0; i < NUM_THREADS; i++) {
++      args[i].barriers = barriers;
++      args[i].counts_progress = i == 0;
++      if (thrd_create(&threads[i], barrier_wait_and_destroy_thread,
++                      &args[i]) != thrd_success)
++         return false;
++   }
++   for (unsigned i = 0; i < NUM_THREADS; i++)
++      thrd_join(threads[i], NULL);
++
++   free(barriers);
++   return true;
++}
++
++/* The serial thread destroys the barrier while the threads it released still
++ * re-acquire its mutex inside util_barrier_wait.
++ */
++TEST(util_barrier, destroyed_by_serial_thread)
++{
++   EXPECT_NO_DEADLOCK(barrier_destroyed_by_serial_thread);
++}
++
++static void
++count_job(void *job, void *gdata, int thread_index)
++{
++   p_atomic_inc((int *)job);
++}
++
++static bool
++queue_finish_all_threads(void)
++{
++   struct util_queue queue;
++   int executed = 0;
++
++   if (!util_queue_init(&queue, "test", 32, NUM_THREADS, 0, NULL))
++      return false;
++
++   /* The disk cache's queue once it has scaled up to all of its threads. */
++   util_queue_adjust_num_threads(&queue, NUM_THREADS, false);
++
++   for (unsigned i = 0; i < NUM_ITERATIONS; i++) {
++      for (unsigned j = 0; j < NUM_THREADS; j++)
++         util_queue_add_job(&queue, &executed, NULL, count_job, NULL, 0);
++      util_queue_finish(&queue);
++      if (p_atomic_read(&executed) != (int)((i + 1) * NUM_THREADS))
++         return false;
++      p_atomic_inc(&iterations_done);
++   }
++
++   util_queue_destroy(&queue);
++   return true;
++}
++
++/* disk_cache_destroy -> util_queue_finish on a queue with all its threads. */
++TEST(util_queue, finish)
++{
++   EXPECT_NO_DEADLOCK(queue_finish_all_threads);
++}
+diff --git a/src/util/u_thread.c b/src/util/u_thread.c
+index d1cf085..c6c4dc4 100644
+--- a/src/util/u_thread.c
++++ b/src/util/u_thread.c
+@@ -219,6 +219,8 @@ void util_barrier_init(util_barrier *barrier, unsigned count)
+ {
+    barrier->count = count;
+    barrier->waiters = 0;
++   barrier->leaving = 0;
++   barrier->destroying = false;
+    barrier->sequence = 0;
+    (void) mtx_init(&barrier->mutex, mtx_plain);
+    cnd_init(&barrier->condvar);
+@@ -226,6 +228,19 @@ void util_barrier_init(util_barrier *barrier, unsigned count)
+ 
+ void util_barrier_destroy(util_barrier *barrier)
+ {
++   /* The serial thread may destroy the barrier as soon as util_barrier_wait
++    * returns (util_queue_finish_execute does), as glibc's
++    * pthread_barrier_destroy allows, while the threads it released still
++    * have to re-acquire the mutex in cnd_wait and unlock it. Wait for them:
++    * macOS re-acquires a destroyed mutex in pthread_cond_wait but cannot
++    * unlock it (EINVAL), and the next of them then blocks on it forever.
++    */
++   mtx_lock(&barrier->mutex);
++   barrier->destroying = true;
++   while (barrier->leaving)
++      cnd_wait(&barrier->condvar, &barrier->mutex);
++   mtx_unlock(&barrier->mutex);
++
+    assert(barrier->waiters == 0);
+    mtx_destroy(&barrier->mutex);
+    cnd_destroy(&barrier->condvar);
+@@ -233,6 +248,8 @@ void util_barrier_destroy(util_barrier *barrier)
+ 
+ bool util_barrier_wait(util_barrier *barrier)
+ {
++   bool serial = false;
++
+    mtx_lock(&barrier->mutex);
+ 
+    assert(barrier->waiters < barrier->count);
+@@ -244,15 +261,22 @@ bool util_barrier_wait(util_barrier *barrier)
+       do {
+          cnd_wait(&barrier->condvar, &barrier->mutex);
+       } while (sequence == barrier->sequence);
++
++      /* The last released thread out lets util_barrier_destroy go on. */
++      if (--barrier->leaving == 0 && barrier->destroying)
++         cnd_broadcast(&barrier->condvar);
+    } else {
++      /* The thread that completes the round is the serial thread. */
++      barrier->leaving += barrier->count - 1;
+       barrier->waiters = 0;
+       barrier->sequence++;
+       cnd_broadcast(&barrier->condvar);
++      serial = true;
+    }
+ 
+    mtx_unlock(&barrier->mutex);
+ 
+-   return true;
++   return serial;
+ }
+ 
+ #endif
+diff --git a/src/util/u_thread.h b/src/util/u_thread.h
+index 57ebdc5..82c1239 100644
+--- a/src/util/u_thread.h
++++ b/src/util/u_thread.h
+@@ -125,6 +125,8 @@ typedef pthread_barrier_t util_barrier;
+ typedef struct {
+    unsigned count;
+    unsigned waiters;
++   unsigned leaving; /* released threads still in util_barrier_wait */
++   bool destroying;
+    uint64_t sequence;
+    mtx_t mutex;
+    cnd_t condvar;
+@@ -136,6 +138,9 @@ void util_barrier_init(util_barrier *barrier, unsigned count);
+ 
+ void util_barrier_destroy(util_barrier *barrier);
+ 
++/* Returns true in exactly one thread of each round (pthread_barrier_wait's
++ * PTHREAD_BARRIER_SERIAL_THREAD), which may destroy the barrier right away.
++ */
+ bool util_barrier_wait(util_barrier *barrier);
+ 
+ /*
+-- 
+2.39.5 (Apple Git-154)
+
