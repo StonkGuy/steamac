@@ -13,7 +13,10 @@ if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "rm -rf '$d/FEX'"; then echo "o
 [ -d "$d/FEX/.git" ] && echo "ok   old tree left in place" || { echo "FAIL old tree was removed"; fail=1; }
 if [ "${ONLINE:-0}" = 1 ]; then
   tag=$(sed -n 's/^FEX_EAC_TAG=//p' "$S"); sha=$(sed -n 's/^FEX_EAC_SHA=//p' "$S")
-  got=$(git ls-remote https://github.com/StonkGuy/FEX.git "refs/tags/$tag^{}" | cut -f1)
+  # an annotated tag lists its commit as tag^{}; a lightweight tag only as the tag itself
+  refs=$(git ls-remote https://github.com/StonkGuy/FEX.git "refs/tags/$tag" "refs/tags/$tag^{}")
+  got=$(printf '%s\n' "$refs" | awk -v t="refs/tags/$tag^{}" '$2 == t {print $1}')
+  [ -n "$got" ] || got=$(printf '%s\n' "$refs" | awk -v t="refs/tags/$tag" '$2 == t {print $1}')
   [ "$got" = "$sha" ] && echo "ok   $tag = $sha" || { echo "FAIL $tag is '$got', script pins $sha"; fail=1; }
 fi
 exit $fail
