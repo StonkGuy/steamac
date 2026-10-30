@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""steamac: an x86-64 Proton for installed Windows games whose profiles request DXMT.
+"""steamac: an x86-64 Proton for installed Windows games whose profiles request the booted DXMT or Mullion path.
 
 DXMT's dlls are x86-64 Windows builds with a Wine unixlib, which only an x86-64 Proton can load (in
 Proton 11.0 (ARM64), ARM64EC Wine, d3d11.dll loads but winemetal's unix side does not come up and
@@ -16,16 +16,20 @@ Proton Experimental and the x86-64 Proton 11.0 need Steam Linux Runtime 4.0, whi
 refuses ("Failed installing AppID 4183110 (Invalid platform)"). A game installed while Steam runs is
 mapped at the next Steam start.
 
+Mullion (steamac.gfx=mullion, experimental; a DXMT fork with Direct3D 12, same x86-64-only payload)
+works the same way: `steam-compat-default mullion` maps the games with profile gfx=mullion. Each boot
+maps only the profiles of its own path: in a Mullion boot a gfx=dxmt game gets Steam's own tool back.
+
 Never the wildcard ("0"): Steam applies a high-priority wildcard to its tools too, mapped the FEX
 tool (3127680) to Proton, "updated" it to zero depots and emptied it, after which every x86-64 Proton
 failed ("Tool 3127680 "fex" unsupported version 0").
 
-With the setting off (`vulkan`), or a profile no longer requesting DXMT, our entries are removed.
+With the setting off (`vulkan`), or a profile no longer requesting the booted path, our entries are removed.
 The games it mapped are remembered in $STATE/compat-default.json; a game whose entry was changed in Steam since is left alone
 from then on. Steam is not running when this runs (ExecStartPre of steam.service); it rewrites
 config.vdf only when it exits. Every byte of config.vdf outside the entries is kept (the VDF helpers
 are mac-clock-format's).
-Usage: steam-compat-default dxmt|vulkan
+Usage: steam-compat-default dxmt|mullion|vulkan
 Test overrides: STEAMAC_STEAM_ROOT, STEAMAC_GFX_STATE.
 """
 import json
@@ -241,14 +245,14 @@ def windows_games(steam):
     return games
 
 
-def profile_dxmt():
+def profile_games(gfx):
     persisted = Path.home() / ".config/steamac/game-profiles.json"
     runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/" + str(os.getuid())) / "steamac/game-profiles.json"
     path = runtime if runtime.exists() else persisted
     if not path.exists() or not path.stat().st_size:
         return set()
     profiles = json.loads(path.read_text())
-    return {appid for appid, profile in profiles["games"].items() if profile.get("gfx") == "dxmt"}
+    return {appid for appid, profile in profiles["games"].items() if profile.get("gfx") == gfx}
 
 
 def main(mode):
@@ -259,7 +263,7 @@ def main(mode):
     marker = state_dir / "compat-default.json"
     mapped = set(json.loads(marker.read_text()).get("mapped", [])) if marker.exists() else set()
     if not config.exists():
-        if mode == "dxmt":
+        if mode != "vulkan":
             log("no " + str(config) + " yet; games are mapped at the next start")
         return
     text = config.read_text()
@@ -270,7 +274,7 @@ def main(mode):
             log("compatibility tool of " + appid + " changed in Steam; leaving it")
             mapped.discard(appid)
 
-    wanted = windows_games(steam) & profile_dxmt() if mode == "dxmt" else set()
+    wanted = windows_games(steam) & profile_games(mode) if mode != "vulkan" else set()
     removed = sorted(mapped - wanted)
     for appid in removed:
         text = set_mapping(text, appid, None)
@@ -293,8 +297,8 @@ def main(mode):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or sys.argv[1] not in ("dxmt", "vulkan"):
-        print("usage: steam-compat-default dxmt|vulkan", file=sys.stderr)
+    if len(sys.argv) != 2 or sys.argv[1] not in ("dxmt", "mullion", "vulkan"):
+        print("usage: steam-compat-default dxmt|mullion|vulkan", file=sys.stderr)
         sys.exit(64)
     try:
         main(sys.argv[1])

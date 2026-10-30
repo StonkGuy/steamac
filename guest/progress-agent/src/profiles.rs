@@ -86,7 +86,7 @@ fn validate(bytes: &[u8]) -> io::Result<()> {
         let profile = profile.as_object().ok_or_else(bad)?;
         for (key, value) in profile {
             match (key.as_str(), value.as_str()) {
-                ("gfx", Some("dxmt" | "vulkan")) => {}
+                ("gfx", Some("dxmt" | "mullion" | "vulkan")) => {}
                 ("env", Some(env)) if valid_env(env) => {}
                 _ => return Err(bad()),
             }
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn profile_shape_and_words() {
-        for valid in [r#"{"v":1,"games":{}}"#, r#"{"v":1,"games":{"570":{"gfx":"dxmt","env":"FOO=1 BAR=;"},"12":{}}}"#] {
+        for valid in [r#"{"v":1,"games":{}}"#, r#"{"v":1,"games":{"570":{"gfx":"dxmt","env":"FOO=1 BAR=;"},"12":{}}}"#, r#"{"v":1,"games":{"570":{"gfx":"mullion"}}}"#] {
             validate(valid.as_bytes()).unwrap();
         }
         for bad in [r#"{"v":2,"games":{}}"#, r#"{"v":1,"games":[]}"#, r#"{"v":1,"games":{"../1":{}}}"#, r#"{"v":1,"games":{"1":{"gfx":"default"}}}"#, r#"{"v":1,"games":{"1":{"driver":"moltenvk"}}}"#, r#"{"v":1,"games":{"1":{"env":"FOO=1 command"}}}"#, r#"{"v":1,"games":{"1":{"env":"1BAD=x"}}}"#, r#"{"v":1,"games":{"1":{"env":"FOO=1\nBAR=2"}}}"#] {

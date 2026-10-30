@@ -19,6 +19,18 @@
 #   oldlayer  an older layer (no stock copies) dropped $STATE/orig on a Vulkan boot and left DXMT files behind: the
 #             next Vulkan boot puts Proton's files back from $STATE/stock, the next DXMT boot keeps them as originals;
 #             a Proton update makes the stock copy stale (never restored)
+#   mullion   steamac.gfx=mullion (fresh tree): DXVK's set is Mullion's, so are vkd3d-proton's d3d12 and d3d12core
+#             (where a Proton has them), winemetal is Mullion's, each x86-64 Proton gets our user_settings.py with
+#             MULLION_CONFIG=d3d12.cpuVisibleHeapMemory=True and its mark names the path; a second run changes nothing
+#   switch    mullion -> dxmt: DXMT's files replace Mullion's, vkd3d-proton's own d3d12core is back, user_settings.py
+#             is gone; dxmt -> mullion -> vulkan: every Proton tree is stock again byte for byte
+#   settings  a user_settings.py that is not ours is never written or removed (a WARNING says MULLION_CONFIG is missing)
+#   mlost     Mullion's d3d12.dll (no dxmt/mullion string in it) is recognised without the kept checksums: a Vulkan
+#             boot after the kept originals were lost restores vkd3d-proton's from the stock copy
+#   mnomark   Mullion's d3d12.dll alone in a Proton with no mark and no state (no other file names Mullion or DXMT):
+#             a Vulkan boot still recognises it as this layer's, never keeps it as Proton's stock copy, and warns
+#             (before: it became the "stock" d3d12.dll silently)
+#   mmissing  steamac.gfx=mullion without Mullion's files leaves everything stock
 # usage: scripts/test/steam-gfx-path.sh
 set -u
 S=$(cd "$(dirname "$0")/../.." && pwd)/guest/layer/usr/lib/steamac/steam-gfx-path
@@ -49,7 +61,8 @@ for f in d3d11 dxgi d3d10core winemetal d3d12; do blob "$X/x86_64-windows/$f.dll
 snap() { (cd "$T" && find steam -type f | LC_ALL=C sort | while read -r f; do echo "$f $(cksum < "$f")"; done
   find steam -type l | LC_ALL=C sort | while read -r f; do echo "$f -> $(readlink "$f")"; done); }
 run() { echo "$1" > "$T/cmdline"
-  STEAMAC_CMDLINE=$T/cmdline STEAMAC_STEAM_ROOT=$ST STEAMAC_DXMT_DIR=${2:-$X} STEAMAC_GFX_STATE=$T/state HOME=$T bash "$S" 2>>"$T/log"; }
+  STEAMAC_CMDLINE=$T/cmdline STEAMAC_STEAM_ROOT=$ST STEAMAC_DXMT_DIR=${2:-$X} STEAMAC_MULLION_DIR=${MU:-$T/none} \
+    STEAMAC_GFX_STATE=$T/state HOME=$T bash "$S" 2>>"$T/log"; }
 isdxmt() { [ "$(head -c 64 "$1" | tr -d m)" = "" ] && [ "$(tail -c +65 "$1" | head -c 16 | tr -d '\0')" = "" ] \
   && [ "$(tail -c +81 "$1" | tr -d m)" = "" ]; }
 
@@ -165,5 +178,92 @@ run "steamac.gfx=dxmt" "$DB"; rm -rf "$T/state/orig"; echo 9 > "$P1/version"; : 
 run "steamac.gfx=vulkan" "$DA"
 grep -q dxmt "$D1/dxgi.dll" || fail oldlayer "stale stock copy (older Proton version) restored"
 grep -q "WARNING: no original of" "$T/log" || fail oldlayer "no warning for a stale stock copy"
+
+# mullion: a fresh tree and state; Mullion's payload names itself in every file but d3d12.dll (a loader)
+rm -rf "$T/state" "$ST/steamapps/compatdata"; : > "$T/log"
+for p in "$P1" "$P2"; do
+  for f in d3d11 dxgi d3d10core d3d9; do blob "$p/files/lib/wine/dxvk/x86_64-windows/$f.dll" v; done; echo 1 > "$p/version"
+  rm -f "$p/files/lib/wine/x86_64-windows/winemetal.dll" "$p/files/lib/wine/x86_64-unix/winemetal.so" "$p/files/lib/wine/.steamac-dxmt"
+done
+for f in d3d12 d3d12core; do blob "$V/$f.dll" r; done
+for a in 100 200; do
+  s=$ST/steamapps/compatdata/$a/pfx/drive_c/windows/system32; mkdir -p "$s"
+  for f in d3d11 dxgi d3d10core; do cp "$D1/$f.dll" "$s/"; done; blob "$s/kernel32.dll" k
+done
+mublob() { { printf 'mullion::D3D12Device'; head -c 279 /dev/zero | tr '\0' "$2"; } > "$1"; }
+MU=$T/mullion; mkdir -p "$MU/x86_64-windows" "$MU/x86_64-unix"
+for f in d3d11 dxgi d3d10core d3d12core winemetal; do mublob "$MU/x86_64-windows/$f.dll" e; done
+blob "$MU/x86_64-windows/d3d12.dll" q; blob "$MU/x86_64-unix/winemetal.so" o
+mstock=$(snap)
+ismu() { cmp -s <(head -c 64 "$1") <(head -c 64 "$2") && [ "$(tail -c +65 "$1" | head -c 16 | tr -d '\0')" = "" ] \
+  && cmp -s <(tail -c +81 "$1") <(tail -c +81 "$2"); }   # installed file $1 is a native copy of payload file $2
+USET="user_settings = {\"MULLION_CONFIG\": \"d3d12.cpuVisibleHeapMemory=True\"}"
+run "quiet steamac.gfx=mullion"
+for p in "$P1" "$P2"; do
+  W=$p/files/lib/wine
+  for f in d3d11 dxgi d3d10core; do ismu "$W/dxvk/x86_64-windows/$f.dll" "$MU/x86_64-windows/$f.dll" || fail mullion "$p $f.dll is not Mullion's (native copy)"; done
+  cmp -s "$W/dxvk/x86_64-windows/d3d9.dll" <(head -c 300 /dev/zero | tr '\0' v) || fail mullion "$p d3d9 touched"
+  cmp -s "$W/x86_64-windows/winemetal.dll" "$MU/x86_64-windows/winemetal.dll" || fail mullion "$p winemetal.dll"
+  cmp -s "$W/x86_64-unix/winemetal.so" "$MU/x86_64-unix/winemetal.so" || fail mullion "$p winemetal.so"
+  [ "$(tail -n 1 "$p/user_settings.py" 2>/dev/null)" = "$USET" ] || fail mullion "$p user_settings.py: $(cat "$p/user_settings.py" 2>&1 | tr '\n' '|')"
+  [ "$(cat "$W/.steamac-dxmt" 2>/dev/null)" = mullion ] || fail mullion "$p mark does not name mullion"
+done
+for f in d3d12 d3d12core; do ismu "$V/$f.dll" "$MU/x86_64-windows/$f.dll" || fail mullion "P1 $f.dll is not Mullion's (native copy)"; done
+[ -e "$P2/files/lib/wine/vkd3d-proton" ] && fail mullion "P2 got a vkd3d-proton directory"
+[ -e "$P3/user_settings.py" ] && fail mullion "ARM64 Proton got a user_settings.py"
+[ "$(tr -d a < "$P3/files/lib/wine/vkd3d-proton/x86_64-windows/d3d12.dll")" = "" ] || fail mullion "ARM64 Proton d3d12.dll touched"
+for a in 100 200; do
+  cmp -s "$ST/steamapps/compatdata/$a/pfx/drive_c/windows/system32/winemetal.dll" "$MU/x86_64-windows/winemetal.dll" || fail mullion "prefix $a placeholder"
+done
+grep -q "Mullion in $P1" "$T/log" || fail mullion "no 'Mullion in' log line: $(tr '\n' '|' < "$T/log")"
+s3=$(snap); run "steamac.gfx=mullion"; [ "$(snap)" = "$s3" ] || fail mullion "second run changed files"
+# switch: mullion -> dxmt
+X=$T/dxmt; run "steamac.gfx=dxmt"
+for f in d3d11 dxgi d3d10core; do isdxmt "$D1/$f.dll" || fail switch "P1 $f.dll is not DXMT's after mullion -> dxmt"; done
+isdxmt "$V/d3d12.dll" || fail switch "P1 d3d12.dll is not DXMT's after mullion -> dxmt"
+[ "$(tr -d r < "$V/d3d12core.dll")" = "" ] || fail switch "vkd3d-proton's d3d12core.dll not back after mullion -> dxmt"
+cmp -s "$P1/files/lib/wine/x86_64-unix/winemetal.so" "$X/x86_64-unix/winemetal.so" || fail switch "winemetal.so not DXMT's"
+for p in "$P1" "$P2"; do
+  [ -e "$p/user_settings.py" ] && fail switch "$p user_settings.py left on the DXMT path"
+  [ "$(cat "$p/files/lib/wine/.steamac-dxmt")" = dxmt ] || fail switch "$p mark does not name dxmt"
+done
+# dxmt -> mullion -> vulkan: stock byte for byte
+run "steamac.gfx=mullion"; isdxmt "$V/d3d12.dll" && fail switch "DXMT's d3d12.dll left on the Mullion path"
+ismu "$V/d3d12core.dll" "$MU/x86_64-windows/d3d12core.dll" || fail switch "d3d12core.dll not Mullion's after dxmt -> mullion"
+run "steamac.gfx=vulkan"
+got=$(snap | grep -v "/compatdata/"); want=$(echo "$mstock" | grep -v "/compatdata/")
+[ "$got" = "$want" ] || fail switch "Proton trees differ from stock after mullion -> vulkan: $(diff <(echo "$want") <(echo "$got") | head -4 | tr '\n' '|')"
+for a in 100 200; do
+  s=$ST/steamapps/compatdata/$a/pfx/drive_c/windows/system32
+  [ -e "$s/winemetal.dll" ] && fail switch "prefix $a winemetal.dll left"
+  for f in d3d11 dxgi d3d10core; do grep -q mullion "$s/$f.dll" && fail switch "prefix $a $f.dll still Mullion's"; done
+done
+# settings: the user's own user_settings.py stays as it is
+printf 'user_settings = {"PROTON_LOG": "1"}\n' > "$P2/user_settings.py"; cp "$P2/user_settings.py" "$T/user.py"; : > "$T/log"
+run "steamac.gfx=mullion"
+cmp -s "$P2/user_settings.py" "$T/user.py" || fail settings "the user's user_settings.py was rewritten"
+grep -q "WARNING: $P2/user_settings.py is not steamac's" "$T/log" || fail settings "no warning: $(tr '\n' '|' < "$T/log")"
+[ "$(tail -n 1 "$P1/user_settings.py")" = "$USET" ] || fail settings "P1 lost its user_settings.py"
+run "steamac.gfx=vulkan"
+cmp -s "$P2/user_settings.py" "$T/user.py" || fail settings "the user's user_settings.py was removed on the Vulkan path"
+[ -e "$P1/user_settings.py" ] && fail settings "our user_settings.py left on the Vulkan path"
+rm -f "$P2/user_settings.py"
+# mlost: the kept originals and checksums lost after a Mullion boot (an older layer's Vulkan boot dropped them)
+run "steamac.gfx=mullion"; rm -rf "$T/state/orig"; rm -f "$P1/files/lib/wine/.steamac-dxmt"; : > "$T/log"
+run "steamac.gfx=vulkan"
+[ "$(tr -d r < "$V/d3d12.dll")" = "" ] || fail mlost "Mullion's d3d12.dll (no marker) not replaced by vkd3d-proton's stock copy"
+[ "$(tr -d r < "$V/d3d12core.dll")" = "" ] || fail mlost "vkd3d-proton's d3d12core.dll not back from the stock copy"
+for f in d3d11 dxgi d3d10core; do cmp -s "$D1/$f.dll" "$D1/d3d9.dll" || fail mlost "P1 $f.dll not restored from the stock copy"; done
+grep -rlq q "$T/state/stock" 2>/dev/null && fail mlost "Mullion's d3d12.dll kept as Proton's stock copy"
+# mnomark: only Mullion's (marker-less) d3d12.dll left behind, nothing kept
+rm -rf "$T/state"; : > "$T/log"
+for f in d3d12 d3d12core; do blob "$V/$f.dll" r; done
+cp "$MU/x86_64-windows/d3d12.dll" "$V/d3d12.dll"; dd if=/dev/zero of="$V/d3d12.dll" bs=1 seek=64 count=16 conv=notrunc status=none
+run "steamac.gfx=vulkan"
+grep -rlq q "$T/state/stock" 2>/dev/null && fail mnomark "Mullion's d3d12.dll kept as Proton's stock copy"
+grep -q "WARNING: no original of d3d12.dll kept for $P1" "$T/log" || fail mnomark "no warning: $(tr '\n' '|' < "$T/log")"
+for f in d3d12 d3d12core; do blob "$V/$f.dll" r; done; rm -rf "$T/state"
+# mmissing: no Mullion files in the layer
+s4=$(snap); MU=$T/none run "steamac.gfx=mullion"; [ "$(snap)" = "$s4" ] || fail mmissing "changed files without Mullion's files"
 echo "steam-gfx-path: $([ $fails = 0 ] && echo passed || echo FAILED)"
 exit $((fails > 0))

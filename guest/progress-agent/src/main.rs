@@ -34,7 +34,8 @@
 //!                                 memory and MemTotal - MemAvailable, both in KiB
 //!   game-proton <appid> <version>  once per run when compatdata version is readable:
 //!                                 first token of the first line, printable ASCII, <= 64 chars
-//!   game-gfx <appid> dxmt|vulkan  immediately after game-proton, from that Proton's DXMT marker
+//!   game-gfx <appid> dxmt|mullion|vulkan  immediately after game-proton, from that Proton's
+//!                                 steam-gfx-path mark (its text names mullion; empty = an older layer's DXMT)
 //!   profiles-ok <sha256> applied|pending  exact received JSON digest; pending needs a Steam restart
 //!   game-exit <appid>             last Steam scope disappeared (games.rs);
 //!                                 app ids 0 and 769 are excluded from per-game statistics

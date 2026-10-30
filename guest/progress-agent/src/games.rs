@@ -98,12 +98,18 @@ fn proton_info(libraries: &[PathBuf], appid: u32) -> Option<(String, &'static st
         let Ok(text) = std::fs::read_to_string(prefix.join("version")) else { continue };
         if let Some(version) = version_token(&text) {
             // Proton's config_info stores fonts_dir then lib_dir after its version.
-            // Use the actual run's tool, never the global DXMT boot toggle.
-            let dxmt = std::fs::read_to_string(prefix.join("config_info")).ok()
+            // Use the actual run's tool, never the global DXMT boot toggle. steam-gfx-path's mark
+            // in that tool names the path (mullion); an empty one is an older layer's DXMT.
+            let mark = std::fs::read_to_string(prefix.join("config_info")).ok()
                 .and_then(|info| info.lines().nth(2).map(PathBuf::from))
                 .filter(|lib| lib.is_absolute())
-                .is_some_and(|lib| lib.join("wine/.steamac-dxmt").is_file());
-            return Some((version, if dxmt { "dxmt" } else { "vulkan" }));
+                .and_then(|lib| std::fs::read_to_string(lib.join("wine/.steamac-dxmt")).ok());
+            let gfx = match mark.as_deref().map(str::trim) {
+                None => "vulkan",
+                Some("mullion") => "mullion",
+                Some(_) => "dxmt",
+            };
+            return Some((version, gfx));
         }
     }
     None
@@ -300,6 +306,24 @@ mod tests {
         std::fs::write(lib.join("wine/.steamac-dxmt"), "").unwrap();
         f.tick(0);
         assert_eq!(f.lines(), ["game-start 570", "game-proton 570 10.0-104", "game-gfx 570 dxmt"]);
+    }
+
+    #[test]
+    fn gfx_names_the_path_in_the_marker() {
+        for (mark, gfx) in [("dxmt\n", "dxmt"), ("mullion\n", "mullion")] {
+            let mut f = Fixture::new();
+            f.scope("app-steam-app570-1.scope", 1024);
+            let prefix = f.games.steam_root.join("steamapps/compatdata/570");
+            let lib = f.root.join("Proton 10.0/files/lib");
+            std::fs::create_dir_all(&prefix).unwrap();
+            std::fs::create_dir_all(lib.join("wine")).unwrap();
+            std::fs::write(prefix.join("version"), "10.0-104\n").unwrap();
+            std::fs::write(prefix.join("config_info"), format!("10.0-104\n/fonts/\n{}/\n/steam/\n", lib.display())).unwrap();
+            std::fs::write(lib.join("wine/.steamac-dxmt"), mark).unwrap();
+            f.tick(0);
+            let want = format!("game-gfx 570 {gfx}");
+            assert_eq!(f.lines(), ["game-start 570", "game-proton 570 10.0-104", want.as_str()]);
+        }
     }
 
     #[test]

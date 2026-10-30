@@ -193,6 +193,24 @@ class CompatDefaultTests(unittest.TestCase):
         self.run_mode("vulkan")
         self.assertEqual(self.mapped(), {})
 
+    def test_mullion_boot_maps_only_mullion_profiles(self):
+        # Mullion (steamac.gfx=mullion): its profiles get Proton 10.0, DXMT's get Steam's tool back, and the
+        # reverse on a DXMT boot.
+        self.write(CONFIG % "")
+        self.profiles.write_text(json.dumps({"v": 1, "games": {
+            "894020": {"gfx": "mullion"}, "3564860": {"gfx": "dxmt"}, "270880": {"gfx": "mullion"},
+        }}))
+        self.run_mode("dxmt")
+        self.assertEqual(self.mapped(), {"3564860": compat.OURS})
+        self.run_mode("mullion")
+        self.assertEqual(self.mapped(), {"894020": compat.OURS})
+        self.assertEqual(json.loads(self.marker.read_text())["mapped"], ["894020"])
+        self.run_mode("mullion")   # idempotent
+        self.assertEqual(self.mapped(), {"894020": compat.OURS})
+        self.run_mode("vulkan")
+        self.assertEqual(self.mapped(), {})
+        self.assertFalse(self.marker.exists())
+
     def test_steam_start_snapshot_wins_over_new_host_edit(self):
         self.write(CONFIG % "")
         snapshot = Path(self.env["XDG_RUNTIME_DIR"]) / "steamac/game-profiles.json"

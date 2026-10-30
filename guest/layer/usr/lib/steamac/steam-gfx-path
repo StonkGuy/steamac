@@ -1,38 +1,55 @@
 #!/bin/bash
-# steamac: the launcher's Settings > Advanced D3D11 on Metal setting (kernel command line steamac.gfx=dxmt|vulkan)
-# for Direct3D 10/11 games in Proton.
+# steamac: the launcher's graphics path (kernel command line steamac.gfx=dxmt|mullion|vulkan) for Direct3D games in
+# Proton.
 #   dxmt    every installed Proton's DXVK set (files/lib/wine/dxvk/x86_64-windows: d3d11, dxgi, d3d10core)
 #           becomes DXMT, and so does its vkd3d-proton d3d12.dll (files/lib/wine/vkd3d-proton/x86_64-windows) when
 #           the payload has one (DXMT's dxgi is in place then, so vkd3d-proton's d3d12 would lack its DXVK dxgi), and winemetal (the unixlib that remotes Metal to the Mac over the wmtr virtio-gpu
 #           context) is added next to Wine's builtins and linked into Proton's prefix template. Proton copies its DXVK set into each game's prefix on
 #           every start, so games get DXMT without launch options or a separate compatibility tool. The
 #           replaced files are kept in $STATE and Proton updates are followed (--watch re-applies).
+#   mullion (experimental) the same with Mullion's payload ($MULLION, a DXMT fork with Direct3D 12, its unix calls
+#           remoted by the Mullion flavour of wmtr): its d3d11, dxgi and d3d10core replace DXVK's set, its d3d12 and
+#           d3d12core vkd3d-proton's, and its winemetal is added. Each Proton set up so gets a user_settings.py (Proton's
+#           own per-tool environment: every entry goes into the environment of the games it starts unless a launch
+#           option sets it) with MULLION_CONFIG=d3d12.cpuVisibleHeapMemory=True: under wmtr an MTLHeap's memory stays
+#           on the Mac, so buffers placed in upload/readback heaps need Mullion's shared-buffer backing. A
+#           user_settings.py that is not ours is left alone (with a warning).
 #   vulkan  (or no steamac.gfx=) restores Proton's own files byte for byte and removes everything added,
 #           also the winemetal.dll placeholder in prefixes; Proton puts its DXVK back into each prefix.
-# The DXMT files ship in the steamac layer ($PAYLOAD, read-only). DXMT's dlls are x86-64, so only an x86-64
-# Proton can use them: before Steam starts, steam-compat-default sets only installed Windows games
-# with a DXMT profile and no tool of their own to Proton 10.0 (see that script).
+# The DXMT and Mullion files ship in the steamac layer ($DXMT, $MULLION, read-only). Their dlls are x86-64, so only
+# an x86-64 Proton can use them: before Steam starts, steam-compat-default sets only installed Windows games
+# whose profile asks for the booted path (gfx=dxmt or gfx=mullion) and that have no tool of their own to
+# Proton 10.0 (see that script). Switching between dxmt and mullion replaces one payload's files with the other's;
+# Proton's originals stay kept.
 # Idempotent; run as an ExecStartPre of steam.service (Steam is not running then) and, with --watch, while
 # the session runs (Steam downloading Proton 10.0 is followed there).
 # Usage: steam-gfx-path [--watch]
-# Test overrides: STEAMAC_CMDLINE, STEAMAC_STEAM_ROOT, STEAMAC_DXMT_DIR, STEAMAC_GFX_STATE,
+# Test overrides: STEAMAC_CMDLINE, STEAMAC_STEAM_ROOT, STEAMAC_DXMT_DIR, STEAMAC_MULLION_DIR, STEAMAC_GFX_STATE,
 # STEAMAC_COMPAT_DEFAULT (the steam-compat-default to run).
 set -uo pipefail
 
 CMDLINE=${STEAMAC_CMDLINE:-/proc/cmdline}
 STEAM=${STEAMAC_STEAM_ROOT:-$HOME/.local/share/Steam}
-PAYLOAD=${STEAMAC_DXMT_DIR:-/usr/lib/steamac/dxmt}
+DXMT=${STEAMAC_DXMT_DIR:-/usr/lib/steamac/dxmt}
+MULLION=${STEAMAC_MULLION_DIR:-/usr/lib/steamac/mullion}
 STATE=${STEAMAC_GFX_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/steamac/gfx-path}
-# <directory under files/lib/wine>/<dll>: Proton's copy that DXMT's replaces
-DLLS="dxvk/d3d11 dxvk/dxgi dxvk/d3d10core vkd3d-proton/d3d12"
+# <directory under files/lib/wine>/<dll>: Proton's copy that the payload's replaces (a payload without the file leaves
+# Proton's: DXMT has no d3d12core)
+DLLS="dxvk/d3d11 dxvk/dxgi dxvk/d3d10core vkd3d-proton/d3d12 vkd3d-proton/d3d12core"
+# marks a Proton (its files/lib/wine) or prefix this script changed; a Proton's holds the path's name
 MARK=.steamac-dxmt
+# Mullion's options for the games of a Proton it is in (user_settings.py, see above)
+MULLION_CONFIG=d3d12.cpuVisibleHeapMemory=True
+SETTINGS_MARK="# steamac steam-gfx-path: Mullion's options for the games this Proton starts"
 log() { echo "steam-gfx-path: $*" >&2; }
 
 mode=vulkan
 cmdline=$(cat "$CMDLINE" 2>/dev/null)
-[[ $cmdline =~ (^|[[:space:]])steamac\.gfx=dxmt($|[[:space:]]) ]] && mode=dxmt
-if [[ $mode == dxmt && ! -f $PAYLOAD/x86_64-unix/winemetal.so ]]; then
-    log "no DXMT files in $PAYLOAD; using Vulkan"; mode=vulkan
+[[ $cmdline =~ (^|[[:space:]])steamac\.gfx=(dxmt|mullion)($|[[:space:]]) ]] && mode=${BASH_REMATCH[2]}
+PAYLOAD=$DXMT NAME=DXMT
+[[ $mode == mullion ]] && PAYLOAD=$MULLION NAME=Mullion
+if [[ $mode != vulkan && ! -f $PAYLOAD/x86_64-unix/winemetal.so ]]; then
+    log "no $NAME files in $PAYLOAD; using Vulkan"; mode=vulkan
 fi
 
 # Proton installs: Steam's (steamapps/common/Proton*) and custom ones (compatibilitytools.d).
@@ -56,11 +73,12 @@ native_copy() { # src dst
         && mv -f "$2.steamac-tmp" "$2"
 }
 same_as_native() { # payload file, candidate
+    [[ -f $1 && -f $2 ]] && (( $(wc -c < "$1") == $(wc -c < "$2") )) || return 1
     local t; t=$(mktemp); cp "$1" "$t"; dd if=/dev/zero of="$t" bs=1 seek=64 count=16 conv=notrunc status=none
     cmp -s "$t" "$2"; local rc=$?; rm -f "$t"; return $rc
 }
 install_file() { cmp -s "$1" "$2" || { cp -f "$1" "$2.steamac-tmp" && mv -f "$2.steamac-tmp" "$2"; }; }
-# A DXMT file this script installed, from this or an earlier DXMT payload (a layer update changes the payload):
+# A file this script installed, from this or an earlier DXMT or Mullion payload (a layer update changes the payload):
 # their checksums are kept in $STATE/orig/*/installed.
 ours() { # file
     local c; c=$(cksum < "$1" 2>/dev/null | cut -d' ' -f1) || return 1
@@ -68,8 +86,13 @@ ours() { # file
 }
 
 # Any DXMT build's PE files, also of a payload this script never saw: they are C++ (mangled names start _ZN4dxmt,
-# a dxmt:: namespace) and DXVK's files carry no such string.
-is_dxmt() { grep -aqi dxmt "$1" 2>/dev/null; }
+# a dxmt:: namespace) and DXVK's files carry no such string. Mullion (a DXMT fork) names itself in its files, except in
+# its d3d12.dll, a small loader of its d3d12core.dll: that one is recognised as this layer's file.
+is_dxmt() {
+    grep -aqiE 'dxmt|mullion' "$1" 2>/dev/null && return 0
+    local m; m=$MULLION/x86_64-windows/$(basename "$1")
+    [[ -f $m ]] && same_as_native "$m" "$1"
+}
 
 # A second copy of Proton's originals, per Proton and Proton version: $STATE/stock/<key>/{version,<dll>.dll}. Layers
 # from before it existed (app bundles sharing the guest disk) delete $STATE/orig/<key> on a Vulkan boot even where
@@ -150,17 +173,42 @@ apply_dxmt() {
     # template gets a link to it, which Proton puts into every prefix it creates or updates
     local T=$1/files/share/default_pfx/drive_c/windows/system32
     [[ -d $T && ! -L $T/winemetal.dll ]] && ln -sfn ../../../../../lib/wine/x86_64-windows/winemetal.dll "$T/winemetal.dll"
+    if [[ $mode == mullion ]]; then user_settings "$p" on; else user_settings "$p" off; fi
     printf '%s\n' "$p" > "$B/path"
     vkey "$p" > "$B/version"
-    touch "$W/$MARK"
-    (( changed )) && log "DXMT in $p"
+    [[ $(cat "$W/$MARK" 2>/dev/null) == "$mode" ]] || printf '%s\n' "$mode" > "$W/$MARK"
+    (( changed )) && log "$NAME in $p"
     return 0
 }
 
-# DXMT's file in Proton's tree: this payload's native copy, one this script installed, or any other DXMT build
-# (another steamac layer's payload, e.g. after switching between app bundles that share the guest disk)
-dxmt_installed() { # payload file, installed file
-    { [[ -f $1 ]] && same_as_native "$1" "$2"; } || ours "$2" || is_dxmt "$2"
+# Proton's user_settings.py with Mullion's options (on), or without ours (off). Only a file this script wrote (its
+# first line is $SETTINGS_MARK) is replaced or removed.
+user_settings() { # proton, on|off
+    local f=$1/user_settings.py want
+    if [[ -f $f ]] && [[ $(head -n 1 "$f") != "$SETTINGS_MARK" ]]; then
+        [[ $2 == on ]] && log "WARNING: $f is not steamac's: games of $(basename "$1") run without MULLION_CONFIG=$MULLION_CONFIG"
+        return 0
+    fi
+    if [[ $2 == on ]]; then
+        want=$(printf '%s\n%s' "$SETTINGS_MARK" "user_settings = {\"MULLION_CONFIG\": \"$MULLION_CONFIG\"}")
+        [[ $(cat "$f" 2>/dev/null) == "$want" ]] && return 0
+        printf '%s\n' "$want" > "$f.steamac-tmp" && mv -f "$f.steamac-tmp" "$f"
+    elif [[ -f $f ]]; then
+        # with the bytecode Proton's import may have left; its own __pycache__ (filelock) stays
+        rm -f "$f" "$1"/__pycache__/user_settings.*.pyc
+        rmdir "$1/__pycache__" 2>/dev/null
+    fi
+    return 0
+}
+
+# DXMT's or Mullion's file in Proton's tree: a native copy of this layer's payloads, one this script installed, or any
+# other DXMT build (another steamac layer's payload, e.g. after switching between app bundles that share the guest disk)
+dxmt_installed() { # dll name, installed file
+    local d
+    for d in "$DXMT" "$MULLION"; do
+        [[ -f $d/x86_64-windows/$1.dll ]] && same_as_native "$d/x86_64-windows/$1.dll" "$2" && return 0
+    done
+    ours "$2" || is_dxmt "$2"
 }
 
 restore() {
@@ -176,7 +224,7 @@ restore() {
         fi
         # Proton's own file is there (never replaced, or an update restored it): nothing to do; a kept original
         # is then stale and goes with $B
-        if ! dxmt_installed "$PAYLOAD/x86_64-windows/$f.dll" "$D/$f.dll"; then
+        if ! dxmt_installed "$f" "$D/$f.dll"; then
             stock_keep "$p" "$f" "$D/$f.dll"; continue
         fi
         local o; o=$(original "$p" "$f")
@@ -191,9 +239,10 @@ restore() {
     done
     rm -f "$W/x86_64-windows/winemetal.dll" "$W/x86_64-unix/winemetal.so" "$W/$MARK" \
         "$1/files/share/default_pfx/drive_c/windows/system32/winemetal.dll"
+    user_settings "$p" off
     (( keep )) || rm -rf "$B"
     if [[ -n $broken ]]; then
-        log "WARNING: no original of${broken} kept for $p; DXMT's file stays and Direct3D 11 games on the Vulkan path will fail. Repair: in Steam, $(basename "$p") > Properties > Installed Files > Verify integrity of tool files"
+        log "WARNING: no original of${broken} kept for $p; DXMT's file stays and Direct3D games on the Vulkan path will fail. Repair: in Steam, $(basename "$p") > Properties > Installed Files > Verify integrity of tool files"
         return 1
     fi
     log "Proton's DXVK back in $p"
@@ -213,8 +262,8 @@ stock_all() { # proton
 
 reconcile() {
     local p x
-    if [[ $mode == dxmt ]]; then
-        while read -r p; do apply_dxmt "$p" || log "cannot set up DXMT in $p"; done < <(protons)
+    if [[ $mode != vulkan ]]; then
+        while read -r p; do apply_dxmt "$p" || log "cannot set up $NAME in $p"; done < <(protons)
         # winemetal is not in Proton's prefix template: Wine finds that builtin only through system32
         while read -r x; do
             install_file "$PAYLOAD/x86_64-windows/winemetal.dll" "$x/drive_c/windows/system32/winemetal.dll"
@@ -252,7 +301,7 @@ if [[ ${1:-} != --watch ]]; then
     "${STEAMAC_COMPAT_DEFAULT:-$(dirname "$0")/steam-compat-default}" "$mode" || log "default compatibility tool left as it is"
 fi
 reconcile
-[[ ${1:-} == --watch && $mode == dxmt ]] || exit 0
+[[ ${1:-} == --watch && $mode != vulkan ]] || exit 0
 # Steam updates Proton while it runs: re-apply when a Proton's DXVK set or the tool list changes. A Proton
 # Steam downloads (Proton 10.0, see steam-compat-default) appears in common/ before its files are there;
 # Steam rewrites its steamapps/appmanifest_<appid>.acf when the install finishes, so steamapps/ is watched
