@@ -4,6 +4,8 @@
 #                                           uses) + make test
 #   pe      macOS  fetch pe                 Mullion's x86_64-windows dlls (Wine builtins)
 #   client  Linux  fetch client             the guest's winemetal.so (Mullion's unix-call table) + make test-linux
+#   dxmt    macOS  host/dxmt/build.sh fetch llvm native host: the default (DXMT) flavour of the same wmtr tree and
+#                                           its make test, so a Mullion change cannot break the DXMT path unseen
 # Each uploads a workflow artifact; nothing is released. By hand only (Actions > Mullion > Run workflow, or
 # gh workflow run mullion.yml --ref <branch>).
 name: Mullion
@@ -130,3 +132,23 @@ jobs:
           path: mullion-client.tar
           retention-days: 7
           if-no-files-found: error
+
+  dxmt:
+    name: DXMT flavour host library (regression)
+    needs: host # restores the LLVM 15 cache the host job saves; runs whatever the Mullion host build did
+    if: ${{ !cancelled() }}
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - *xcode
+      - name: LLVM 15 cache
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: llvm15-${{ runner.os }}-${{ runner.arch }}-xcode26.6-${{ hashFiles('host/dxmt/build.sh', 'host/dxmt/pin.env') }}
+      - name: DXMT (fetch, llvm, native, host and its tests)
+        run: host/dxmt/build.sh fetch llvm native host
