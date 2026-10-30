@@ -5,8 +5,10 @@
 #                                       self-contained), only when host/vrhost/build.sh built it
 #   Contents/Frameworks/*.dylib         libkrun, libvirglrenderer, libMoltenVK, libvulkan_kosmickrisp
 #                                       (when built: host/kosmickrisp, macOS 26+), libwmtr_host
-#                                       (when built: host/dxmt) + their non-system dependencies
-#                                       (libepoxy), install names @rpath/<name>
+#                                       (when built: host/dxmt), libwmtr_host_mullion (the Mullion path's
+#                                       executor, work/out/mullion-host/lib/libwmtr_host.dylib when built:
+#                                       host/mullion) + their non-system dependencies (libepoxy),
+#                                       install names @rpath/<name>
 #   Contents/Resources/                 gvproxy, Image, initramfs.cpio.gz, steamac-layer.img,
 #                                       desync + steamdeck-images.pem (Valve RAUC CA) for
 #                                       "Create New Disk…", generated licenses/ notices,
@@ -65,11 +67,11 @@ fi
 
 is_system() { [[ "$1" == /usr/lib/* || "$1" == /System/* ]]; }
 
-# Copy a dylib (and, recursively, its non-system dependencies) into Frameworks.
+# Copy a dylib (and, recursively, its non-system dependencies) into Frameworks, under its own name or the one given.
 FW="$TMP/Contents/Frameworks"
 copy_lib() {
-    local src="$1" name
-    name=$(basename "$src")
+    local src="$1" name=${2:-}
+    [[ -n $name ]] || name=$(basename "$src")
     [[ -f "$FW/$name" ]] && return 0
     cp -L "$src" "$FW/$name"
     chmod u+w "$FW/$name"
@@ -105,6 +107,10 @@ libs=(libkrun.1.dylib libvirglrenderer.1.dylib libMoltenVK.dylib)
 for lib in "${libs[@]}"; do
     copy_lib "$KRUN_PREFIX/lib/$lib"
 done
+# The experimental Mullion path's executor (Settings `mullion` / --graphics-path mullion): wmtr built with MULLION=1
+# has DXMT's file name in its own prefix, so it gets its own name here (LauncherSettings.Wmtr.mullionLibrary).
+MULLION_HOST="$OUT/mullion-host/lib/libwmtr_host.dylib"
+[[ -f "$MULLION_HOST" ]] && copy_lib "$MULLION_HOST" libwmtr_host_mullion.dylib
 
 # The executable: only the bundle's Frameworks on its rpath.
 while read -r rp; do

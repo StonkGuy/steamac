@@ -24,7 +24,7 @@ do {
 }
 if Supervisor.isChild, let driver = Supervisor.profileDriver { options.vulkanDriver = driver }
 settings.bootedDriver = Supervisor.isChild ? options.vulkanDriver : nil
-settings.bootedDXMT = Supervisor.isChild ? options.wmtrLibrary != nil : nil
+settings.bootedDXMT = Supervisor.isChild ? options.graphicsPath == .dxmt : nil
 
 if options.selftestMetalCache { MetalCompilerCache.selfTest() }
 if options.selftestGameLayers { GameLayerSelfTest.run() }

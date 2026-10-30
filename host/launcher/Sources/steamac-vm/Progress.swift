@@ -242,7 +242,7 @@ final class BootProgress {
             onProfilesOK?(parts[1], parts[2] == "pending")
         case "game-gfx":
             guard parts.count == 3, let id = Int(parts[1]), id > 0,
-                  ["dxmt", "vulkan"].contains(parts[2]) else { return }
+                  ["dxmt", "mullion", "vulkan"].contains(parts[2]) else { return }
             onGameEvent?(.gfx(appid: id, gfx: parts[2]))
         case "game-start", "game-exit", "game-mem", "game-proton":
             guard parts.count >= 2, let id = Int(parts[1]), id > 0 else { return }

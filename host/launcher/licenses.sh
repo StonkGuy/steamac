@@ -149,11 +149,32 @@ if wmtr_host or dxmt_guest:
     if wmtr_host:
         archive('DXMT', dxmt_pin['DXMT_FORK_COMMIT'], 'LGPL-2.1-or-later',
                 host + '/libwmtr_host.dylib', dxmt_url, dxmt_tar, ('COPYING.LIB', 'LICENSE', 'LICENSE.OLD'))
-        add('LLVM', dxmt_pin['LLVM_VERSION'], 'Apache-2.0 WITH LLVM-exception',
-            host + '/libwmtr_host.dylib', 'https://github.com/llvm/llvm-project/tree/llvmorg-' + dxmt_pin['LLVM_VERSION'],
-            [('LICENSE', require(root / 'LICENSES/LLVM-15-Apache-2.0-WITH-LLVM-exception.txt').read_bytes())])
-        add('wmtr', '2026', 'BSD-3-Clause', host + '/libwmtr_host.dylib',
-            'https://github.com/StonkGuy/steamac/tree/fex-eac/wmtr', wmtr_docs)
+# Mullion (the experimental Mullion path, a DXMT fork with Direct3D 12): its executor in Frameworks
+# (libwmtr_host_mullion.dylib, bundle.sh) and its dlls in the guest layer, each keyed on its own build output.
+mullion_host = (root / 'work/out/mullion-host/lib/libwmtr_host.dylib').is_file()
+mullion_payload = root / 'work/out/mullion'
+mullion_guest = (mullion_payload / 'x86_64-unix/winemetal.so').is_file()
+if mullion_host or mullion_guest:
+    mullion_pin = dict(re.findall(r'^([A-Z][A-Z0-9_]*)=(.*)$',
+                                  require(root / 'host/mullion/pin.env').read_text(), re.M))
+    mullion_commit = mullion_pin['MULLION_COMMIT']
+    mullion_tar = root / f'work/cache/mullion/mullion-{mullion_commit}.tar.gz'
+    mullion_url = mullion_pin['MULLION_REPO'] + '/tree/' + mullion_commit
+    if mullion_host:
+        archive('Mullion', mullion_pin['MULLION_FORK_COMMIT'][:12], 'LGPL-2.1-or-later',
+                host + '/libwmtr_host_mullion.dylib', mullion_url, mullion_tar, ('COPYING.LIB', 'LICENSE', 'LICENSE.OLD'))
+# The executors' shared parts: LLVM (airconv's shader compiler, the same pinned release in both) and wmtr itself.
+executors = [name for name, built in (('libwmtr_host', wmtr_host), ('libwmtr_host_mullion', mullion_host)) if built]
+if executors:
+    executor_files = host + '/' + (executors[0] if len(executors) == 1 else '{' + ','.join(executors) + '}') + '.dylib'
+    llvm_version = dxmt_pin['LLVM_VERSION'] if wmtr_host else mullion_pin['LLVM_VERSION']
+    add('LLVM', llvm_version, 'Apache-2.0 WITH LLVM-exception',
+        executor_files, 'https://github.com/llvm/llvm-project/tree/llvmorg-' + llvm_version,
+        [('LICENSE', require(root / 'LICENSES/LLVM-15-Apache-2.0-WITH-LLVM-exception.txt').read_bytes())])
+    add('wmtr', '2026', 'BSD-3-Clause', executor_files,
+        'https://github.com/StonkGuy/steamac/tree/fex-eac/wmtr',
+        [('LICENSE', require(root / 'LICENSES/BSD-3-Clause.txt').read_bytes()),
+         ('NOTICE', require(root / 'NOTICE').read_bytes())])
 # The experimental VR host (Contents/MacOS/steamac-vrhost, bundled when host/vrhost/build.sh built it): a separate
 # GPL-3.0-or-later executable (WiVRn code) with a static libcrypto and header-only build dependencies.
 vrhost_bin = root / 'work/out/host/bin/steamac-vrhost'
@@ -341,6 +362,24 @@ if dxmt_guest:
             dxmt_location + 'x86_64-windows/{d3d11,dxgi,d3d10core,winemetal}.dll',
             'https://github.com/misyltoad/mingw-directx-headers/tree/' + headers_commit,
             root / f'work/cache/dxmt/mingw-directx-headers-{headers_commit}.tar.gz',
+            ('COPYING.MinGW-w64.txt',))
+if mullion_guest:
+    mullion_location = layer + ':/usr/lib/steamac/mullion/'
+    mullion_dlls = 'x86_64-windows/{d3d11,dxgi,d3d10core,d3d12,d3d12core,winemetal}.dll'
+    for dll in ('d3d11', 'dxgi', 'd3d10core', 'd3d12', 'd3d12core', 'winemetal'):
+        require(mullion_payload / 'x86_64-windows' / (dll + '.dll'))
+    archive('Mullion-guest', mullion_pin['MULLION_FORK_COMMIT'][:12], 'LGPL-2.1-or-later',
+            mullion_location + mullion_dlls, mullion_url, mullion_tar, ('COPYING.LIB', 'LICENSE', 'LICENSE.OLD'))
+    add('wmtr-guest-mullion', '2026', 'BSD-3-Clause AND LGPL-2.1-or-later',
+        mullion_location + 'x86_64-unix/winemetal.so',
+        'https://github.com/StonkGuy/steamac/tree/fex-eac/wmtr',
+        [('LICENSE', require(root / 'LICENSES/BSD-3-Clause.txt').read_bytes()),
+         ('NOTICE', require(root / 'NOTICE').read_bytes()),
+         ('COPYING.LIB', require(root / 'LICENSES/LGPL-2.1-only.txt').read_bytes())])
+    archive('Mullion-mingw-directx-headers', mullion_pin['DXHEADERS_COMMIT'], 'LGPL-2.1-or-later',
+            mullion_location + mullion_dlls,
+            'https://github.com/misyltoad/mingw-directx-headers/tree/' + mullion_pin['DXHEADERS_COMMIT'],
+            root / f"work/cache/mullion/mingw-directx-headers-{mullion_pin['DXHEADERS_COMMIT']}.tar.gz",
             ('COPYING.MinGW-w64.txt',))
 own_docs = []
 for filename in ('LICENSE', 'NOTICE'):

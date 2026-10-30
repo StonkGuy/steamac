@@ -201,16 +201,20 @@ final class GameStatsStore: ObservableObject {
     /// What the service should have for `g`: its rating while the game is shared.
     private func wantedRating(_ g: Game) -> GameRating? { g.sharing ? g.rating : nil }
 
+    /// Sessions of the experimental Mullion path (this fork) stay on this Mac: the service's numbers are for the
+    /// paths its users can choose.
+    static func uploadable(gfx: String?) -> Bool { gfx != "mullion" }
+
     private func nextJob() -> Job? {
         for g in games where g.sharing {
-            if let s = g.sessions.last(where: { $0.state == .pending }),
+            if let s = g.sessions.last(where: { $0.state == .pending && Self.uploadable(gfx: $0.report.gfx) }),
                let body = try? GameStatsStore.encoder.encode(s.report) {
                 return .session(appid: g.appid, sid: s.report.sid, body: body)
             }
         }
         for g in games where wantedRating(g) != g.sentRating {
             let wanted = wantedRating(g)
-            let last = g.sessions.first?.report
+            let last = g.sessions.first(where: { Self.uploadable(gfx: $0.report.gfx) })?.report
             let report = GameRatingReport(
                 install: install, launcher: GameStatsStore.launcherVersion, appid: g.appid, game: g.name,
                 rating: wanted?.rawValue ?? "none", mac: .current,
@@ -223,7 +227,7 @@ final class GameStatsStore: ObservableObject {
     }
 
     var pendingCount: Int {
-        games.filter(\.sharing).reduce(0) { $0 + $1.sessions.filter { $0.state == .pending }.count }
+        games.filter(\.sharing).reduce(0) { $0 + $1.sessions.filter { $0.state == .pending && Self.uploadable(gfx: $0.report.gfx) }.count }
     }
 
     /// Upload whatever is due, one request at a time (no-op while sharing is off).

@@ -49,7 +49,7 @@ struct GameProfile: Codable, Equatable {
     }
 
     var summary: String {
-        let graphics = gfx == "dxmt" ? "DXMT" : "Vulkan"
+        let graphics = gfx == "dxmt" ? "DXMT" : gfx == "mullion" ? "Mullion" : "Vulkan"
         let driverName = driver.flatMap(LauncherSettings.VulkanDriver.init(rawValue:))?.name
         return ([graphics] + (driverName.map { [$0] } ?? []) + (env.isEmpty ? [] : [env])).joined(separator: " · ")
     }
@@ -71,6 +71,12 @@ struct GameProfile: Codable, Equatable {
         if event != .gfx(appid: 42, gfx: "dxmt") { failures.append("profiles: game-gfx parsing") }
         progress.guestLine("game-gfx 42 unknown")
         if event != .gfx(appid: 42, gfx: "dxmt") { failures.append("profiles: invalid gfx accepted") }
+        progress.guestLine("game-gfx 42 mullion")
+        if event != .gfx(appid: 42, gfx: "mullion") { failures.append("profiles: game-gfx mullion parsing") }
+        if GameProfile(gfx: "mullion").summary != "Mullion" { failures.append("profiles: Mullion summary") }
+        if GameStatsStore.uploadable(gfx: "mullion") || !GameStatsStore.uploadable(gfx: "dxmt") || !GameStatsStore.uploadable(gfx: nil) {
+            failures.append("profiles: Mullion sessions must stay on this Mac, others not")
+        }
         return failures
     }
 }

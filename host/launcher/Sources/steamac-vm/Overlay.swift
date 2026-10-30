@@ -37,7 +37,7 @@ final class OverlayView: NSView {
     static var gpuFooter: String {
         let gpu = MTLCreateSystemDefaultDevice()?.name ?? "Apple GPU"
         let short = gpu.hasPrefix("Apple ") ? String(gpu.dropFirst(6)) : gpu
-        let path = graphicsPath == .dxmt ? "DXMT" : vulkanDriver.name
+        let path = graphicsPath == .vulkan ? vulkanDriver.name : graphicsPath.name
         return "SteamOS · \(path) · \(short)"
     }
 

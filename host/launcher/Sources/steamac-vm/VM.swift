@@ -137,16 +137,16 @@ final class VM {
         if shutdownFd < 0 { log("warning: krun_get_shutdown_eventfd: \(shutdownFd)"); shutdownFd = -1 }
     }
 
-    /// Settings > Advanced "Allow DXMT" (or --wmtr-lib / --no-wmtr): libkrun (patch 0018) offers the wmtr virtio-gpu
-    /// context type, whose host side is the executor library (the bundled libwmtr_host.dylib unless another is
-    /// chosen), when it builds the GPU; the game's CAMetalLayer goes on top of the VM view (WMTR_PRESENT=overlay).
+    /// Settings > Advanced "Allow DXMT" (or --wmtr-lib / --no-wmtr / --graphics-path): libkrun (patch 0018) offers the
+    /// wmtr virtio-gpu context type, whose host side is the executor library (the bundled libwmtr_host.dylib unless
+    /// another is chosen; Mullion's own for the Mullion path), when it builds the GPU; the game's CAMetalLayer goes on top of the VM view (WMTR_PRESENT=overlay).
     /// Off clears all of it, also when inherited from a shell: the setting decides, not the environment.
     static func applyGraphicsEnv(_ o: Options) {
         if let lib = o.wmtrLibrary {
             setenv("STEAMAC_WMTR", "1", 1)
             setenv("STEAMAC_WMTR_LIB", lib, 1)
             setenv("WMTR_PRESENT", "overlay", 1)
-            log("gpu: graphics path DXMT (wmtr context, \(lib))")
+            log("gpu: graphics path \(o.graphicsPath.name) (wmtr context, \(lib))")
         } else {
             for k in ["STEAMAC_WMTR", "STEAMAC_WMTR_LIB", "WMTR_PRESENT"] { unsetenv(k) }
             log("gpu: graphics path Vulkan")

@@ -86,6 +86,8 @@ private struct GameProfileRow: View {
                     Text("Default").tag("")
                     Text(verbatim: "Vulkan").tag("vulkan")
                     Text(verbatim: "DXMT").tag("dxmt")
+                    // experimental (this fork): only once the Mullion path is chosen, or a profile already has it
+                    if settings.mullion || profile.gfx == "mullion" { Text(verbatim: "Mullion").tag("mullion") }
                 }
                 Picker("Vulkan driver", selection: Binding(get: { profile.driver ?? "" }, set: { value in change { $0.driver = value.isEmpty ? nil : value } })) {
                     Text("Default").tag("")

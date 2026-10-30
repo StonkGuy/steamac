@@ -79,8 +79,11 @@ struct Options {
     /// Experimental wmtr context type: its executor library (STEAMAC_WMTR_LIB, set by VM.start
     /// with STEAMAC_WMTR=1); nil = off.
     var wmtrLibrary: String?
-    /// The graphics path of this start: DXMT when the wmtr context type is offered (wmtrLibrary), else Vulkan.
-    var graphicsPath: LauncherSettings.GraphicsPath { wmtrLibrary == nil ? .vulkan : .dxmt }
+    /// The wmtr context runs Mullion (its executor and, in the guest, its dlls) instead of DXMT: `--graphics-path
+    /// mullion`, or the `mullion` setting with Allow DXMT on. Experimental.
+    var mullion = false
+    /// The graphics path of this start: DXMT (Mullion) when the wmtr context type is offered (wmtrLibrary), else Vulkan.
+    var graphicsPath: LauncherSettings.GraphicsPath { wmtrLibrary == nil ? .vulkan : mullion ? .mullion : .dxmt }
     var selftestGraphicsPath = false
     /// Settings > Advanced "Frame latency" (kernel cmdline `steamac.frame_latency=1`): the guest's
     /// DXVK config gets dxgi.maxFrameLatency = 1 for the Vulkan path. Default false: unset.
@@ -172,7 +175,7 @@ struct Options {
                       [--krun-log-level 0-5] [--perf-stats]
                       [--no-crash-reports] [--steam-client frame|deck|deckbeta]
                       [--vulkan-driver moltenvk|kosmickrisp] [--wmtr-lib PATH | --no-wmtr]
-                      [--graphics-path dxmt|vulkan] [--frame-latency | --no-frame-latency]
+                      [--graphics-path dxmt|mullion|vulkan] [--frame-latency | --no-frame-latency]
                       [--lan-remote-play | --no-lan-remote-play]
                       [--vr | --no-vr] [--vr-bitrate MBIT] [--vr-size WxH]
                       [--vr-codec auto|hevc|h264] [--no-vr-pair-on-request] [--no-vr-audio]
@@ -186,7 +189,7 @@ struct Options {
            steamac-vm --selftest-metal-cache
            steamac-vm --selftest-game-layers
            steamac-vm --selftest-l10n
-           steamac-vm --selftest-graphics-path [--graphics-path dxmt|vulkan]
+           steamac-vm --selftest-graphics-path [--graphics-path dxmt|mullion|vulkan]
            steamac-vm --selftest-pointer
            steamac-vm --create-disk PATH [--branch stable|rc] [--home-gib N]
                       [--password PW] [--keep-cache] [--accept-eula]
@@ -276,7 +279,11 @@ struct Options {
                            (default: Settings > Advanced "Allow DXMT", off unless changed)
       --no-wmtr            the guest gets no wmtr context type for this run
       --graphics-path P    dxmt: --wmtr-lib with the bundled executor; vulkan: --no-wmtr (scripts of
-                           the earlier "Graphics path" setting)
+                           the earlier "Graphics path" setting); mullion (experimental): the wmtr context
+                           with Mullion's executor (libwmtr_host_mullion.dylib; a later --wmtr-lib names
+                           another build of it) and kernel cmdline steamac.gfx=mullion, which puts Mullion's
+                           dlls (Direct3D 12/11/10) into the guest's x86-64 Protons (default: the setting
+                           "mullion" with "Allow DXMT" on, off unless changed)
       --frame-latency      frame latency mode on (kernel cmdline steamac.frame_latency=1; default:
                            Settings > Advanced "Frame latency", off): the guest's DXVK config gets
                            dxgi.maxFrameLatency = 1 (Vulkan path only), trading some throughput for
@@ -446,9 +453,15 @@ struct Options {
             case "--graphics-path":
                 let v = try value(a)
                 guard let g = LauncherSettings.GraphicsPath(rawValue: v) else {
-                    throw OptionError("--graphics-path: dxmt or vulkan")
+                    throw OptionError("--graphics-path: dxmt, mullion or vulkan")
                 }
-                o.wmtrLibrary = g == .dxmt ? LauncherSettings.Wmtr.path(for: "") : nil
+                // the bundled executor of the path; a later --wmtr-lib replaces it (a dev build of Mullion's)
+                o.mullion = g == .mullion
+                o.wmtrLibrary = switch g {
+                case .dxmt: LauncherSettings.Wmtr.path(for: "")
+                case .mullion: LauncherSettings.Wmtr.mullionPath
+                case .vulkan: nil
+                }
             case "--selftest-graphics-path": o.selftestGraphicsPath = true
             case "--frame-latency": o.frameLatency = true
             case "--no-frame-latency": o.frameLatency = false
@@ -600,7 +613,7 @@ struct Options {
         }
         if !o.isSelftest, let lib = o.wmtrLibrary, let reason = LauncherSettings.Wmtr.unavailableReason(lib) {
             guard !o.explicit.contains("--wmtr-lib") && !o.explicit.contains("--graphics-path") else {
-                throw OptionError("\(o.explicit.contains("--wmtr-lib") ? "--wmtr-lib" : "--graphics-path dxmt"): \(reason)")
+                throw OptionError("\(o.explicit.contains("--wmtr-lib") ? "--wmtr-lib" : "--graphics-path \(o.graphicsPath.rawValue)"): \(reason)")
             }
             log("gpu: wmtr: \(reason); the guest gets no wmtr context type")
             o.wmtrLibrary = nil
@@ -616,7 +629,7 @@ struct Options {
             }
             add("steamac.ssh", o.sshPort == 0 ? "0" : "1")
             add("steamac.steam_client", o.steamClient.rawValue)
-            add("steamac.gfx", o.wmtrLibrary == nil ? "vulkan" : "dxmt")
+            add("steamac.gfx", o.graphicsPath.rawValue)
             add("steamac.gpu_mib", String(VMSizing.gpuBudgetMiB(memMiB: o.memMiB)))
             // only written when on; absent is the default (off), so an explicit =0 needs no key
             if let a = Options.frameLatencyArg(o.frameLatency) { add(a.key, a.value) }
@@ -632,6 +645,13 @@ struct Options {
         }
         try o.validate()
         return (o, overrides)
+    }
+
+    /// The wmtr executor of a start from the settings: off without Allow DXMT; with the `mullion` setting, Mullion's
+    /// own executor (a chosen wmtrLibrary is a DXMT executor, whose unix-call table Mullion's dlls do not share).
+    static func wmtrSettings(wmtr: Bool, library: String, mullion: Bool) -> (library: String?, mullion: Bool) {
+        guard wmtr else { return (nil, false) }
+        return mullion ? (LauncherSettings.Wmtr.mullionPath, true) : (LauncherSettings.Wmtr.path(for: library), false)
     }
 
     /// Fill every value the command line did not set from the saved settings.
@@ -675,11 +695,12 @@ struct Options {
         if given("--steam-client") { ov[.steamClient] = "--steam-client \(steamClient.rawValue)" } else { steamClient = s.steamClient }
         if given("--vulkan-driver") { ov[.vulkanDriver] = "--vulkan-driver \(vulkanDriver.rawValue)" } else { vulkanDriver = s.vulkanDriver }
         if given("--wmtr-lib") || given("--no-wmtr") || given("--graphics-path") {
-            let flag = wmtrLibrary.map { "--wmtr-lib \($0)" } ?? "--no-wmtr"
+            let flag = wmtrLibrary.map { (mullion ? "--graphics-path mullion --wmtr-lib " : "--wmtr-lib ") + $0 } ?? "--no-wmtr"
             ov[.wmtr] = flag
             ov[.wmtrLibrary] = flag
+            ov[.mullion] = flag
         } else {
-            wmtrLibrary = s.wmtr ? LauncherSettings.Wmtr.path(for: s.wmtrLibrary) : nil
+            (wmtrLibrary, mullion) = Options.wmtrSettings(wmtr: s.wmtr, library: s.wmtrLibrary, mullion: s.mullion)
         }
         if given("--frame-latency") || given("--no-frame-latency") {
             ov[.frameLatency] = frameLatency ? "--frame-latency" : "--no-frame-latency"

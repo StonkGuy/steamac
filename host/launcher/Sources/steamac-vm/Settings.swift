@@ -33,7 +33,7 @@ final class LauncherSettings: ObservableObject {
         case soundEnabled, soundOutputUID, soundVolume, soundMute, soundLatency
         // Advanced
         case cpus, memMiB, sshEnabled, sshPort, network, lanRemotePlay, diskImage, steamosBranch, steamClient, vulkanDriver,
-             graphicsPath, frameLatency, wmtr, wmtrLibrary
+             graphicsPath, frameLatency, wmtr, wmtrLibrary, mullion
         // VR
         case vrEnabled, vrBitrateMbps, vrEyeSize, vrCodec, vrPairOnRequest, vrHeadsetAudio, vrGameAppID
         case vrRenderScale, vrUpscaler, vrSharpness, vrForceSRGB, vrKeyframeInterval, vrTCPOnly, vrShowStats
@@ -43,7 +43,7 @@ final class LauncherSettings: ObservableObject {
             case .openFullscreen, .dpiSource, .fixedDPI, .fixedWidthMM, .fixedHeightMM, .refreshRate,
                  .windowWidth, .windowHeight, .windowSizePreset, .retinaResolution, .renderScale, .soundEnabled, .cpus, .memMiB, .sshEnabled,
                  .sshPort, .network, .lanRemotePlay,
-                 .diskImage, .steamClient, .followMacTime, .vulkanDriver, .graphicsPath, .wmtr, .wmtrLibrary, .frameLatency, .vrEnabled,
+                 .diskImage, .steamClient, .followMacTime, .vulkanDriver, .graphicsPath, .wmtr, .wmtrLibrary, .mullion, .frameLatency, .vrEnabled,
                  .vrEyeSize, .vrCodec, .vrPairOnRequest, .vrHeadsetAudio, .vrRenderScale, .vrUpscaler, .vrSharpness,
                  .vrForceSRGB, .vrKeyframeInterval, .vrTCPOnly:
                 return true
@@ -213,21 +213,29 @@ final class LauncherSettings: ObservableObject {
     /// through DXVK, Venus and the host Vulkan driver (classic). The VM process enables the wmtr
     /// virtio-gpu context (libkrun patch 0021) for the lean path; in the guest, the Proton-lean
     /// compatibility tool uses DXMT only when that context is there and plain Proton otherwise.
+    ///
+    /// Mullion (experimental, this fork): the wmtr path with Mullion, a DXMT fork with Direct3D 12, instead of DXMT: its
+    /// own executor library (Wmtr.mullionLibrary) on the Mac and its dlls in the guest (steam-gfx-path,
+    /// steamac.gfx=mullion). No Settings control: `--graphics-path mullion`, or the `mullion` setting with Allow DXMT on.
     enum GraphicsPath: String, CaseIterable, Identifiable {
         case dxmt
+        case mullion
         case vulkan
         var id: String { rawValue }
 
         var name: String {
             switch self {
             case .dxmt: return "DXMT"
+            case .mullion: return "Mullion"
             case .vulkan: return "Vulkan"
             }
         }
 
+        // Mullion has no Settings control: its title and detail appear only in logs, in English.
         var title: String {
             switch self {
             case .dxmt: return String(localized: "DXMT (lean)")
+            case .mullion: return "Mullion (experimental)"
             case .vulkan: return String(localized: "Vulkan (classic)")
             }
         }
@@ -236,6 +244,8 @@ final class LauncherSettings: ObservableObject {
             switch self {
             case .dxmt:
                 return String(localized: "Direct3D 11 games through DXMT, drawn by Metal on the Mac (games need the Proton-lean compatibility tool, chosen once per game in Steam).")
+            case .mullion:
+                return "Direct3D 12, 11 and 10 games through Mullion (a DXMT fork), drawn by Metal on the Mac; games whose profile selects Mullion use Proton 10.0 (x86-64)."
             case .vulkan:
                 return String(localized: "Direct3D through DXVK on Vulkan (Venus) and the Vulkan driver below.")
             }
@@ -253,13 +263,20 @@ final class LauncherSettings: ObservableObject {
 
         /// English diagnostic for logs and command-line errors; nil if this build can use the path.
         var unavailableReason: String? {
-            guard self == .dxmt else { return nil }
-            return Self.hostLibraryPath == nil ? "not included in this build (\(Self.hostLibrary))" : nil
+            switch self {
+            case .dxmt: return Self.hostLibraryPath == nil ? "not included in this build (\(Self.hostLibrary))" : nil
+            case .mullion: return Wmtr.mullionLibraryPath == nil ? "not included in this build (\(Wmtr.mullionLibrary))" : nil
+            case .vulkan: return nil
+            }
         }
 
         var localizedUnavailableReason: String? {
-            guard self == .dxmt else { return nil }
-            return Self.hostLibraryPath == nil ? String(localized: "not included in this build (\(Self.hostLibrary))") : nil
+            switch self {
+            case .dxmt: return Self.hostLibraryPath == nil ? String(localized: "not included in this build (\(Self.hostLibrary))") : nil
+            case .mullion:
+                return Wmtr.mullionLibraryPath == nil ? String(localized: "not included in this build (\(Wmtr.mullionLibrary))") : nil
+            case .vulkan: return nil
+            }
         }
 
         /// Classic until the lean path is measured ahead of it in VRChat (same world, EAC, hitch counts).
@@ -279,6 +296,24 @@ final class LauncherSettings: ObservableObject {
         /// STEAMAC_WMTR_LIB for a `wmtrLibrary` setting ("" = the bundled library).
         static func path(for setting: String) -> String {
             setting.isEmpty ? "@rpath/" + bundledLibrary : setting
+        }
+
+        /// Mullion's executor (GraphicsPath.mullion): its build of libwmtr_host.dylib (work/out/mullion-host/lib), in
+        /// the app's Frameworks under this name (bundle.sh). Its unix-call table is Mullion's, so DXMT's library (or a
+        /// chosen `wmtrLibrary`) can never stand in for it, nor it for DXMT's.
+        static let mullionLibrary = "libwmtr_host_mullion.dylib"
+
+        /// Absolute path of mullionLibrary in this bundle, nil if absent.
+        static var mullionLibraryPath: String? {
+            guard let dir = Bundle.main.privateFrameworksPath else { return nil }
+            let p = (dir as NSString).appendingPathComponent(mullionLibrary)
+            return FileManager.default.fileExists(atPath: p) ? p : nil
+        }
+
+        /// STEAMAC_WMTR_LIB for the Mullion path: the bundled library, else the dev launcher's work/out/mullion-host
+        /// build next to work/out/steamac-vm (where DXMT's comes from work/out/host/lib through the rpath).
+        static var mullionPath: String {
+            mullionLibraryPath != nil ? "@rpath/" + mullionLibrary : "@executable_path/mullion-host/lib/" + bundledLibrary
         }
 
         private enum Problem {
@@ -359,6 +394,7 @@ final class LauncherSettings: ObservableObject {
     @Published private(set) var profiles: [Int: GameProfile] = [:]
     /// The effective boot driver, including a one-shot profile restart override.
     var bootedDriver: VulkanDriver?
+    /// The VM booted with the DXMT path (nil outside a VM child); false also for a Mullion boot.
     var bootedDXMT: Bool?
 
     // General
@@ -456,6 +492,9 @@ final class LauncherSettings: ObservableObject {
     /// ("" = the bundled libwmtr_host.dylib).
     @Published var wmtr = false { didSet { save(.wmtr, wmtr) } }
     @Published var wmtrLibrary = "" { didSet { save(.wmtrLibrary, wmtrLibrary) } }
+    /// With `wmtr` on, the next start takes the experimental Mullion path (GraphicsPath.mullion) instead of DXMT.
+    /// No Settings control: `defaults write … mullion -bool true`, or the control FIFO `set graphicsPath mullion`.
+    @Published var mullion = false { didSet { save(.mullion, mullion) } }
     /// VR (experimental) of the next start: steamac-vrhost with the VM (VRHost; DXMT path only).
     @Published var vrEnabled = false { didSet { save(.vrEnabled, vrEnabled) } }
     /// Total stream bitrate, Mbit/s (steamac-vrhost --bitrate; both eyes). Settings > VR also applies it to a
@@ -616,6 +655,7 @@ final class LauncherSettings: ObservableObject {
         if let v = d.string(forKey: Key.vulkanDriver.rawValue).flatMap(VulkanDriver.init(rawValue:)) { vulkanDriver = v }
         bool(.wmtr, &wmtr)
         string(.wmtrLibrary, &wmtrLibrary)
+        bool(.mullion, &mullion)
         // The earlier "Graphics path" setting: DXMT there is "Allow DXMT" with the bundled executor here.
         if d.object(forKey: Key.wmtr.rawValue) == nil,
            d.string(forKey: Key.graphicsPath.rawValue) == GraphicsPath.dxmt.rawValue { wmtr = true }
@@ -713,7 +753,11 @@ final class LauncherSettings: ObservableObject {
         case .steamosBranch: guard DiskCreator.branches.contains(text) else { return false }; steamosBranch = text
         case .steamClient: guard let v = SteamClient(rawValue: text) else { return false }; steamClient = v
         case .vulkanDriver: guard let v = VulkanDriver(rawValue: text) else { return false }; vulkanDriver = v
-        case .graphicsPath: guard let v = GraphicsPath(rawValue: text) else { return false }; wmtr = v == .dxmt
+        case .graphicsPath:
+            guard let v = GraphicsPath(rawValue: text) else { return false }
+            wmtr = v != .vulkan
+            if v != .vulkan { mullion = v == .mullion }
+        case .mullion: guard let b else { return false }; mullion = b
         case .wmtr: guard let b else { return false }; wmtr = b
         case .wmtrLibrary: wmtrLibrary = text == "default" ? "" : text
         case .frameLatency: guard let b else { return false }; frameLatency = b
@@ -766,7 +810,7 @@ final class LauncherSettings: ObservableObject {
         lanRemotePlay = fresh.lanRemotePlay
         diskImage = fresh.diskImage; steamosBranch = fresh.steamosBranch; steamClient = fresh.steamClient
         vulkanDriver = fresh.vulkanDriver
-        wmtr = fresh.wmtr; wmtrLibrary = fresh.wmtrLibrary
+        wmtr = fresh.wmtr; wmtrLibrary = fresh.wmtrLibrary; mullion = fresh.mullion
         frameLatency = fresh.frameLatency
         vrEnabled = fresh.vrEnabled; vrBitrateMbps = fresh.vrBitrateMbps; vrEyeSize = fresh.vrEyeSize
         vrCodec = fresh.vrCodec; vrPairOnRequest = fresh.vrPairOnRequest; vrHeadsetAudio = fresh.vrHeadsetAudio
@@ -807,7 +851,7 @@ final class LauncherSettings: ObservableObject {
             .soundEnabled: soundEnabled, .cpus: cpus, .memMiB: memMiB, .sshEnabled: sshEnabled, .sshPort: sshPort,
             .network: network, .lanRemotePlay: lanRemotePlay,
             .diskImage: diskImage, .steamClient: steamClient.rawValue, .followMacTime: followMacTime,
-            .vulkanDriver: vulkanDriver.rawValue, .wmtr: wmtr, .wmtrLibrary: wmtrLibrary, .frameLatency: frameLatency,
+            .vulkanDriver: vulkanDriver.rawValue, .wmtr: wmtr, .wmtrLibrary: wmtrLibrary, .mullion: mullion, .frameLatency: frameLatency,
             .vrEnabled: vrEnabled, .vrEyeSize: vrEyeSize, .vrCodec: vrCodec.rawValue,
             .vrPairOnRequest: vrPairOnRequest, .vrHeadsetAudio: vrHeadsetAudio, .vrRenderScale: vrRenderScale,
             .vrUpscaler: vrUpscaler.rawValue, .vrSharpness: vrSharpness, .vrForceSRGB: vrForceSRGB,
