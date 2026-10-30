@@ -246,6 +246,14 @@
 #              for a Metal compile (0051 waited under virglrenderer's submission lock, and took static state
 #              for dynamic when the compile failed). A program destroyed during the inline compile of its first
 #              use (0057) is freed by that thread instead of leaking.
+#   0064       steamac (Mesa util): the fallback util_barrier (macOS has no pthread barriers) may be destroyed by
+#              its serial thread, as util_queue_finish does. util_barrier_wait returned true in every thread and
+#              each destroyed the mutex while the others still re-acquired it in pthread_cond_wait; macOS cannot
+#              unlock a destroyed mutex (EINVAL), so the next thread blocked on it forever. disk_cache_destroy of
+#              0055's per-device disk cache then hung in util_queue_finish under virglrenderer's render state
+#              lock and every Venus context and virtio-gpu blob map of the guest stopped. Only the serial thread
+#              gets true now, and destroy waits for the threads it released. Mesa main has the same fallback;
+#              open MR !32068 (serial thread only) alone still deadlocks. Test: src/util/tests/u_queue_test.cpp.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -484,6 +492,7 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0047 = steamac: KK_WORKAROUND_11 (one shared MTL4Compiler) kept on macOS 27; compiling threads named after their compile"
 	echo "  0059 = steamac: zero texel-buffer widths are null; oversized views clamp to Metal's per-format capacity after alignment"
 	echo "  0061 = steamac: buffer-backed texture-buffer views inherit buffer residency, avoiding IOGPU's per-set entry limit"
+	echo "  0064 = steamac: the fallback util_barrier may be destroyed by its serial thread (util_queue_finish deadlock on macOS)"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."
