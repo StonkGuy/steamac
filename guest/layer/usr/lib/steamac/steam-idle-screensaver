@@ -1,14 +1,13 @@
 #!/usr/bin/python3
 """ExecStartPre of steam.service (Steam is not running): Steam's idle screensaver is off in the VM.
 
-Steam > Settings > Display "Screensaver" (Game Mode) shows a fullscreen Steam popup after a
-few minutes without input that Steam itself sees. Input the launcher forwards to a game
-reaches the game's Xwayland only, so Steam counts a player clicking through a game's
-menus as idle: about four minutes after launch, gamescope puts Steam's
-Screensaver_uid<n> window in front of the game, focus moves to Steam and every
-further click lands in Steam's UI until Escape dismisses it. Titles that take minutes
-to reach their menu (THE FINALS) hit it just as the menu appears. On the Mac, macOS
-already owns the display's screensaver and sleep.
+Steam > Settings > Display "Screensaver" (Game Mode) puts a fullscreen Steam window in front of
+everything once Steam has seen no input for a few minutes: gamescope moves focus to Steam's
+Screensaver_uid<n> window and the next clicks land in Steam's UI until Escape. The launcher's
+mouse, tablet and keyboard reset that timer, but a game the player waits for without touching
+anything (THE FINALS takes minutes to reach its menu) or plays in VR (headset input never reaches
+Steam) is idle to Steam, so the screensaver came up over it. On the Mac, macOS already owns the
+display's screensaver and sleep.
 
 Steam keeps the setting in config.vdf at InstallConfigStore/Software/Valve/Steam/System,
 "IdleScreensaverACSeconds" and "IdleScreensaverBatterySeconds" ("0" = never); with the
