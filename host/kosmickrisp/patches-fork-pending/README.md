@@ -2,7 +2,7 @@
 
 fxgl/steamac 1.9.2–1.9.4 extended the shared KosmicKrisp series (0001–0040) with its own 0041–0063.
 This fork's 0041–0049 used the same numbers and partly the same areas, so they are kept here, out of the
-build, until each one is re-ported on top of 0063 (renumbered from 0064) and measured again.
+build, until each one is re-ported on top of the series (renumbered from 0065; 0064 is taken) and measured again.
 
 | patch | what it does | relation to the upstream series |
 |---|---|---|
