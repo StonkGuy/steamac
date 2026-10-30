@@ -331,9 +331,17 @@ static void test_vr_query(struct wmtr_vr *vr, int host_fd) {
         fr.input[1][SVR_IN_TRIGGER_VALUE] == 0.5f && fr.input[0][SVR_IN_THUMBSTICK_X] == -1.0f && fr.connected,
         "frame from VRL_TIMING/POSES/INPUT");
   fq.last_frame_id = 500; /* the guest already rendered it: continue the cadence */
-  /* no newer host frame: the next one a period later (wmtr_vr_frame_cadence) */
-  CHECK(wmtr_vr_call(&fq, sizeof fq, &fr, sizeof fr) == 0 && fr.frame_id == 501 &&
-        fr.wake_up == t0 + (int64_t)(1e9f / 72.0f), "frame after the pacer's");
+  /* no newer host frame: the next one a period later (wmtr_vr_frame_cadence). While the pacer is live that is when
+     its next frame is due, or now once that has passed (here when this thread took more than ~19 ms since t0 was
+     taken, e.g. on a loaded CI runner): bounded by the times measured around the call, not by the machine's speed */
+  const int64_t due = t0 + (int64_t)(1e9f / 72.0f);
+  const int64_t ask0 = (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  int frc = wmtr_vr_call(&fq, sizeof fq, &fr, sizeof fr);
+  const int64_t ask1 = (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  CHECK(frc == 0 && fr.frame_id == 501 && !(fr.flags & SVR_FRAME_FROM_PACER) && fr.wake_up >= due &&
+        fr.wake_up <= (ask1 > due ? ask1 : due) && (!(fr.flags & SVR_FRAME_PACER_LIVE) || fr.wake_up >= ask0),
+        "frame after the pacer's: flags %u, wake %+lld ns from due, asked %+lld..%+lld ns", fr.flags,
+        (long long)(fr.wake_up - due), (long long)(ask0 - due), (long long)(ask1 - due));
 
   struct svr_haptic_req hp = {{SVR_HAPTIC, sizeof hp}, 1, 0.05f, 160.0f, 0.75f};
   struct svr_ack ack;
