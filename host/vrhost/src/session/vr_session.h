@@ -88,6 +88,11 @@ struct FrameTiming
 	// Frame id the session assigned to this frame (WiVRn's pacer counts frames itself and matches the headset's
 	// feedback by it): the producer must submit the frame with Frame::frame_id = this value.
 	uint64_t frame_id = 0;
+	// The headset's display period and how many display periods one rendered frame spans: render_divisor 2 = the
+	// producer runs at half the display rate and the headset synthesises the frames in between (spacewarp);
+	// predicted_display is still the display time this frame is shown first. 0 = not reported.
+	ns display_period = 0;
+	uint32_t render_divisor = 1;
 };
 
 // One eye of a submitted frame. The image is the ENCODER input: an IOSurface in

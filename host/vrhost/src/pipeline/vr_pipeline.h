@@ -7,9 +7,13 @@
 //   + VRL_POSES (predicted to its display time) once per frame from a frame-clock thread, VRL_INPUT on change;
 //   VRL_HAPTICS from the guest -> VrSession::haptics. The pipeline is the session's listener: construct it before
 //   VrSession::start(&pipeline).
+// * frames in flight (opt-in, session/frames_in_flight.h): the clock holds the next VRL_TIMING until at most N-1 issued
+//   frames still wait for their copy, so a GPU-bound game cannot queue frames ahead of the GPU; or (auto,
+//   session/adaptive_release.h) until the game's CPU work will end as the GPU finishes the frame before.
 #pragma once
 #include "compositor/vrlink_server.h"
 #include "vrlink.h"
+#include "session/frames_in_flight.h"
 #include "session/vr_session.h"
 
 #include <array>
@@ -61,7 +65,11 @@ class VrPipeline final : public SessionListener
 public:
 	// link_fd: AF_UNIX SOCK_DGRAM end (owned); mach_name: bootstrap name for the swapchain ports.
 	// opt: Settings > VR quality options; the upscale size is taken from each connection's nominal render size.
-	VrPipeline(VrSession & session, int link_fd, const std::string & mach_name, CompositorOptions opt = {});
+	// frames_in_flight: 0 = the clock runs on the session's pacer alone; N = also wait until the frames issued before
+	// the next one are copied except N-1 of them (2: the game's CPU work overlaps the GPU work of one frame);
+	// FramesInFlight::adaptive = auto.
+	VrPipeline(VrSession & session, int link_fd, const std::string & mach_name, CompositorOptions opt = {},
+	           uint32_t frames_in_flight = 0);
 	~VrPipeline() override;
 	bool peer_closed() const;
 	const PipelineStats & stats() const { return st; }
@@ -74,6 +82,10 @@ public:
 	void on_refresh_rate(float hz) override;
 
 	uint64_t timings_sent() const { return timings; }
+	void set_frames_in_flight(uint32_t n) { in_flight.set(n); }
+	uint32_t frames_in_flight() const { return in_flight.limit(); }
+	bool release_adaptive() const { return in_flight.is_adaptive(); }
+	FramesInFlight::Estimate release_estimate() { return in_flight.estimate(); }
 	const char * upscaler() const; // of the last composed frame ("" = none)
 	uint64_t haptics_routed() const { return haptics; }
 
@@ -103,6 +115,7 @@ private:
 	std::atomic<bool> quit{false};
 	std::atomic<uint64_t> timings{0}, haptics{0};
 	std::atomic<float> refresh{0};
+	FramesInFlight in_flight;
 	std::unique_ptr<VrLinkServer> server; // after the state its threads use
 	std::thread clock;                     // last: started when everything else exists
 };

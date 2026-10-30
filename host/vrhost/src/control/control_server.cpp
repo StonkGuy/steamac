@@ -2,6 +2,7 @@
 #include "control/control_server.h"
 
 #include "session/clock.h"
+#include "session/frames_in_flight.h"
 #include "wivrn/known_keys.h"
 #include "wivrn/wivrn_session.h"
 
@@ -119,6 +120,16 @@ std::string ControlServer::handle(const std::string & req)
 			return error("encryption is disabled: no pairing");
 		if (hooks.pin_changed)
 			hooks.pin_changed(session.pin());
+		return status();
+	}
+	if (req.starts_with("frames-in-flight "))
+	{
+		char * end = nullptr;
+		long n = req.substr(17) == "auto" ? long(FramesInFlight::adaptive) : strtol(req.c_str() + 17, &end, 10);
+		if ((end and *end) or (n != long(FramesInFlight::adaptive) and (n < 0 or n > 8)))
+			return error("frames-in-flight: 0 (off) to 8, or auto");
+		if (not hooks.set_frames_in_flight or not hooks.set_frames_in_flight(uint32_t(n)))
+			return error("frames-in-flight: no game link");
 		return status();
 	}
 	if (req.starts_with("bitrate "))

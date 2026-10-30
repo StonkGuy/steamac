@@ -5,6 +5,12 @@
  * model plus an optional script (recorded or hand-written), and checks and logs every submit and haptic event.
  *
  *   vr-fakehost --socket PATH [--script FILE] [--log FILE] [--hz 90] [--profile touch|index] [--once] [--live-view]
+ *               [--pacer N]
+ *
+ * --pacer N (N >= 2) answers like steamac-vm's exporter in front of a pacer that releases every Nth frame (spacewarp:
+ * 2), each visible 1 ms after its wake-up as a real link delivers it: until then a frame request gets a local frame
+ * flagged SVR_FRAME_PACER_LIVE, due at the pacer's next wake-up. A submit of any frame but the pacer's is an error
+ * (the runtime rendered a frame the headset never asked for).
  *
  * Script lines (frame-keyed, so a replay is deterministic whatever the client's frame rate):
  *   <frame> in <L|R> <input-name> <value>          e.g.  20 in R TRIGGER_VALUE 1
@@ -201,6 +207,8 @@ static void fill_view(float fov[2][4], float *ipd) {
  * view, then a headset with its own FOV and IPD connected). The game renders with what the hello reported
  * (GetProjectionRaw, GetEyeToHeadTransform), so its submits must still carry the hello's view. */
 static int live_view;
+static int pacer;                         /* --pacer N: release every Nth frame (0: every frame, no flags) */
+#define PACER_LAG_NS 1000000ll            /* a pacer frame reaches the guest this long after its wake-up */
 static void fill_frame_view(float fov[2][4], float *ipd) {
   fill_view(fov, ipd);
   if (!live_view) return;
@@ -243,6 +251,23 @@ static int handle(int fd, const void *buf, size_t n) {
       r.frame_id = f;
       r.predicted_display = t0 + (int64_t)f * period + 2 * period;
       r.wake_up = r.predicted_display - 2 * period;
+      if (pacer) {
+        /* the pacer's newest frame that has reached the guest; a newer one than the client's is handed out,
+         * otherwise a local frame due at the pacer's next wake-up */
+        uint64_t p = now - PACER_LAG_NS > t0 ? (uint64_t)((now - PACER_LAG_NS - t0) / (pacer * period)) * pacer : 0;
+        if (p > q->last_frame_id) {
+          f = p;
+          r.flags = SVR_FRAME_FROM_PACER | SVR_FRAME_PACER_LIVE;
+          r.wake_up = t0 + (int64_t)f * period;
+        } else {
+          f = q->last_frame_id + 1;
+          r.flags = SVR_FRAME_PACER_LIVE;
+          int64_t due = t0 + (int64_t)(p + pacer) * period;
+          r.wake_up = due > now ? due : now;
+        }
+        r.frame_id = f;
+        r.predicted_display = r.wake_up + 2 * period;
+      }
       r.pose_time = r.predicted_display;
       r.host_now = now;
       r.refresh_hz = (float)hz;
@@ -260,6 +285,7 @@ static int handle(int fd, const void *buf, size_t n) {
       const char *why = NULL;
       uint64_t f = q->frame_id;
       if (hist[f % HIST].frame != f) why = "unknown frame";
+      else if (pacer && f % pacer) why = "not a pacer frame (rendered between the pacer's frames)";
       else if (hist[f % HIST].display != (int64_t)q->display_time) why = "display time differs from the frame's";
       else if (!q->eye[0].texture || !q->eye[1].texture) why = "missing eye";
       else {
@@ -330,8 +356,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = !strcmp(argv[++i], "index") ? SVR_PROFILE_INDEX : SVR_PROFILE_TOUCH;
     else if (!strcmp(argv[i], "--once")) once = 1;
     else if (!strcmp(argv[i], "--live-view")) live_view = 1;
+    else if (!strcmp(argv[i], "--pacer") && i + 1 < argc && atoi(argv[i + 1]) >= 2) pacer = atoi(argv[++i]);
     else {
-      fprintf(stderr, "usage: vr-fakehost --socket PATH [--script FILE] [--log FILE] [--hz N] [--profile touch|index] [--once] [--live-view]\n");
+      fprintf(stderr, "usage: vr-fakehost --socket PATH [--script FILE] [--log FILE] [--hz N] [--profile touch|index] [--once] [--live-view] [--pacer N]\n");
       return 2;
     }
   }

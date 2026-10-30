@@ -27,11 +27,14 @@
 #include <servers/bootstrap.h>
 #include <sys/socket.h>
 #include <poll.h>
+#include <objc/runtime.h>
 
 typedef int NTSTATUS;
 typedef NTSTATUS (*fn_t)(void *);
 extern const void *__wine_unix_call_funcs[];
 extern int wmtr_vr_call(const void *req, uint32_t req_size, void *rep, uint32_t rep_cap);
+/* weak: the behaviour checks of the owned-object section also run against a host without the hook */
+extern long wmtr_debug_owned(struct wmtr_host *h, uint64_t o) __attribute__((weak_import));
 
 static int failures;
 #define CHECK(c, ...) do { if (!(c)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
@@ -76,12 +79,12 @@ static NTSTATUS f_argsinfo(void *a) { (void)a; return 0; }
 static NTSTATUS f_noop(void *a) { (void)a; return 0; }
 static NTSTATUS f_fault(void *a) { (void)a; return *(volatile int *)(uintptr_t)0x10; }
 /* an autoreleased result whose lifetime the test watches */
-static int probe_alive;
+static int probe_alive, probe_count; /* the last one's lifetime; how many are alive */
 @interface Probe : NSObject
 @end
 @implementation Probe
-- (instancetype)init { if ((self = [super init])) probe_alive = 1; return self; }
-- (void)dealloc { probe_alive = 0; [super dealloc]; }
+- (instancetype)init { if ((self = [super init])) probe_alive = 1, probe_count++; return self; }
+- (void)dealloc { probe_alive = 0; probe_count--; [super dealloc]; }
 @end
 /* A shared event keeps the actual notification block registered by host_call(104). Delivering it
  * explicitly makes the after-destroy race deterministic, without depending on Metal queue timing. */
@@ -131,11 +134,25 @@ static NTSTATUS f_sm50compile(void *a) {
 }
 static NTSTATUS f_pixelformat(void *a) { ((struct unixcall_generic_obj_uint64_ret *)a)->ret = 70; return 0; } /* RGBA8 */
 static NTSTATUS f_release(void *a) { [(id)*(obj_handle_t *)a release]; return 0; }
+static NTSTATUS f_retain(void *a) { [(id)*(obj_handle_t *)a retain]; return 0; }
+/* newFunction: a +1 result like the real one, counted while alive; the value it computed from the name and the
+ * receiver is kept for the native/remote comparison */
+static int owned_alive;
+@interface Owned : NSObject
+@end
+@implementation Owned
+- (instancetype)init { if ((self = [super init])) owned_alive++; return self; }
+- (void)dealloc { owned_alive--; [super dealloc]; }
+@end
+static uint64_t newfunction_val;
 static NTSTATUS f_newfunction(void *a) {
   struct unixcall_generic_obj_uint64_obj_ret *p = a;
-  p->ret = strlen((const char *)(uintptr_t)p->arg) * 1000 + p->handle;
+  newfunction_val = strlen((const char *)(uintptr_t)p->arg) * 1000 + p->handle;
+  p->ret = (obj_handle_t)[[Owned alloc] init];
   return 0;
 }
+/* newSharedEvent that writes no result: what the request carried in `ret` must not count as an object */
+static NTSTATUS f_noresult(void *a) { (void)a; return 0; }
 static NTSTATUS f_signal(void *p) { /* encodeSignalEvent, as DXMT's unix side */
   struct unixcall_generic_obj_obj_uint64_noret *a = p;
   [(id<MTLCommandBuffer>)a->handle encodeSignalEvent:(id<MTLSharedEvent>)a->arg0 value:a->arg1];
@@ -150,18 +167,33 @@ static mach_port_t new_send_port(void) {
   return p;
 }
 static mach_port_t shared_imported; /* the port of the last newSharedTexture import */
-static NTSTATUS f_newshared(void *a) { /* newSharedTexture: export mints a port, import opens one */
+/* newSharedTexture: export mints a port, import opens one; +1 results like the real ones (the client never
+ * releases them: destroy does, see the owned-object checks) */
+static obj_handle_t shared_exported_tex, shared_imported_tex, shared_event_obj;
+static NTSTATUS f_newshared(void *a) {
   struct unixcall_mtldevice_newtexture *p = a; struct WMTTextureInfo *info = p->info.ptr;
-  if (info->mach_port) { shared_imported = info->mach_port; p->ret = 0x5100; }
-  else { info->mach_port = new_send_port(); p->ret = 0x5000; }
+  p->ret = (obj_handle_t)[[Owned alloc] init];
+  if (info->mach_port) { shared_imported = info->mach_port; shared_imported_tex = p->ret; }
+  else { info->mach_port = new_send_port(); shared_exported_tex = p->ret; }
   return 0;
 }
 static NTSTATUS f_eventport(void *a) { ((struct unixcall_mtlsharedevent_createmachport *)a)->ret_mach_port = new_send_port(); return 0; }
-static NTSTATUS f_eventwithport(void *a) { ((struct unixcall_mtldevice_newsharedeventwithmachport *)a)->ret_event = 0x5200; return 0; }
+static NTSTATUS f_eventwithport(void *a) {
+  shared_event_obj = ((struct unixcall_mtldevice_newsharedeventwithmachport *)a)->ret_event = (obj_handle_t)[[Owned alloc] init];
+  return 0;
+}
 static uint64_t enc_log[64][2]; static int n_enc_log;
 static void enc_note(uint64_t call, uint64_t v) { if (n_enc_log < 64) { enc_log[n_enc_log][0] = call; enc_log[n_enc_log][1] = v; } n_enc_log++; }
+/* a command encoder as far as the host can tell (MTLCommandEncoder is added to it at start) */
+static int encoder_count;
+@interface FakeEncoder : NSObject
+@end
+@implementation FakeEncoder
+- (instancetype)init { if ((self = [super init])) encoder_count++; return self; }
+- (void)dealloc { encoder_count--; [super dealloc]; }
+@end
 static NTSTATUS f_new_encoder(uint64_t *ret, uint64_t call, int fail) {
-  *ret = fail ? 0 : (obj_handle_t)[[[NSObject alloc] init] autorelease];
+  *ret = fail ? 0 : (obj_handle_t)[[[FakeEncoder alloc] init] autorelease];
   enc_note(call, *ret);
   return 0;
 }
@@ -174,7 +206,7 @@ static NTSTATUS f_render_enc(void *a) {
 }
 static NTSTATUS f_end_encoding(void *a) { enc_note(33, ((struct unixcall_generic_obj_noret *)a)->handle); return 0; }
 static NTSTATUS f_compute_encode(void *a) { enc_note(37, ((struct unixcall_generic_obj_cmd_noret *)a)->encoder); return 0; }
-const void *wmtr_impl_funcs[WMTR_NCALLS] = {[120] = f_newshared, [123] = f_eventport, [124] = f_eventwithport, [12] = f_commit, [1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
+const void *wmtr_impl_funcs[WMTR_NCALLS] = {[120] = f_newshared, [123] = f_eventport, [124] = f_eventwithport, [12] = f_commit, [0] = f_retain, [1] = f_release, [15] = f_noresult, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
                                     [33] = f_end_encoding, [37] = f_compute_encode, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
                                     [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes};
 
@@ -299,9 +331,17 @@ static void test_vr_query(struct wmtr_vr *vr, int host_fd) {
         fr.input[1][SVR_IN_TRIGGER_VALUE] == 0.5f && fr.input[0][SVR_IN_THUMBSTICK_X] == -1.0f && fr.connected,
         "frame from VRL_TIMING/POSES/INPUT");
   fq.last_frame_id = 500; /* the guest already rendered it: continue the cadence */
-  /* no newer host frame: the next one a period later (wmtr_vr_frame_cadence) */
-  CHECK(wmtr_vr_call(&fq, sizeof fq, &fr, sizeof fr) == 0 && fr.frame_id == 501 &&
-        fr.wake_up == t0 + (int64_t)(1e9f / 72.0f), "frame after the pacer's");
+  /* no newer host frame: the next one a period later (wmtr_vr_frame_cadence). While the pacer is live that is when
+     its next frame is due, or now once that has passed (here when this thread took more than ~19 ms since t0 was
+     taken, e.g. on a loaded CI runner): bounded by the times measured around the call, not by the machine's speed */
+  const int64_t due = t0 + (int64_t)(1e9f / 72.0f);
+  const int64_t ask0 = (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  int frc = wmtr_vr_call(&fq, sizeof fq, &fr, sizeof fr);
+  const int64_t ask1 = (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  CHECK(frc == 0 && fr.frame_id == 501 && !(fr.flags & SVR_FRAME_FROM_PACER) && fr.wake_up >= due &&
+        fr.wake_up <= (ask1 > due ? ask1 : due) && (!(fr.flags & SVR_FRAME_PACER_LIVE) || fr.wake_up >= ask0),
+        "frame after the pacer's: flags %u, wake %+lld ns from due, asked %+lld..%+lld ns", fr.flags,
+        (long long)(fr.wake_up - due), (long long)(ask0 - due), (long long)(ask1 - due));
 
   struct svr_haptic_req hp = {{SVR_HAPTIC, sizeof hp}, 1, 0.05f, 160.0f, 0.75f};
   struct svr_ack ack;
@@ -482,6 +522,35 @@ static struct wmtr_host *idle_host(void) {
   R->magic = WMTR_RING_MAGIC; R->version = WMTR_VERSION;
   return wmtr_host_create(R, &idle_ops, R);
 }
+/* another client (a second guest process): its own context; its requests are written straight into its ring (params
+ * only, sync), so the test's client library stays this process's one client */
+static struct wmtr_host *second_client(struct wmtr_ring **ring) {
+  struct wmtr_ring *R = pages(WMTR_RING_BLOB_BYTES);
+  R->magic = WMTR_RING_MAGIC; R->version = WMTR_VERSION;
+  *ring = R;
+  return wmtr_host_create(R, &idle_ops, R);
+}
+static NTSTATUS second_call(struct wmtr_ring *R, struct wmtr_host *h, uint32_t slot_i, uint16_t call, uint16_t flags,
+                            void *params, uint32_t size) {
+  uint8_t *data = (uint8_t *)R + WMTR_RING_DATA_OFFSET;
+  struct wmtr_slot *slot = (struct wmtr_slot *)((uint8_t *)R + WMTR_SLOTS_OFFSET) + slot_i;
+  struct wmtr_req_ext hdr = {0};
+  hdr.h.call = call; hdr.h.flags = WMTR_F_SYNC | flags; hdr.h.slot = slot_i; hdr.h.params_size = size;
+  hdr.h.seq = slot->done_seq + 1;
+  hdr.payload_size = WMTR_ALIGN8(size);
+  uint32_t poff = wmtr_req_payload_offset(&hdr), total = WMTR_ALIGN8(poff + size);
+  hdr.h.size = total;
+  uint64_t head = R->head; /* a few hundred bytes from a fresh ring: no wrap */
+  uint8_t *dst = data + head % WMTR_RING_BYTES;
+  memset(dst, 0, total);
+  memcpy(dst, &hdr, sizeof hdr);
+  memcpy(dst + poff, params, size);
+  __atomic_store_n(&R->head, head + total, __ATOMIC_RELEASE);
+  wmtr_host_kick(h);
+  while (__atomic_load_n(&slot->done_seq, __ATOMIC_ACQUIRE) < hdr.h.seq) sched_yield();
+  memcpy(params, (const void *)slot->data, size);
+  return slot->status;
+}
 static void test_vr_fd(void) {
   char name[64]; snprintf(name, sizeof name, "com.steamac.vrhost.fdtest.%d", (int)getpid());
   mach_port_t port;
@@ -559,9 +628,10 @@ static void test_vr_cadence(void) {
   struct wmtr_vr_cadence c = {0};
   int64_t now = 1000000000000ll, wake, disp;
   uint64_t last = 0, id;
+  unsigned flags;
   int bad = 0;
 #define STEP(hid, hwake) do { \
-    wmtr_vr_frame_cadence(&c, (hid), (hwake), (hwake) + 2 * P, last, now, P, &id, &wake, &disp); \
+    flags = wmtr_vr_frame_cadence(&c, (hid), (hwake), (hwake) + 2 * P, last, now, P, P, &id, &wake, &disp); \
     if (id <= last || wake > now + 2 * P || wake < now - 2 * P || disp < wake) bad++; \
     last = id; now += P; } while (0)
   for (int i = 0; i < 9050; i++) STEP(0, 0);                 /* game started, no headset ever connected */
@@ -578,6 +648,61 @@ static void test_vr_cadence(void) {
   CHECK(bad == 0, "far-ahead timing: wake %lld ms ahead", (long long)((wake - now + P) / 1000000));
 #undef STEP
   printf("vr cadence: no headset / connect / disconnect / reconnect / far-ahead ok\n");
+
+  /* Spacewarp: the pacer releases a frame every other display period. In between the guest gets a local frame due
+   * at the pacer's next wake-up, flagged so that it waits for that frame instead of rendering an extra one. */
+  struct wmtr_vr_cadence s = {0};
+  int64_t t = now, hw = 0;
+  uint64_t hid = 0, g = 0, pacer = 0, local_live = 0;
+  bad = 0;
+  for (int i = 0; i < 600; i++, t += P) {
+    if (i % 2 == 0) hid++, hw = t;
+    flags = wmtr_vr_frame_cadence(&s, hid, hw, hw + 2 * P, g, t, P, 2 * P, &id, &wake, &disp);
+    if (i % 2 == 0) {
+      pacer += flags == (WMTR_VR_FRAME_FROM_PACER | WMTR_VR_FRAME_PACER_LIVE) && wake == hw;
+      g = id; /* the guest renders the pacer's frames only */
+    } else {
+      local_live += flags == WMTR_VR_FRAME_PACER_LIVE && wake == hw + 2 * P && disp >= wake && id == g + 1;
+    }
+  }
+  CHECK(pacer == 300 && local_live == 300, "spacewarp: pacer frames %llu/300, due local frames %llu/300",
+        (unsigned long long)pacer, (unsigned long long)local_live);
+  /* the pacer holds its next frame (GPU behind): once it is overdue the local frame wakes now, still flagged live */
+  flags = wmtr_vr_frame_cadence(&s, hid, hw, hw + 2 * P, g, hw + 3 * P, P, 2 * P, &id, &wake, &disp);
+  CHECK(flags == WMTR_VR_FRAME_PACER_LIVE && wake == hw + 3 * P, "held pacer: flags %u wake %+lld ns", flags,
+        (long long)(wake - hw - 3 * P));
+  /* and it comes: the pacer's frame, the next id */
+  flags = wmtr_vr_frame_cadence(&s, hid + 1, hw + 3 * P, hw + 5 * P, g, hw + 3 * P + 100000, P, 2 * P, &id, &wake, &disp);
+  CHECK(flags == (WMTR_VR_FRAME_FROM_PACER | WMTR_VR_FRAME_PACER_LIVE) && id == g + 1 && wake == hw + 3 * P,
+        "held pacer frame: flags %u id %+lld", flags, (long long)(id - g));
+  g = id, hw += 3 * P;
+  /* a GPU-bound game: the host holds the next timing for a 60 ms frame (5+ periods), the guest is still told to wait */
+  flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, hw + 60000000, P, 2 * P, &id, &wake, &disp);
+  CHECK(flags == WMTR_VR_FRAME_PACER_LIVE && id == g + 1, "held 60 ms: flags %u", flags);
+  /* a guest that does not wait for the pacer (it sleeps until each frame's wake-up and asks again right after)
+   * while the next pacer frame is overdue: one frame a period, not a burst all due now (vr_e2e: four frames in 80 us
+   * overran the producer's ring of three eye textures) */
+  {
+    int64_t q = hw + 60000000, prev = wake;
+    int spaced = 0;
+    for (int k = 0; k < 4; k++) {
+      flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, q, P, 2 * P, &id, &wake, &disp);
+      spaced += flags == WMTR_VR_FRAME_PACER_LIVE && id == g + 1 && wake >= prev + P;
+      prev = wake, g = id;
+      q = (wake > q ? wake : q) + 10000;
+    }
+    CHECK(spaced == 4, "local frames while the pacer is live: %d of 4 a period apart", spaced);
+  }
+  /* the pacer stopped (headset gone): after WMTR_VR_PACER_LIVE_NS the guest is no longer told to wait */
+  flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, hw + WMTR_VR_PACER_LIVE_NS + 1, P, 2 * P, &id, &wake, &disp);
+  CHECK(flags == 0 && id == g + 1, "stopped pacer: flags %u", flags);
+  /* an older host (no render divisor): due one display period after its last frame */
+  struct wmtr_vr_cadence o = {0};
+  wmtr_vr_frame_cadence(&o, 7, t, t + 2 * P, 0, t, P, P, &id, &wake, &disp);
+  flags = wmtr_vr_frame_cadence(&o, 7, t, t + 2 * P, id, t + P / 2, P, P, &id, &wake, &disp);
+  CHECK(flags == WMTR_VR_FRAME_PACER_LIVE && wake == t + P, "divisor 1: flags %u wake %+lld ns", flags,
+        (long long)(wake - t - P));
+  printf("vr cadence: spacewarp / held pacer / stopped pacer / divisor 1 ok\n");
 }
 
 /* ---------------- hostile requests (a guest that writes the ring itself) ---------------- */
@@ -680,6 +805,7 @@ test_hostile_requests(id<MTLDevice> dev) {
 
 int main(void) {
   @autoreleasepool {
+    class_addProtocol([FakeEncoder class], @protocol(MTLCommandEncoder));
     test_vr_cadence();
     snprintf(frames_path, sizeof frames_path, "/tmp/wmtr_frames_%d.csv", (int)getpid());
     unlink(frames_path);
@@ -711,8 +837,9 @@ int main(void) {
 
     /* 2. C-string input in a uint64 arg, value result */
     struct unixcall_generic_obj_uint64_obj_ret fa = {5, (uint64_t)(uintptr_t)"vertex_main", 0}, fb = fa;
-    native(26, &fa); remote(26, &fb);
-    CHECK(fa.ret == fb.ret, "newFunction ret %llu vs %llu", fa.ret, fb.ret);
+    native(26, &fa); uint64_t nv = newfunction_val; remote(26, &fb);
+    CHECK(fa.ret && fb.ret && nv == newfunction_val, "newFunction value %llu vs %llu", nv, newfunction_val);
+    [(id)fa.ret release]; /* the native call's result; the remote ones are the client's (released on destroy) */
 
     /* 3. command list with embedded pointers (async call, then a sync call orders it) */
     struct WMTViewport vps[3] = {{0, 0, 640, 480, 0, 1}, {0, 0, 320, 240, 0, 1}, {0, 0, 7, 7, 0, 1}};
@@ -792,6 +919,7 @@ int main(void) {
       CHECK(R->free_head == fh + 1, "buffer range not returned (free_head %llu)", R->free_head);
     }
     /* 6. caller-placed memory (DXMT CpuPlaced): initial bytes kept, pointer replaced by arena memory */
+    obj_handle_t placed = 0; /* never released by the client: destroy releases it */
     {
       uint8_t *own; posix_memalign((void **)&own, 16384, 65536); memset(own, 0x3c, 65536);
       struct WMTBufferInfo ci = {65536, WMTResourceStorageModeShared, {own}, 0};
@@ -799,6 +927,7 @@ int main(void) {
       remote(18, &cb2);
       CHECK(cb2.ret && ci.memory.ptr && ci.memory.ptr != own && ((uint8_t *)ci.memory.ptr)[65535] == 0x3c,
             "caller-placed buffer ret %llx mem %p", cb2.ret, ci.memory.ptr);
+      placed = cb2.ret;
       free(own);
     }
     /* 7. after a peak, idle arena blobs beyond the 128 MiB reserve go back to the host once they have
@@ -836,6 +965,32 @@ int main(void) {
       remote(18, &rb);
       CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
       if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
+    }
+    /* 7b. more frees at once than the free ring holds, while the client takes none (quit, logout, a large unload:
+          Metal runs the deallocators inside the client's release calls): the executor must not wait for the client
+          (it did: the next sync call never returned, StonkGuy/steamac#1), and every free must still reach the client */
+    {
+      enum { NF = WMTR_FREE_RING + 200 };
+      static obj_handle_t fbuf[NF];
+      for (int i = 0; i < NF; i++) {
+        struct WMTBufferInfo si = {4096, WMTResourceStorageModeShared, {NULL}, 0};
+        struct unixcall_mtldevice_newbuffer sb = {(obj_handle_t)dev, {&si}, 0};
+        remote(18, &sb);
+        fbuf[i] = sb.ret;
+      }
+      CHECK(fbuf[NF - 1] != 0, "burst: newBuffer failed");
+      struct wmtr_ring *R = blob_base[0];
+      uint64_t fh = R->free_head;
+      static volatile int returned;
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_global_queue(0, 0), ^{
+        if (!returned) { fprintf(stderr, "FAIL burst of %d frees: the executor is waiting for the client\n", (int)NF); _exit(1); }
+      });
+      for (int i = 0; i < NF; i++) remote(1, &fbuf[i]);
+      struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); /* sync: the executor is past every release */
+      returned = 1;
+      for (int i = 0; i < 4000 && R->free_head < fh + NF; i++) { remote(26, &fb); usleep(1000); }
+      CHECK(R->free_head >= fh + NF, "burst: %llu of %d frees reached the client", (unsigned long long)(R->free_head - fh), (int)NF);
+      printf("free burst: %d frees past a full ring ok\n", (int)NF);
     }
     test_vr(dev);
     test_vr_fd();
@@ -893,6 +1048,56 @@ int main(void) {
       struct unixcall_generic_obj_uint64_ret pf3 = {0}; remote(39, &pf3);
       CHECK(ar.ret && probe_alive, "autoreleased result without a pool was freed with the request");
     }
+    { /* two clients (two guest processes, each its own context) both number their threads' reply slots from 0: the
+         autorelease pools of one are not the other's (live 2026-10-24: a second DXMT client next to VRChat aborted the
+         VM with "Command encoder released without endEncoding") */
+      struct wmtr_ring *rb;
+      struct wmtr_host *b = second_client(&rb);
+      int c0 = probe_count;
+      struct unixcall_generic_obj_ret pool = {0};
+      remote(10, &pool);
+      uint64_t bpool[WMTR_SLOTS];
+      for (uint32_t s = 0; s < WMTR_SLOTS; s++) {
+        struct unixcall_generic_obj_ret p = {0};
+        second_call(rb, b, s, 10, 0, &p, sizeof p);
+        bpool[s] = p.ret;
+      }
+      struct unixcall_generic_obj_ret ar = {0};
+      remote(53, &ar); /* autoreleased: into this client's pool, whatever the other client has open */
+      struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q);
+      for (uint32_t s = WMTR_SLOTS; s-- > 0;) { uint64_t ph = bpool[s]; second_call(rb, b, s, 1, 0, &ph, sizeof ph); }
+      CHECK(probe_count == c0 + 1, "two clients: the other client's drained pools took this client's result (%d live, want %d)",
+            probe_count - c0, 1);
+      /* a pool of the other client, by its address: not this client's to drain */
+      struct unixcall_generic_obj_ret bp = {0}, bar = {0};
+      second_call(rb, b, 0, 10, 0, &bp, sizeof bp);
+      second_call(rb, b, 0, 53, 0, &bar, sizeof bar);
+      obj_handle_t foreign = bp.ret; remote(1, &foreign); remote(39, &q);
+      CHECK(probe_count == c0 + 2, "two clients: this client drained the other's pool (%d live, want %d)", probe_count - c0, 2);
+      uint64_t bph = bp.ret; second_call(rb, b, 0, 1, 0, &bph, sizeof bph);
+      CHECK(probe_count == c0 + 1, "two clients: the other client could not drain its own pool");
+      /* the other client opens a pool under this client's very handle (both count their pools from 1): this client's
+         release still drains its own pool */
+      struct unixcall_generic_obj_ret twin = {pool.ret};
+      if ((pool.ret & WMTR_REF_MASK) == WMTR_HANDLE_TAG)
+        second_call(rb, b, (uint32_t)(pool.ret >> 32) & 0x7fff, 10, WMTR_F_CLIENT_HANDLE, &twin, sizeof twin);
+      obj_handle_t ph = pool.ret; remote(1, &ph); remote(39, &q);
+      CHECK(probe_count == c0, "two clients: this client's release did not drain its own pool (%d live)", probe_count - c0);
+      /* the other client exits with a pool open (a result and an encoder still encoding in it) and a result kept
+         without a pool: the results are released, the encoder is not (its release would trip Metal's assertion) */
+      int e0 = encoder_count;
+      struct unixcall_generic_obj_ret dp = {0}, dr = {0}, lr = {0};
+      struct unixcall_generic_obj_obj_ret de = {0x77, 0};
+      second_call(rb, b, 1, 10, 0, &dp, sizeof dp);
+      second_call(rb, b, 1, 53, 0, &dr, sizeof dr);
+      second_call(rb, b, 1, 30, 0, &de, sizeof de);
+      second_call(rb, b, 2, 53, 0, &lr, sizeof lr);
+      CHECK(dr.ret && de.ret && lr.ret && probe_count == c0 + 2 && encoder_count == e0 + 1, "second client's results");
+      wmtr_host_destroy(b);
+      CHECK(probe_count == c0 && encoder_count == e0 + 1,
+            "client gone: %d results left alive (want 0), %d encoders released (want 0)", probe_count - c0, e0 + 1 - encoder_count);
+      printf("two clients: separate autorelease pools ok\n");
+    }
     { /* D3D12 pipelines pass serialized root signatures through SM50Compile's argument list */
       uint8_t rs1[300], rs2[77]; for (int i = 0; i < 300; i++) rs1[i] = (uint8_t)(i * 7 + 1); for (int i = 0; i < 77; i++) rs2[i] = (uint8_t)(i ^ 0x5a);
       struct SM50_SHADER_ROOT_SIGNATURE_DATA r2 = {.next = NULL, .type = SM50_SHADER_ROOT_SIGNATURE2, .bytecode = rs2, .bytecode_length = 77};
@@ -928,6 +1133,37 @@ int main(void) {
       if (f) fclose(f);
       CHECK(n == 1 && t > 0 && strstr(line, ",0,0,0,0,0"), "WMTR_FRAMES: %d lines, last '%s'", n, line);
       unlink(frames_path);
+    }
+    /* objects the client owns and never released go on destroy (checked after it): +1 results with its retains
+       minus its releases; an object it released is not released again, one it only retained after getting it
+       autoreleased is not released for it, and a value the request carried in a result field is not an object */
+    obj_handle_t kept = 0, shared = 0; NSUInteger shared_refs = 0, placed_refs = 0; uint64_t placed_fh = 0;
+    {
+      struct unixcall_generic_obj_uint64_obj_ret c1 = {5, (uint64_t)(uintptr_t)"kept", 0}, c2 = {5, (uint64_t)(uintptr_t)"dropped", 0};
+      remote(26, &c1); remote(26, &c2);
+      kept = c1.ret;
+      obj_handle_t h = kept;
+      remote(0, &h); remote(0, &h); remote(1, &h); /* owned twice */
+      int alive = owned_alive;
+      h = c2.ret; remote(1, &h); /* released by its owner: freed now */
+      struct unixcall_generic_obj_ret ar = {0};
+      remote(53, &ar);
+      shared = ar.ret; h = shared; remote(0, &h);
+      struct unixcall_mtldevice_newlibrary nl = {0};
+      remote(25, &nl); /* its out-error is never released by the client */
+      struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q);
+      CHECK(owned_alive == alive - 1, "an object released by its owner is still alive (%d -> %d)", alive, owned_alive);
+      if (wmtr_debug_owned) {
+        CHECK(wmtr_debug_owned(H, kept) == 2 && wmtr_debug_owned(H, shared) == 0 && wmtr_debug_owned(H, nl.ret_error) == 1 &&
+              wmtr_debug_owned(H, placed) == 1, "owned: kept %ld shared %ld error %ld placed %ld", wmtr_debug_owned(H, kept),
+              wmtr_debug_owned(H, shared), wmtr_debug_owned(H, nl.ret_error), wmtr_debug_owned(H, placed));
+        struct unixcall_generic_obj_obj_ret forged = {0, 0x4141414141410ull};
+        uint32_t fst = raw_request(15, sizeof forged, sizeof forged, NULL, 0, NULL, 0, &forged, sizeof forged, NULL);
+        CHECK(fst == 0 && wmtr_debug_owned(H, 0x4141414141410ull) == 0, "a result value from the request was listed (st %x)", fst);
+      }
+      shared_refs = [(id)shared retainCount];
+      if (placed) { [(id)placed retain]; placed_refs = [(id)placed retainCount]; } /* watched across destroy */
+      placed_fh = ((struct wmtr_ring *)blob_base[0])->free_head;
     }
     { /* views: ReleaseMetalView releases once; views the client never released go on destroy */
       struct unixcall_create_metal_view_from_hwnd v1 = {.hwnd = 1, .device = 2}, v2 = {.hwnd = 3, .device = 2};
@@ -980,7 +1216,7 @@ int main(void) {
       {
         struct WMTTextureInfo ti = {.pixel_format = 81, .width = 272, .height = 272, .depth = 1, .array_length = 1};
         struct unixcall_mtldevice_newtexture nt = {.device = 0x77}; nt.info.ptr = &ti;
-        CHECK(remote(120, &nt) == 0 && ti.mach_port && nt.ret == 0x5000, "newSharedTexture export: port %u", ti.mach_port);
+        CHECK(remote(120, &nt) == 0 && ti.mach_port && nt.ret && nt.ret == shared_exported_tex, "newSharedTexture export: port %u", ti.mach_port);
         struct unixcall_bootstrap reg = {0};
         snprintf(reg.name, sizeof reg.name, "DXMT_shared_resource_wmtrtest%d", (int)getpid());
         reg.mach_port = ti.mach_port;
@@ -991,7 +1227,7 @@ int main(void) {
         CHECK(remote(122, &look) == 0 && look.mach_port == ti.mach_port, "WMTBootstrapLookUp: %u, want %u", look.mach_port, ti.mach_port);
         struct WMTTextureInfo ti2 = ti; ti2.mach_port = look.mach_port;
         struct unixcall_mtldevice_newtexture open = {.device = 0x77}; open.info.ptr = &ti2;
-        CHECK(remote(120, &open) == 0 && open.ret == 0x5100 && shared_imported == ti.mach_port, "newSharedTexture import");
+        CHECK(remote(120, &open) == 0 && open.ret && open.ret == shared_imported_tex && shared_imported == ti.mach_port, "newSharedTexture import");
         struct unixcall_bootstrap missing = {0}; strcpy(missing.name, "DXMT_shared_resource_never_registered");
         CHECK(remote(122, &missing) != 0 && !missing.mach_port, "WMTBootstrapLookUp of an unknown name succeeded");
         /* ports the host never gave out are refused, so a client cannot publish or open the host's own ports */
@@ -1007,7 +1243,7 @@ int main(void) {
         struct unixcall_bootstrap ereg = {0}; strcpy(ereg.name, "DXMT_shared_resource_fence"); ereg.mach_port = ep.ret_mach_port;
         CHECK(remote(121, &ereg) == 0, "WMTBootstrapRegister of an event port");
         struct unixcall_mtldevice_newsharedeventwithmachport ew = {.device = 0x77, .mach_port = ep.ret_mach_port};
-        CHECK(remote(124, &ew) == 0 && ew.ret_event == 0x5200, "newSharedEventWithMachPort");
+        CHECK(remote(124, &ew) == 0 && ew.ret_event && ew.ret_event == shared_event_obj, "newSharedEventWithMachPort");
         struct unixcall_mtldevice_newsharedeventwithmachport ef = {.device = 0x77, .mach_port = foreign};
         CHECK(remote(124, &ef) != 0, "newSharedEventWithMachPort of a foreign port");
         CHECK(wmtr_host_shared_names() == 2, "%u shared names registered, want 2", wmtr_host_shared_names());
@@ -1056,6 +1292,19 @@ int main(void) {
       printf("wake after destroy: blocked\n");
       /* the client is gone: so are the names it registered */
       CHECK(wmtr_host_shared_names() == 0, "%u shared names left after the client was destroyed", wmtr_host_shared_names());
+      CHECK(owned_alive == 0, "destroy left %d objects the client owned alive", owned_alive);
+      CHECK(!err_alive, "destroy did not release an out-error the client owned");
+      /* `shared` came back autoreleased with no pool open: the host's keep for the client's thread (its outer pool)
+         goes with the client; the client's own retain of an object it did not create is not counted as owned */
+      CHECK([(id)shared retainCount] == shared_refs - 1, "destroy: %lu -> %lu refs (want the client thread's keep only)",
+            (unsigned long)shared_refs, (unsigned long)[(id)shared retainCount]);
+      if (placed) {
+        CHECK([(id)placed retainCount] == placed_refs - 1, "destroy did not release the client's arena buffer (%lu -> %lu refs)",
+              (unsigned long)placed_refs, (unsigned long)[(id)placed retainCount]);
+        [(id)placed release]; /* freed now: its deallocator must not write the destroyed client's ring */
+        usleep(50000);
+        CHECK(((struct wmtr_ring *)blob_base[0])->free_head == placed_fh, "a free reached the ring after destroy");
+      }
       CHECK(n_released == 2 && released[1] == v2.ret_view, "destroy did not release the leftover view (%d releases)", n_released);
       /* WMTR_CALLSTATS: destroy wrote a snapshot; call 39 (sync, above) is in it with its sync count */
       FILE *sf = fopen(stats_path, "r");
