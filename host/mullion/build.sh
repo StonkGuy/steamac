@@ -3,7 +3,7 @@
 # behind the same wmtr transport, its host executor library and its guest dlls. Same steps and toolchains as
 # host/dxmt/build.sh; nothing of the DXMT path's outputs is touched.
 #
-#   host/mullion/build.sh [step...]  steps: fetch llvm native host pe client payload (default: all, in order)
+#   host/mullion/build.sh [step...]  steps: fetch llvm native host pe client payload smoke (default: all, in order)
 #   host/mullion/build.sh clean      drop work/build/mullion* and the unpacked source (keeps work/cache downloads
 #                                    and the shared LLVM 15 under work/out/host/llvm15)
 #
@@ -20,6 +20,9 @@
 #   client   the guest's winemetal.so unixlib (x86-64 ELF, Mullion's unix-call table) + make test-linux, in a
 #            linux/amd64 container (Docker/OrbStack) -> wmtr/build/mullion/x86_64-linux
 #   payload  make -C wmtr MULLION=1 dxmt-payload -> work/out/mullion
+#   smoke    the guest smoke test: wmtr/tests/d3d12_memory.cpp (Direct3D 12 upload/default/readback copies, placed
+#            buffers, a texture, a UAV clear, a compute shader; x86-64 Windows, the pe step's llvm-mingw) and its runner
+#            wmtr/guest/mullion-smoke.sh -> work/out/mullion-smoke
 #
 # Needs what host/dxmt/build.sh needs (Apple silicon macOS, Xcode with its Metal toolchain, Rosetta for the pinned
 # winebuild, Homebrew meson ninja cmake pkgconf zstd, Docker for `client`), with Xcode 26 for `host`.
@@ -108,11 +111,8 @@ step_host() {
     make -C "$root/wmtr" "${mk[@]}" test
 }
 
-step_pe() {
-    log "Mullion PE dlls (llvm-mingw, Wine builtins)"
-    [ -f "$src/meson.build" ] || die "no Mullion source: run the fetch step"
-    arch -x86_64 /usr/bin/true 2>/dev/null || die "Rosetta is needed for the pinned winebuild: softwareupdate --install-rosetta"
-    need_metal
+# the pinned Wine (its winebuild) and llvm-mingw, unpacked once per pin into work/cache/toolchains
+need_toolchains() {
     fetch_file "$WINE_URL" "$WINE_SHA256" "$tcache/wine-8.16-3shain.tar.gz"
     fetch_file "$LLVM_MINGW_URL" "$LLVM_MINGW_SHA256" "$tcache/$LLVM_MINGW.tar.xz"
     if [ "$(cat "$toolchains/.pin" 2>/dev/null)" != "$WINE_SHA256 $LLVM_MINGW_SHA256" ]; then
@@ -121,6 +121,14 @@ step_pe() {
         tar -xJf "$tcache/$LLVM_MINGW.tar.xz" -C "$toolchains"
         echo "$WINE_SHA256 $LLVM_MINGW_SHA256" > "$toolchains/.pin"
     fi
+}
+
+step_pe() {
+    log "Mullion PE dlls (llvm-mingw, Wine builtins)"
+    [ -f "$src/meson.build" ] || die "no Mullion source: run the fetch step"
+    arch -x86_64 /usr/bin/true 2>/dev/null || die "Rosetta is needed for the pinned winebuild: softwareupdate --install-rosetta"
+    need_metal
+    need_toolchains
     PATH="$toolchains/$LLVM_MINGW/bin:$PATH" meson setup --wipe "$pebuild" "$src" --cross-file "$src/build-win64.txt" \
         --buildtype release --strip --prefix "$pebuild/install" -Dwine_install_path="$toolchains/wine" \
         -Dbuild_unixlib=false >/dev/null
@@ -150,12 +158,23 @@ step_payload() {
     (cd "$root/work/out/mullion" && find . -type f | sort | xargs shasum -a 256)
 }
 
+step_smoke() {
+    log "D3D12 smoke test -> work/out/mullion-smoke"
+    need_toolchains
+    local o=$root/work/out/mullion-smoke
+    rm -rf "$o"; mkdir -p "$o"
+    "$toolchains/$LLVM_MINGW/bin/x86_64-w64-mingw32-clang++" -O2 -static -std=c++17 -Wall \
+        "$root/wmtr/tests/d3d12_memory.cpp" -o "$o/d3d12_memory.exe" -ld3d12 -ldxgi
+    install -m 755 "$root/wmtr/guest/mullion-smoke.sh" "$o/mullion-smoke.sh"
+    (cd "$o" && shasum -a 256 d3d12_memory.exe mullion-smoke.sh)
+}
+
 if [ "${1:-}" = clean ]; then
     rm -rf "$src" "$native" "$pebuild" "$root/wmtr/build/mullion"
     exit 0
 fi
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(fetch llvm native host pe client payload)
+[ ${#steps[@]} -gt 0 ] || steps=(fetch llvm native host pe client payload smoke)
 # fetch, client and payload also run on a Linux host
 case " ${steps[*]} " in *" llvm "*|*" native "*|*" host "*|*" pe "*)
     for dep in $BREW_DEPS; do
@@ -164,8 +183,8 @@ case " ${steps[*]} " in *" llvm "*|*" native "*|*" host "*|*" pe "*)
 esac
 for s in "${steps[@]}"; do
     case $s in
-        fetch|llvm|native|host|pe|client|payload) "step_$s" ;;
-        *) die "unknown step: $s (fetch llvm native host pe client payload | clean)" ;;
+        fetch|llvm|native|host|pe|client|payload|smoke) "step_$s" ;;
+        *) die "unknown step: $s (fetch llvm native host pe client payload smoke | clean)" ;;
     esac
 done
 log "done"
