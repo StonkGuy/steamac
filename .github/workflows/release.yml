@@ -9,6 +9,12 @@
 #   layer  Linux arm  DXMT client + payload, scripts/build-image.sh layer
 #   app    macOS      ./build.sh host (bundle.sh checks the guest receipts), dist.sh, dist-verify.sh
 #   release           uploads the three files (the only job with contents: write)
+# With the dispatch input mullion=true (experimental Mullion path; never for pushed tags):
+#   mullion-host  macOS  host/mullion/build.sh fetch llvm native host   (Mullion's executor, its tests)
+#   mullion-pe    macOS  host/mullion/build.sh fetch pe smoke           (Mullion's PE dlls; guest smoke test kit,
+#                                                                       artifact mullion-smoke)
+#   and layer adds host/mullion/build.sh fetch client payload (work/out/mullion -> /usr/lib/steamac/mullion), app
+#   bundles Frameworks/libwmtr_host_mullion.dylib and checks it with --selftest-graphics-path --graphics-path mullion.
 # The guest receipts (scripts/guest-artifacts.py) bind source bytes to output bytes and name no
 # machine or path, so the images built by `guest` are checked again by `app` on its own checkout.
 #
@@ -29,6 +35,11 @@ on:
         description: Existing release to attach the files to (empty = keep them as a workflow artifact only)
         required: false
         default: ''
+      mullion:
+        description: Also build the experimental Mullion path (executor, guest payload, smoke test) into the app
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -109,6 +120,69 @@ jobs:
           name: dxmt-host
           path: dxmt-host.tar
           retention-days: 7
+          if-no-files-found: error
+
+  mullion-host:
+    name: Mullion host library
+    if: ${{ inputs.mullion }}
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - *packaging
+      - *xcode
+      # the dxmt job's LLVM 15 (shared install); only restored here, the dxmt job saves it
+      - name: LLVM 15 cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: llvm15-${{ runner.os }}-${{ runner.arch }}-xcode26.6-${{ hashFiles('host/dxmt/build.sh', 'host/dxmt/pin.env') }}
+      - name: Mullion (fetch, llvm, native, host library and its tests)
+        run: host/mullion/build.sh fetch llvm native host
+      - name: Pack
+        run: |
+          otool -l work/out/mullion-host/lib/libwmtr_host.dylib | grep -A4 LC_BUILD_VERSION
+          tar -cf mullion-host.tar work/out/mullion-host/lib/libwmtr_host.dylib
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mullion-host
+          path: mullion-host.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  mullion-pe:
+    name: Mullion PE dlls and smoke test
+    if: ${{ inputs.mullion }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - *packaging
+      - *xcode
+      - name: Mullion (fetch, pe, smoke)
+        run: host/mullion/build.sh fetch pe smoke
+      - name: Pack
+        run: |
+          (cd work/out/mullion-pe && shasum -a 256 *.dll)
+          tar -cf mullion-pe.tar work/out/mullion-pe
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mullion-pe
+          path: mullion-pe.tar
+          retention-days: 7
+          if-no-files-found: error
+      # the guest smoke (wmtr/guest/mullion-smoke.sh): copy both files into the guest and run the script there
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mullion-smoke
+          path: work/out/mullion-smoke
+          retention-days: 30
           if-no-files-found: error
 
   guest:
@@ -233,7 +307,11 @@ jobs:
 
   layer:
     name: DXMT guest payload and layer
-    needs: [dxmt, guest]
+    needs: [dxmt, guest, mullion-pe]
+    # mullion-pe runs only with mullion=true; skipped is fine
+    if: >-
+      ${{ !cancelled() && needs.dxmt.result == 'success' && needs.guest.result == 'success'
+      && contains(fromJSON('["success", "skipped"]'), needs.mullion-pe.result) }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
@@ -250,14 +328,22 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dxmt-host
+      - if: ${{ inputs.mullion }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mullion-pe
       - name: Unpack (receipts checked against this checkout)
         run: |
           tar -xf guest-base.tar
           tar -xf dxmt-host.tar work/out/dxmt-pe
           rm guest-base.tar dxmt-host.tar
+          if [ -f mullion-pe.tar ]; then tar -xf mullion-pe.tar; rm mullion-pe.tar; fi
           python3 scripts/guest-artifacts.py check mesa
       - name: DXMT guest payload (client, payload)
         run: host/dxmt/build.sh fetch client payload
+      - name: Mullion guest payload (client, payload)
+        if: ${{ inputs.mullion }}
+        run: host/mullion/build.sh fetch client payload
       - name: Layer
         run: |
           scripts/build-image.sh builder layer
@@ -274,7 +360,7 @@ jobs:
             work/out/initramfs.cpio.gz work/out/initramfs.cpio.gz.inputs.json \
             work/out/steamac-layer.img work/out/steamac-layer.img.inputs.json \
             work/out/mesa-venus work/out/mesa-venus.inputs.json work/out/mesa-aarch64.inputs.json work/out/mesa-x86.inputs.json \
-            work/out/dxmt work/out/guest-toolchain.json \
+            work/out/dxmt $(test -d work/out/mullion && echo work/out/mullion) work/out/guest-toolchain.json \
             work/cache/licenses work/cache/cargo-home/registry \
             work/cache/kernel/*.tar.xz work/cache/dosfstools/*/*.tar.gz work/cache/e2fsprogs/*/*.tar.xz work/cache/btrfs-progs/*/*.tar.xz
           ls -l guest.tar
@@ -287,7 +373,10 @@ jobs:
 
   app:
     name: Host stack, app, DMG
-    needs: [dxmt, layer]
+    needs: [dxmt, layer, mullion-host]
+    if: >-
+      ${{ !cancelled() && needs.dxmt.result == 'success' && needs.layer.result == 'success'
+      && contains(fromJSON('["success", "skipped"]'), needs.mullion-host.result) }}
     runs-on: macos-26
     timeout-minutes: 240
     steps:
@@ -305,6 +394,10 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: guest
+      - if: ${{ inputs.mullion }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mullion-host
       - name: Guest images and DXMT host library into work/
         run: |
           tar -xf guest.tar
@@ -314,6 +407,12 @@ jobs:
           # the licence and source-offer step (host/launcher/licenses.sh) ships DXMT's pinned source tarball and
           # its DirectX headers from work/cache/dxmt, which only the dxmt and layer jobs have downloaded
           host/dxmt/build.sh fetch
+          # the same for Mullion (work/cache/mullion), with its executor (bundle.sh: libwmtr_host_mullion.dylib)
+          if [ -f mullion-host.tar ]; then
+            tar -xf mullion-host.tar work/out/mullion-host/lib/libwmtr_host.dylib
+            rm mullion-host.tar
+            host/mullion/build.sh fetch
+          fi
       # GitHub-hosted macOS runners are virtual machines: their GPU is a paravirtual Metal device without
       # the features of Apple silicon (mesh shaders, Metal 4). The MoltenVK repros and KosmicKrisp's
       # probe/repros run on a Mac against the built dylibs instead (docs/release-build.md); every other
@@ -333,6 +432,14 @@ jobs:
             echo "=== --selftest-$t"
             "$app" "--selftest-$t"
           done
+      - name: Mullion path in the app
+        if: ${{ inputs.mullion }}
+        run: |
+          app="work/out/FX Steam Launcher.app"
+          otool -D "$app/Contents/Frameworks/libwmtr_host_mullion.dylib"
+          grep -A3 '^Mullion' "$app/Contents/Resources/licenses/THIRD-PARTY-NOTICES.txt"
+          echo "=== --selftest-graphics-path --graphics-path mullion"
+          "$app/Contents/MacOS/steamac-vm" --selftest-graphics-path --graphics-path mullion
       - name: DMG (ad hoc signature)
         env:
           DIST_SIGN: adhoc
