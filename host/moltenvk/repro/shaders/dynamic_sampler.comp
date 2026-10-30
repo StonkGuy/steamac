@@ -1,0 +1,12 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform sampler2D imageSampler;
+layout(set = 0, binding = 1, std430) buffer Output { vec4 value; } result;
+vec4 sampleHelper(sampler2D tex, vec2 coord)
+{
+    return textureLod(tex, coord, 0.0);
+}
+void main()
+{
+    result.value = sampleHelper(imageSampler, vec2(0.5));
+}

@@ -357,7 +357,7 @@ struct VRTab: View {
                                + (VRHost.path == nil ? " " + String(localized: "Not included in this build.") : ""),
                            now: false, key: .vrEnabled)
                 }
-                .disabled(settings.graphicsPath != .dxmt || (VRHost.path == nil && !settings.vrEnabled))
+                .disabled(!settings.wmtr || (VRHost.path == nil && !settings.vrEnabled))
             }
 
             Section {

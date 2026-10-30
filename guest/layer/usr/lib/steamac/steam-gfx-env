@@ -11,6 +11,10 @@ set -euo pipefail
 
 gfx=${XDG_RUNTIME_DIR:?}/steam/env/gfx.txt
 [[ -f $gfx ]] || exit 0
+
+# VKD3D_DISABLE_EXTENSIONS belongs in steam.service's inherited environment,
+# not gfx.txt: the launch wrapper overwrites inherited variables from this file.
+# Leave explicit stock/user lists alone, including their precedence over titles.
 budget=
 for word in $(cat /proc/cmdline); do
     case $word in steamac.gpu_mib=*) budget=${word#*=} ;; esac
@@ -21,7 +25,8 @@ case $budget in
 esac
 
 # Bounded: a wedged virtio-gpu fence must never block steam.service start.
-id=$(timeout -k 2 10 vulkaninfo --summary 2>/dev/null | awk '
+summary=$(timeout -k 2 10 vulkaninfo --summary 2>/dev/null) || summary=
+id=$(printf '%s\n' "$summary" | awk '
     $1 == "vendorID" { v = $3 }
     $1 == "deviceID" { d = $3 }
     $1 == "driverID" && $3 == "DRIVER_ID_MESA_VENUS" { print v ":" d; exit }')

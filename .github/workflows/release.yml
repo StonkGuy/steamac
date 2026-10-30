@@ -311,6 +311,9 @@ jobs:
           tar -xf dxmt-host.tar work/out/host/lib/libwmtr_host.dylib
           rm guest.tar dxmt-host.tar
           python3 scripts/guest-artifacts.py check-release
+          # the licence and source-offer step (host/launcher/licenses.sh) ships DXMT's pinned source tarball and
+          # its DirectX headers from work/cache/dxmt, which only the dxmt and layer jobs have downloaded
+          host/dxmt/build.sh fetch
       # GitHub-hosted macOS runners are virtual machines: their GPU is a paravirtual Metal device without
       # the features of Apple silicon (mesh shaders, Metal 4). The MoltenVK repros and KosmicKrisp's
       # probe/repros run on a Mac against the built dylibs instead (docs/release-build.md); every other

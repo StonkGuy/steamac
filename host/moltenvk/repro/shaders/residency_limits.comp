@@ -1,0 +1,10 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform usamplerBuffer buffers[3];
+layout(set = 0, binding = 1, std430) buffer Output { uint values[]; } result;
+void main()
+{
+    result.values[0] = texelFetch(buffers[0], 0).x;
+    result.values[1] = texelFetch(buffers[1], 0).x;
+    result.values[2] = texelFetch(buffers[2], 0).x;
+}

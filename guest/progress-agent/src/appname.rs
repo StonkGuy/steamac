@@ -5,7 +5,47 @@
 //! whose AppState "name" key is the display name. Both files are Valve KeyValues
 //! text; only quoted tokens matter here, so a tiny tokenizer is enough.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+
+use crate::port::Port;
+
+/// Shared by focus and scope tracking: report a game's name at most once per
+/// boot, including across agent/session restarts. Missing manifests are retried.
+pub struct Names {
+    steam_root: PathBuf,
+    marker: PathBuf,
+    named: HashSet<u32>,
+}
+
+impl Names {
+    pub fn new(steam_root: PathBuf, marker: PathBuf) -> Names {
+        let named = std::fs::read_to_string(&marker).ok().map(|text| {
+            let mut lines = text.lines();
+            if lines.next().map(str::trim) == Some(crate::boot_id().as_str()) {
+                lines.filter_map(|line| line.trim().parse().ok()).collect()
+            } else {
+                HashSet::new()
+            }
+        }).unwrap_or_default();
+        Names { steam_root, marker, named }
+    }
+
+    pub fn report(&mut self, appid: u32, port: &mut Port) {
+        if self.named.contains(&appid) {
+            return;
+        }
+        if let Some(name) = lookup(&self.steam_root, appid) {
+            port.send(&format!("game {appid} {name}"));
+            self.named.insert(appid);
+            let mut marker = crate::boot_id();
+            for id in &self.named {
+                marker.push_str(&format!("\n{id}"));
+            }
+            let _ = std::fs::write(&self.marker, marker);
+        }
+    }
+}
 
 /// Quoted tokens of a KeyValues text, with \" \\ \n \t unescaped.
 fn tokens(text: &str) -> Vec<String> {
@@ -39,7 +79,15 @@ fn first_value(text: &str, key: &str) -> Option<String> {
     t.windows(2).find(|w| w[0].eq_ignore_ascii_case(key)).map(|w| w[1].clone())
 }
 
-fn library_dirs(steam_root: &PathBuf) -> Vec<PathBuf> {
+/// Steam's default library; shared by manifest and Proton prefix lookups.
+pub(crate) fn steam_root() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/steamos".into());
+    std::env::var("FX_PROGRESS_STEAM_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(format!("{home}/.local/share/Steam")))
+}
+
+pub(crate) fn library_dirs(steam_root: &PathBuf) -> Vec<PathBuf> {
     let mut dirs = vec![steam_root.clone()];
     if let Ok(vdf) = std::fs::read_to_string(steam_root.join("steamapps/libraryfolders.vdf")) {
         let t = tokens(&vdf);
@@ -57,13 +105,6 @@ fn library_dirs(steam_root: &PathBuf) -> Vec<PathBuf> {
 
 /// Display name of `appid` from the first library that has its manifest,
 /// sanitised to one line of printable text; None if not installed/unknown.
-fn steam_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/steamos".into());
-    std::env::var("FX_PROGRESS_STEAM_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(format!("{home}/.local/share/Steam")))
-}
-
 /// Known VR titles (installed copies are listed even without a .vrmanifest).
 const KNOWN_VR: &[u32] = &[438100 /* VRChat */];
 /// VR companions/tools, not games: never offered as a game to launch.
@@ -109,12 +150,8 @@ pub fn vr_apps_line() -> String {
     std::iter::once("vr-apps".to_string()).chain(ids.iter().map(|i| i.to_string())).collect::<Vec<_>>().join(" ")
 }
 
-pub fn lookup(appid: u32) -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/steamos".into());
-    let root = std::env::var("FX_PROGRESS_STEAM_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(format!("{home}/.local/share/Steam")));
-    for dir in library_dirs(&root) {
+fn lookup(root: &PathBuf, appid: u32) -> Option<String> {
+    for dir in library_dirs(root) {
         let acf = dir.join(format!("steamapps/appmanifest_{appid}.acf"));
         let Ok(text) = std::fs::read_to_string(&acf) else { continue };
         if let Some(name) = first_value(&text, "name") {

@@ -1,6 +1,7 @@
 //! `fx-progress-agent pad`: root system service (fx-pad.service, started by udev when the
-//! launcher's virtio-console port `fx.pad` appears) that owns the guest's gamepad. The pad is
-//! one of two kinds:
+//! launcher's virtio-console port `fx.pad` appears) that owns the guest's gamepad. Further
+//! players' pads have a port (`fx.pad2`, ...) and an instance of this service each
+//! (fx-pad@.service, FX_PAD_PORT). The pad is one of two kinds:
 //! - a uinput device the launcher drives from the Mac's controller (GameController); its force
 //!   feedback (FF_RUMBLE, what SDL and Steam use for rumble) goes back to the launcher, which
 //!   plays it on the controller;
@@ -38,7 +39,8 @@
 //! it, concurrent effects add up and saturate) on a millisecond clock, testable without a device.
 //! A uhid pad has no such thing: its driver sends rumble in its own output reports.
 //!
-//! Environment overrides (testing): FX_PAD_PORT=<path>, FX_PAD_UINPUT=<path>, FX_PAD_UHID=<path>.
+//! Environment overrides: FX_PAD_PORT=<path> (fx-pad@.service: a further player's port; testing),
+//! FX_PAD_UINPUT=<path>, FX_PAD_UHID=<path> (testing).
 
 use std::collections::BTreeMap;
 use std::ffi::CString;

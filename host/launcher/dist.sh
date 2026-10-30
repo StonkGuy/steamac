@@ -8,7 +8,7 @@
 # Mach-O (Frameworks dylibs, helper tools in Resources) is signed before the bundle, so helpers
 # added to bundle.sh later are covered without changes here.
 #
-#   host/launcher/dist.sh [--no-notarize]
+#   host/launcher/dist.sh [--no-notarize] [--no-sentry-upload]
 #
 # DIST_SIGN=adhoc builds the same DMG without an Apple Developer account (CI release builds, forks):
 # the copy is signed ad hoc (codesign -s -, no hardened runtime, no timestamp) with the same
@@ -25,9 +25,15 @@
 #                          xcrun notarytool store-credentials steamac-notary \
 #                              --apple-id <Apple ID> --team-id <team> --password <app-specific password>
 #   --no-notarize          sign only (local tests; Gatekeeper rejects downloaded copies)
-#   SENTRY_AUTH_TOKEN      optional: upload debug files for crash reports (work/out/dSYMs from
-#   SENTRY_ORG             build.sh + the app's executables and libraries, matched by Mach-O UUID)
-#   SENTRY_PROJECT         with sentry-cli to https://sentry.fxgam.es; skipped when unset
+#   --no-sentry-upload     do not upload debug files (only implied by --no-notarize)
+#   SENTRY_AUTH_TOKEN      required for a notarized build: upload the debug files of every Mach-O the
+#   SENTRY_ORG             app ships (work/out/dSYMs from build.sh + the executables and libraries
+#   SENTRY_PROJECT         themselves) with sentry-cli to https://sentry.fxgam.es, matched by Mach-O UUID.
+#                          1.9 shipped without them (no SENTRY_* set, only a "NOT uploaded" line), so
+#                          crashes in steamac-vm and libkrun stayed unsymbolicated: checked before
+#                          signing now, and every shipped Mach-O must pass sentry-cli debug-files check.
+#                          The dSYMs are kept as work/out/dist/FX-Steam-Launcher-<version>-dSYMs (later
+#                          builds replace work/out/dSYMs).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -41,18 +47,30 @@ ENTITLEMENTS="$HERE/steamac-vm.entitlements"
 die() { echo "dist.sh: $*" >&2; exit 1; }
 
 notarize=1
-case ${1:-} in
-    "") ;;
-    --no-notarize) notarize=0 ;;
-    *) die "usage: $0 [--no-notarize]" ;;
-esac
+sentry_upload=1
+for arg in "$@"; do
+    case $arg in
+        --no-notarize) notarize=0; sentry_upload=0 ;;
+        --no-sentry-upload) sentry_upload=0 ;;
+        *) die "usage: $0 [--no-notarize] [--no-sentry-upload]" ;;
+    esac
+done
 mode=${DIST_SIGN:-developer-id}
 case $mode in
     developer-id) ;;
-    adhoc) notarize=0 ;;
+    adhoc) notarize=0; sentry_upload=0 ;;
     *) die "DIST_SIGN must be developer-id or adhoc, not '$mode'" ;;
 esac
 [[ -d $SRC ]] || die "missing $SRC (run host/launcher/build.sh)"
+# Crash reports of a release need its symbols: fail before signing, not after notarizing.
+if [[ $sentry_upload == 1 ]]; then
+    [[ -n ${SENTRY_AUTH_TOKEN:-} && -n ${SENTRY_ORG:-} && -n ${SENTRY_PROJECT:-} ]] \
+        || die "set SENTRY_AUTH_TOKEN, SENTRY_ORG and SENTRY_PROJECT (debug files for crash reports), or pass --no-sentry-upload"
+    command -v sentry-cli >/dev/null || die "sentry-cli not found (brew install getsentry/tools/sentry-cli)"
+    [[ $(dwarfdump --uuid "$SRC/Contents/MacOS/steamac-vm" | awk '{print $2; exit}') == \
+       $(dwarfdump --uuid "$OUT/dSYMs/steamac-vm.dSYM" 2>/dev/null | awk '{print $2; exit}') ]] \
+        || die "work/out/dSYMs/steamac-vm.dSYM is not the app's steamac-vm: rebuild with build.sh"
+fi
 # An already assembled app is not an escape hatch around guest provenance.
 # Check its own sealed resource bytes and receipts before touching dist/.
 python3 "$ROOT/scripts/guest-artifacts.py" check-bundle "$SRC/Contents/Resources"
@@ -191,16 +209,21 @@ elif [[ $notarize != 1 ]]; then
 fi
 
 # Debug files for symbolicated crash reports (CrashReporting.swift). Never a hardcoded token.
-if [[ -z ${SENTRY_AUTH_TOKEN:-} || -z ${SENTRY_ORG:-} || -z ${SENTRY_PROJECT:-} ]]; then
-    echo "debug files NOT uploaded to Sentry: set SENTRY_AUTH_TOKEN, SENTRY_ORG and SENTRY_PROJECT to upload"
-elif ! command -v sentry-cli >/dev/null; then
-    echo "debug files NOT uploaded to Sentry: sentry-cli not found (brew install getsentry/tools/sentry-cli)"
+if [[ $sentry_upload == 0 ]]; then
+    echo "debug files NOT uploaded to Sentry (--no-notarize / --no-sentry-upload)"
 else
-    [[ -d $OUT/dSYMs ]] || die "missing $OUT/dSYMs (run host/launcher/build.sh)"
-    exe_uuid=$(dwarfdump --uuid "$DIST/$NAME.app/Contents/MacOS/steamac-vm" | awk '{print $2; exit}')
-    dsym_uuid=$(dwarfdump --uuid "$OUT/dSYMs/steamac-vm.dSYM" | awk '{print $2; exit}')
-    [[ $exe_uuid == "$dsym_uuid" ]] || die "work/out/dSYMs/steamac-vm.dSYM ($dsym_uuid) is not the app's steamac-vm ($exe_uuid): rebuild with build.sh"
-    echo "=== uploading debug files to sentry.fxgam.es ($SENTRY_ORG/$SENTRY_PROJECT)"
+    # Every Mach-O the app ships (executable, Frameworks, helpers in Resources), each checked usable
+    # by sentry-cli (symbol table and unwind info) and uploaded with the build's dSYMs.
+    machos=()
+    while IFS= read -r -d '' f; do
+        dwarfdump --uuid "$f" >/dev/null 2>&1 || continue
+        [[ $(sentry-cli debug-files check "$f") == *"Usable: yes"* ]] || die "no usable debug information in $f"
+        machos+=("$f")
+    done < <(find "$DIST/$NAME.app/Contents" -type f \( -perm -u+x -o -name '*.dylib' \) -print0)
+    kept="$DIST/FX-Steam-Launcher-$version-dSYMs"
+    rm -rf "$kept"
+    cp -R "$OUT/dSYMs" "$kept"
+    echo "=== uploading debug files of ${#machos[@]} Mach-O files + $kept to sentry.fxgam.es ($SENTRY_ORG/$SENTRY_PROJECT)"
     sentry-cli --url https://sentry.fxgam.es debug-files upload --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" \
-        "$OUT/dSYMs" "$DIST/$NAME.app/Contents/MacOS" "$DIST/$NAME.app/Contents/Frameworks"
+        --wait "$kept" "${machos[@]}"
 fi

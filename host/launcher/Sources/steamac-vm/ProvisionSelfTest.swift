@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -28,6 +29,49 @@ enum ProvisionSelfTest {
         // desync progress lines.
         check(DiskCreator.percent(in: "Attempt 1: Assembling   32.27% 1m2s") == 32.27, "desync progress parse")
         check(DiskCreator.percent(in: "Attempt 1: Validating ") == nil, "desync non-progress line")
+        // desync's pty output as read when a chunk download fails (desync 1.1.4, store
+        // unreachable): "\r\n" ends the progress line before "Error: …" (STEAMAC-2J).
+        let chunk = "aefdae76bcb0938909114209683c1932cd522da1d0bfeb4d7bdde5ef4746a318"
+        let failedOutput = "\rAttempt 1: Validating \rAttempt 1: Validating  0s\r\n\rAttempt 1: Assembling    0.00%"
+            + "\rAttempt 1: Assembling   61.04% 8m57s\r\nError: http://127.0.0.1:1/: http://127.0.0.1:1/aefd/\(chunk).cacnk: "
+            + "Get \"http://127.0.0.1:1/aefd/\(chunk).cacnk\": dial tcp 127.0.0.1:1: connect: connection refused\r\n"
+        // One read (the failing case), and reads split between "\r" and "\n".
+        let bytes = Array(failedOutput.utf8)
+        let crlf = bytes.indices.dropLast().filter { bytes[$0] == 13 && bytes[$0 + 1] == 10 }
+        var lines: [String] = []
+        for cuts in [[], crlf.map { $0 + 1 }] {
+            var pending = "", got: [String] = [], from = 0
+            for cut in cuts + [bytes.count] {
+                pending += String(decoding: bytes[from..<cut], as: UTF8.self)
+                got += DiskCreator.terminalLines(&pending)
+                from = cut
+            }
+            got += DiskCreator.terminalLines(&pending, final: true)
+            let errorLine = got.first { $0.hasPrefix("Error: ") }
+            check(got.contains("Attempt 1: Assembling   61.04% 8m57s") && errorLine != nil && DiskCreator.percent(in: errorLine!) == nil
+                  && got.allSatisfy { !$0.contains("\r") && !$0.contains("\n") },
+                  "desync \"\\r\\n\" ends the progress line: the Error line is its own non-progress line, \(cuts.count + 1) read(s) (STEAMAC-2J)")
+            lines = got
+        }
+        var unterminated = "Attempt 1: Assembling   1.00%\rError: last words"
+        check(DiskCreator.terminalLines(&unterminated) == ["Attempt 1: Assembling   1.00%"] && unterminated == "Error: last words"
+              && DiskCreator.terminalLines(&unterminated, final: true) == ["Error: last words"], "unterminated last desync line kept")
+        let network = DiskCreator.desyncFailure(status: 1, output: lines.filter { DiskCreator.percent(in: $0) == nil && !$0.hasPrefix("Attempt ") })
+        check(network is DiskCreationFilesystem.Rejection && "\(network)".contains("connection refused") && !"\(network)".contains(chunk),
+              "desync download failure: log-only rejection with desync's error, chunk ids left out")
+        let full = DiskCreator.desyncFailure(status: 1, output: ["Error: write /Volumes/Untitled/steamos.img.rootfs-tmp: no space left on device"])
+        check(full is DiskCreationFilesystem.Rejection && CrashReporting.diskCreationReport(full) == nil, "desync out of space is log-only")
+        let other = [DiskCreator.desyncFailure(status: 1, output: ["Error: chunk \(chunk) missing from store"]),
+                     DiskCreator.desyncFailure(status: 1, output: ["Error: chunk 4bbce92bb44181499e4dec8c0872563475175cbce8cf5f50cbd6b33812a61246 missing from store"])]
+        check(other.allSatisfy { $0 is OptionError && "\($0)" == "desync extract failed (exit 1): chunk <chunk> missing from store" }
+              && CrashReporting.diskCreationReport(other[0])?.key == CrashReporting.diskCreationReport(other[1])?.key,
+              "other desync failures are reported with desync's error, grouped across chunks")
+        // SteamOS 20261007's index: 63188 unique chunks, 4402745357 bytes. On exFAT with 128 KiB
+        // clusters (a 2 TB drive) the chunk cache took 28032630784 bytes (STEAMAC-30).
+        check(DiskCreator.chunkCacheBytes(dataBytes: 4_402_745_357, chunks: 63188, blockSize: 128 << 10) >= 28_032_630_784,
+              "exFAT chunk cache estimate covers per-file and per-directory cluster slack (STEAMAC-30)")
+        check(DiskCreator.sparseWorkingBytes(rootBytes: 10 << 30, dataBytes: 4_402_745_357)
+              == 19_542_908_954, "space includes desync's fully preallocated 10 GiB temporary rootfs (STEAMAC-48)")
 
         check(DiskCreator.branches == ["stable", "rc"], "stable and rc branches offered")
         for branch in DiskCreator.branches {
@@ -51,10 +95,8 @@ enum ProvisionSelfTest {
                                                                     userInfo: ["_kCFStreamErrorCodeKey": -9816])])
         let tlsB = NSError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed,
                            userInfo: [NSLocalizedDescriptionKey: "TLS failed, task <\(UUID().uuidString)>"])
-        let reportA = CrashReporting.diskCreationReport(tlsA), reportB = CrashReporting.diskCreationReport(tlsB)
-        check(reportA?.key == "NSURLErrorDomain -1200" && reportA?.key == reportB?.key
-              && reportA?.message == reportB?.message, "TLS reports group by domain/code, not task UUID")
-        check(reportA?.extra["error_detail"] == "\(tlsA)", "report retains original technical detail")
+        check(CrashReporting.diskCreationReport(tlsA) == nil && CrashReporting.diskCreationReport(tlsB) == nil,
+              "system TLS failures are log-only without changing certificate validation")
         let tlsMessage = NetworkFailure.message(tlsA, server: .valve)
         check(tlsMessage.contains("Valve's servers securely") && tlsMessage.contains("VPN, proxy, or network filter"),
               "disk TLS message explains possible network interference")
@@ -63,6 +105,28 @@ enum ProvisionSelfTest {
         let offline = NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet)
         check(NetworkFailure.message(offline, server: .valve).contains("Check your internet connection"),
               "offline download message")
+        for code in [NSURLErrorTimedOut, NSURLErrorNotConnectedToInternet, NSURLErrorCannotFindHost,
+                     NSURLErrorNetworkConnectionLost, NSURLErrorSecureConnectionFailed] {
+            check(CrashReporting.diskCreationReport(NSError(domain: NSURLErrorDomain, code: code)) == nil,
+                  "expected URLSession connectivity failure is log-only: \(code)")
+        }
+        check(CrashReporting.diskCreationReport(NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotParseResponse)) != nil,
+              "unexpected URLSession protocol failure remains reportable")
+        for code in [EROFS, EACCES, EPERM, ENOSPC, EDQUOT, ENXIO, ENODEV, EIO] {
+            let detail = "write /Volumes/test/steamos.img: \(String(cString: strerror(code)))"
+            let posix = NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            let cocoa = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
+                                userInfo: [NSUnderlyingErrorKey: posix])
+            check([posix as Error, cocoa as Error, OptionError(detail)].allSatisfy {
+                DiskCreationFilesystem.rejection($0) != nil && CrashReporting.diskCreationReport($0) == nil
+            }, "filesystem condition at any creation stage is log-only: \(code)")
+            let desync = DiskCreator.desyncFailure(status: 1, output: ["Error: failed to store in local cache: \(detail.lowercased())"])
+            check(desync is DiskCreationFilesystem.Rejection && CrashReporting.diskCreationReport(desync) == nil,
+                  "desync filesystem condition is log-only: \(code)")
+        }
+        check(DiskCreator.cacheRenameCollision(output: ["Error: failed to store in local cache: rename /cache/.tmp-cacnk.1 /cache/chunk.cacnk: file exists"])
+              && !DiskCreator.cacheRenameCollision(output: ["Error: rename /rootfs /output: file exists"]),
+              "only chunk-cache rename collisions trigger uncached serial recovery")
         for reason in ["not enough free space", "FAT32/MS-DOS volume", "read-only volume", "already exists"] {
             check(CrashReporting.diskCreationReport(DiskCreationFilesystem.Rejection(reason)) == nil,
                   "expected location rejection is log-only: \(reason)")
@@ -131,12 +195,8 @@ enum ProvisionSelfTest {
                           "live downloader rejects untrusted TLS")
                     log("selftest-provision: TLS details: \(error)")
                     log("selftest-provision: TLS message: \(NetworkFailure.message(error, server: .valve))")
-                    if let failure = CrashReporting.diskCreationReport(error) {
-                        log("selftest-provision: TLS title: \(failure.message)")
-                        log("selftest-provision: TLS fingerprint: [\(CrashReporting.Kind.diskCreationFailed.rawValue), \(failure.key)] (not sent)")
-                    } else {
-                        check(false, "TLS failure must produce a report descriptor")
-                    }
+                    check(CrashReporting.diskCreationReport(error) == nil, "live TLS failure is log-only")
+                    check(NetworkFailure.isExpected(error), "live TLS failure is an expected connectivity condition")
                 }
             } else {
                 check(false, "STEAMAC_PROVISION_TEST_TLS_URL must be an HTTPS URL")
@@ -195,6 +255,82 @@ enum ProvisionSelfTest {
             check(rejected, "unwritable folder rejected before download, log-only (STEAMAC-2H)")
         }
 
+        attempt("sparse rootfs copy and integrity") {
+            let fm = FileManager.default
+            let dir = NSTemporaryDirectory() + "steamac-rootfs-\(UUID().uuidString)"
+            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(atPath: dir) }
+            let size = 2 << 20
+            var data = Data(count: size)
+            data.replaceSubrange(123..<40000, with: repeatElement(UInt8(0x5a), count: 40000 - 123))
+            data.replaceSubrange((size - 40000)..<(size - 123), with: repeatElement(UInt8(0xa5), count: 40000 - 123))
+            let source = dir + "/rootfs"
+            let input = open(source, O_RDWR | O_CREAT | O_EXCL, 0o600)
+            guard input >= 0 else { throw OptionError("open test rootfs") }
+            defer { close(input) }
+            guard ftruncate(input, off_t(size)) == 0 else { throw OptionError("truncate test rootfs") }
+            try data.withUnsafeBytes {
+                try GPT.pwriteAll(input, UnsafeRawBufferPointer(rebasing: $0[0..<65536]), at: 0)
+                try GPT.pwriteAll(input, UnsafeRawBufferPointer(rebasing: $0[(size - 65536)..<size]), at: UInt64(size - 65536))
+            }
+            let expected = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            for sparse in [true, false] {
+                let target = dir + "/copy-\(sparse)"
+                let output = open(target, O_RDWR | O_CREAT | O_EXCL, 0o600)
+                guard output >= 0 else { throw OptionError("open test copy") }
+                defer { close(output) }
+                guard ftruncate(output, off_t(2 * size)) == 0 else { throw OptionError("truncate test copy") }
+                try DiskCreator().copyRootfs(source, size: UInt64(size), into: output,
+                                             offsets: [0, UInt64(size)], sha256: expected, sparse: sparse)
+                check(try Data(contentsOf: URL(fileURLWithPath: target)) == data + data,
+                      "rootfs hash and both slots match with sparse=\(sparse)")
+                do {
+                    try DiskCreator().copyRootfs(source, size: UInt64(size), into: output,
+                                                 offsets: [], sha256: String(repeating: "0", count: 64), sparse: sparse)
+                    check(false, "incorrect rootfs hash must fail")
+                } catch is DiskCreator.IntegrityFailure {
+                    check(fm.fileExists(atPath: source), "failed rootfs kept until recovery can diagnose its bytes")
+                }
+            }
+            if let desync = DiskCreator.desyncPath {
+                let store = dir + "/store", cache = dir + "/cache", index = dir + "/rootfs.caibx"
+                try fm.createDirectory(atPath: store, withIntermediateDirectories: true)
+                try fm.createDirectory(atPath: cache, withIntermediateDirectories: true)
+                let make = Process(), output = Pipe()
+                make.executableURL = URL(fileURLWithPath: desync)
+                make.arguments = ["make", "--store", store, index, source]
+                make.standardOutput = output; make.standardError = output
+                try make.run()
+                let diagnostic = output.fileHandleForReading.readDataToEndOfFile()
+                make.waitUntilExit()
+                guard make.terminationStatus == 0 else { throw OptionError("desync fixture: \(String(decoding: diagnostic, as: UTF8.self))") }
+                let creator = DiskCreator()
+                let info = try creator.desyncInfo(desync, index)
+                check(info.bytes > 0 && info.chunks > 0, "desync info parses real signed-index format")
+                for (name, useCache) in [("cached", true), ("repaired", true), ("uncached", false)] {
+                    if name == "repaired", let chunk = (fm.enumerator(atPath: cache)?.allObjects as? [String])?.first(where: { $0.hasSuffix(".cacnk") }) {
+                        try Data("broken cache chunk".utf8).write(to: URL(fileURLWithPath: cache + "/" + chunk))
+                    }
+                    let extracted = dir + "/" + name
+                    try creator.reconstruct(desync, index, extracted, stores: [store], cache: useCache ? cache : nil,
+                                            dataBytes: info.bytes, concurrency: useCache ? 16 : 1)
+                    check(try Data(contentsOf: URL(fileURLWithPath: extracted)) == data,
+                          "real desync extraction matches original: \(name)")
+                }
+                let invalid = dir + "/invalid.caibx"
+                try Data("invalid index".utf8).write(to: URL(fileURLWithPath: invalid))
+                do {
+                    _ = try creator.desyncInfo(desync, invalid)
+                    check(false, "invalid desync index must fail")
+                } catch {
+                    check("\(error)".contains("exit 1") && "\(error)".contains("Error:"),
+                          "desync info preserves its actual stderr instead of hiding it (STEAMAC-40)")
+                }
+            } else {
+                log("selftest-provision: SKIP real desync fixture (desync not found)")
+            }
+        }
+
         // GPT: writer -> reader round trip on a sparse temp file.
         let table = DiskLayout.table(homeGiB: DiskLayout.defaultHomeGiB)
         attempt("GPT round trip") {
@@ -228,8 +364,13 @@ enum ProvisionSelfTest {
         if FileManager.default.isReadableFile(atPath: reference) {
             attempt("reference GPT \(reference)") {
                 let ref = try GPT.read(path: reference)
+                // Reference disks may use a non-default home size; match that request while
+                // still comparing every extent/header/MBR against the independent sgdisk image.
+                guard let referenceHome = ref.entry("home") else { throw OptionError("reference has no home partition") }
+                let homeGiB = Int(referenceHome.sectors * DiskLayout.sector / (1 << 30))
+                let table = DiskLayout.table(homeGiB: homeGiB)
                 log("selftest-provision: reference \(reference):\n" + ref.dump())
-                log("selftest-provision: new table (home \(DiskLayout.defaultHomeGiB) GiB):\n" + table.dump())
+                log("selftest-provision: new table (home \(homeGiB) GiB):\n" + table.dump())
                 check(ref.entries.map(\.name) == table.entries.map(\.name), "partition names/order")
                 check(ref.entries.map(\.type) == table.entries.map(\.type), "partition type GUIDs")
                 check(ref.entries.map(\.firstLBA) == table.entries.map(\.firstLBA), "partition start sectors")

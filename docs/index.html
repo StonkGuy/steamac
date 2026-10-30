@@ -37,6 +37,7 @@
   <nav class="nav-links">
     <a href="#scene"><span lang="en">Inside</span><span lang="ru">Внутри</span><span lang="zh">内部</span></a>
     <a href="#proof"><span lang="en">Games</span><span lang="ru">Игры</span><span lang="zh">游戏</span></a>
+    <a href="games.html"><span lang="en">Statistics</span><span lang="ru">Статистика</span><span lang="zh">统计</span></a>
     <a href="#graphics"><span lang="en">Graphics</span><span lang="ru">Графика</span><span lang="zh">图形</span></a>
     <a href="#settings"><span lang="en">Settings</span><span lang="ru">Настройки</span><span lang="zh">设置</span></a>
     <a href="#get"><span lang="en">Download</span><span lang="ru">Скачать</span><span lang="zh">下载</span></a>
@@ -338,6 +339,15 @@
       </div>
     </div>
 
+    <section class="supported-games" aria-labelledby="supported-games-title">
+      <h3 id="supported-games-title"><span lang="en">Supported games</span><span lang="ru">Поддерживаемые игры</span><span lang="zh">支持的游戏</span></h3>
+      <p class="section-lede"><span lang="en">From players' shared statistics, updated live.</span><span lang="ru">По статистике, которой делятся игроки, с обновлением в реальном времени.</span><span lang="zh">来自玩家分享的统计数据，实时更新。</span></p>
+      <div id="supported-games-grid" class="cards" hidden></div>
+      <p id="supported-games-empty" class="section-lede" hidden><span lang="en">No reports yet.</span><span lang="ru">Отчётов пока нет.</span><span lang="zh">暂无报告。</span></p>
+      <p id="supported-games-error" class="section-lede" hidden><span lang="en">Statistics are temporarily unavailable.</span><span lang="ru">Статистика временно недоступна.</span><span lang="zh">统计暂时不可用。</span></p>
+      <a id="supported-games-all" class="btn btn-primary" href="games.html"><span lang="en">All games and details →</span><span lang="ru">Все игры и подробности →</span><span lang="zh">全部游戏与详情 →</span></a>
+    </section>
+
     <div class="limits">
       <h3><span lang="en">Honest limits</span><span lang="ru">Честные ограничения</span><span lang="zh">坦诚的局限</span></h3>
       <ul>
@@ -383,6 +393,35 @@
       </div>
     </div>
     <p class="graphics-note"><span lang="en">Switching drivers makes Steam and games rebuild their shader caches: the first run of a big DirectX 12 game compiles for a while (Stellar Blade Demo: ~28 minutes on an M1 Max with KosmicKrisp); later runs use the cache.</span><span lang="ru">После смены драйвера Steam и игры заново собирают кеши шейдеров: первый запуск большой DirectX 12-игры долго компилирует (Stellar Blade Demo: ~28 минут на M1 Max с KosmicKrisp); следующие запуски берут шейдеры из кеша.</span><span lang="zh">切换驱动后 Steam 与游戏会重建着色器缓存：大型 DirectX 12 游戏首次运行需编译一段时间（Stellar Blade 试玩版在 M1 Max + KosmicKrisp 上约 28 分钟），之后走缓存。</span></p>
+    <div class="dxmt" id="dxmt">
+      <h3><span lang="en">Experimental: DirectX 11 straight to Metal</span><span lang="ru">Экспериментально: DirectX 11 прямо в Metal</span><span lang="zh">实验性：DirectX 11 直达 Metal</span></h3>
+      <p class="section-lede">
+        <span lang="en">Settings → Advanced → <b>D3D11 on the Mac's Metal (wmtr)</b>. <a href="https://github.com/3Shain/dxmt">DXMT</a> implements Direct3D 11 and 10 on Metal; its Metal calls leave the VM through a virtio-gpu channel to an executor inside the launcher, which draws into the VM window. DXVK, Venus and the Vulkan driver are skipped for those games. While it is on, installed Windows games run on Proton 10.0 (x86-64, downloaded by Steam the first time); DirectX 12 and Vulkan games stay on the Vulkan path. Ported from StonkGuy's work; since 1.9.2.</span>
+        <span lang="ru">Настройки → Дополнительно → <b>D3D11 на Metal этого Mac (wmtr)</b>. <a href="https://github.com/3Shain/dxmt">DXMT</a> реализует Direct3D 11 и 10 на Metal; его вызовы Metal выходят из ВМ по каналу virtio-gpu к исполнителю внутри лаунчера, который рисует прямо в окно ВМ. DXVK, Venus и Vulkan-драйвер для таких игр не участвуют. Пока галка включена, установленные Windows-игры запускаются на Proton 10.0 (x86-64, Steam скачает его при первом запуске); игры на DirectX 12 и Vulkan остаются на пути Vulkan. Перенесено из работы StonkGuy; с версии 1.9.2.</span>
+        <span lang="zh">设置 → 高级 → <b>在 Mac 的 Metal 上运行 D3D11（wmtr）</b>。<a href="https://github.com/3Shain/dxmt">DXMT</a> 在 Metal 上实现 Direct3D 11 与 10；其 Metal 调用经 virtio-gpu 通道离开虚拟机，交给启动器内的执行器，直接绘制到虚拟机窗口。这些游戏不再经过 DXVK、Venus 与 Vulkan 驱动。开启期间，已安装的 Windows 游戏改用 Proton 10.0（x86-64，首次由 Steam 下载）；DirectX 12 与 Vulkan 游戏仍走 Vulkan 路径。移植自 StonkGuy 的工作；自 1.9.2 起提供。</span>
+      </p>
+      <div class="pair">
+        <figure>
+          <img src="media/deaths-door-dxvk.jpg" alt="Death's Door title screen through DXVK, Venus and KosmicKrisp" width="1280" height="800" loading="lazy">
+          <figcaption><span lang="en">DXVK → Venus → KosmicKrisp (default): ~41 FPS</span><span lang="ru">DXVK → Venus → KosmicKrisp (по умолчанию): ~41 FPS</span><span lang="zh">DXVK → Venus → KosmicKrisp（默认）：约 41 FPS</span></figcaption>
+        </figure>
+        <figure>
+          <img src="media/deaths-door-dxmt.jpg" alt="Death's Door title screen through DXMT on Metal" width="1280" height="800" loading="lazy">
+          <figcaption><span lang="en">DXMT → Metal: ~117 FPS, held by the 120 Hz display</span><span lang="ru">DXMT → Metal: ~117 FPS, упирается в 120 Гц дисплея</span><span lang="zh">DXMT → Metal：约 117 FPS，受 120 Hz 显示器限制</span></figcaption>
+        </figure>
+      </div>
+      <table class="bench">
+        <thead>
+          <tr><th><span lang="en">M1 Max, frames per second</span><span lang="ru">M1 Max, кадров в секунду</span><span lang="zh">M1 Max，每秒帧数</span></th><th>Proton 11 (ARM64) · DXVK</th><th>Proton 10 · DXVK</th><th>Proton 10 · DXMT</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><span lang="en">Death's Door, title screen, 1280×800</span><span lang="ru">Death's Door, главное меню, 1280×800</span><span lang="zh">Death's Door，标题画面，1280×800</span></td><td>41</td><td>—</td><td><b>117</b></td></tr>
+          <tr><td><span lang="en">d3d11bench: 100 draws, 16 full-screen passes (fill rate)</span><span lang="ru">d3d11bench: 100 вызовов, 16 полноэкранных проходов (fill rate)</span><span lang="zh">d3d11bench：100 次绘制、16 次全屏通道（填充率）</span></td><td>44</td><td>50</td><td><b>100</b></td></tr>
+          <tr><td><span lang="en">d3d11bench: 2000 draws, 4 passes (draw calls)</span><span lang="ru">d3d11bench: 2000 вызовов, 4 прохода (draw calls)</span><span lang="zh">d3d11bench：2000 次绘制、4 次通道（绘制调用）</span></td><td>133</td><td><b>139</b></td><td>115</td></tr>
+        </tbody>
+      </table>
+      <p class="graphics-note"><span lang="en">macOS 27, VM with 6 vCPUs and 8 GB at 120 Hz, KosmicKrisp. Death's Door: frames shown on the Mac over 30 s. d3d11bench (StonkGuy's, launched through Steam): 20 s per run, median of three runs, DXMT of six over two boots. DXMT presents in step with the display, so it stops at 120 Hz; the draw-call test sits there, the Vulkan path goes past it. <b>While this is on, programs in SteamOS can run code on the Mac with your user's rights</b>: the executor runs in the VM process and trusts the guest. DXMT also has gaps, such as no stream output. Off by default.</span><span lang="ru">macOS 27, ВМ с 6 vCPU и 8 ГБ на 120 Гц, KosmicKrisp. Death's Door: кадры, показанные на Mac за 30 с. d3d11bench (от StonkGuy, запуск через Steam): 20 с на прогон, медиана трёх прогонов, у DXMT — шести за две загрузки. DXMT выводит кадры в такт дисплею и останавливается на 120 Гц; тест на draw-вызовы упирается в этот предел, а путь Vulkan его превышает. <b>Пока галка включена, программы в SteamOS могут выполнять код на Mac с правами вашего пользователя</b>: исполнитель работает в процессе ВМ и доверяет гостю. В DXMT есть и пробелы, например нет stream output. По умолчанию выключено.</span><span lang="zh">macOS 27，虚拟机 6 个 vCPU、8 GB、120 Hz，KosmicKrisp。Death's Door：30 秒内 Mac 上显示的帧。d3d11bench（StonkGuy 编写，经 Steam 启动）：每次 20 秒，取三次中位数，DXMT 取两次启动共六次。DXMT 与显示器同步出帧，止于 120 Hz；绘制调用测试受此限制，而 Vulkan 路径可超过。<b>开启期间，SteamOS 中的程序可以以你的用户权限在 Mac 上运行代码</b>：执行器运行在虚拟机进程内并信任客户机。DXMT 也有缺口，例如不支持流输出。默认关闭。</span></p>
+    </div>
   </div>
 </section>
 
@@ -495,8 +534,13 @@
       </div>
 
       <div class="get-card">
-        <h3><span lang="en">New in 1.8 – 1.9</span><span lang="ru">Новое в 1.8 – 1.9</span><span lang="zh">1.8 – 1.9 新特性</span></h3>
+        <h3><span lang="en">New in 1.8 – 1.9.4</span><span lang="ru">Новое в 1.8 – 1.9.4</span><span lang="zh">1.8 – 1.9.4 新特性</span></h3>
         <ul class="news">
+          <li><span lang="en">1.9.4: Dragon's Dogma 2 runs on KosmicKrisp (M2 and newer; ~40 FPS at 720p on an M5 Max); shaders on KosmicKrisp compile on several threads and are cached on disk, so DD2's first launch takes ~8.5 minutes instead of 62; one mouse cursor over the picture instead of two</span><span lang="ru">1.9.4: Dragon's Dogma 2 работает на KosmicKrisp (M2 и новее; ~40 FPS в 720p на M5 Max); шейдеры на KosmicKrisp компилируются в несколько потоков и кэшируются на диске — первый запуск DD2 занимает ~8,5 минуты вместо 62; над картинкой один курсор мыши вместо двух</span><span lang="zh">1.9.4：Dragon's Dogma 2 可在 KosmicKrisp 上运行（M2 及更新芯片；M5 Max 上 720p 约 40 FPS）；KosmicKrisp 的着色器改为多线程编译并缓存到磁盘，DD2 首次启动约 8.5 分钟而非 62 分钟；画面上只显示一个鼠标光标</span></li>
+          <li><span lang="en">1.9.3: American Truck Simulator runs on KosmicKrisp and MoltenVK (OpenGL 4.6; the VM's own zink build no longer garbles OpenGL games that switch vertex formats; MoltenVK draws packed vertex formats under geometry shaders); Open Statistics Page uses the new My Mac filter</span><span lang="ru">1.9.3: American Truck Simulator работает на KosmicKrisp и MoltenVK (OpenGL 4.6; собственная сборка zink в ВМ больше не ломает геометрию OpenGL-игр, меняющих формат вершин; MoltenVK рисует упакованные вершинные форматы под геометрическими шейдерами); «Открыть страницу статистики» включает новый фильтр «Мой Mac»</span><span lang="zh">1.9.3：American Truck Simulator 可在 KosmicKrisp 与 MoltenVK 上运行（OpenGL 4.6；虚拟机自带的 zink 构建不再让切换顶点格式的 OpenGL 游戏几何错乱；MoltenVK 在几何着色器下可绘制打包顶点格式）；“打开统计页面”使用新的“我的 Mac”筛选</span></li>
+          <li><span lang="en">1.9.2: experimental DirectX 11 straight to Metal through DXMT, Settings → Advanced → D3D11 on the Mac's Metal; Death's Door's title screen runs at ~117 FPS instead of ~41 on an M1 Max (see <a href="#dxmt">DirectX on Apple silicon</a>); opt-in <a href="games.html">game statistics</a> in Settings → Games</span><span lang="ru">1.9.2: экспериментальный DirectX 11 прямо в Metal через DXMT, Настройки → Дополнительно → D3D11 на Metal этого Mac; главное меню Death's Door — ~117 FPS вместо ~41 на M1 Max (см. <a href="#dxmt">DirectX на Apple silicon</a>); <a href="games.html">статистика игр</a> по согласию, Настройки → Игры</span><span lang="zh">1.9.2：经 DXMT 让 DirectX 11 直达 Metal（实验性），设置 → 高级 → 在 Mac 的 Metal 上运行 D3D11；M1 Max 上 Death's Door 标题画面约 117 FPS，此前约 41（见 <a href="#dxmt">Apple 芯片上的 DirectX</a>）；可选的<a href="games.html">游戏统计</a>，设置 → 游戏</span></li>
+          <li><span lang="en">1.9.2: Spider-Man, Uncharted, Forza Horizon 6, DOOM and Wolfenstein no longer crash the VM on KosmicKrisp; characters are visible in BLUE REFLECTION: Second Light on MoltenVK; Create SteamOS Disk checks for the space it really needs and explains unplugged drives, read-only volumes and network failures</span><span lang="ru">1.9.2: Spider-Man, Uncharted, Forza Horizon 6, DOOM и Wolfenstein больше не роняют ВМ на KosmicKrisp; в BLUE REFLECTION: Second Light на MoltenVK видны персонажи; «Создать диск SteamOS» проверяет реально нужное место и объясняет отключённые диски, тома только для чтения и сетевые сбои</span><span lang="zh">1.9.2：Spider-Man、Uncharted、Forza Horizon 6、DOOM 与 Wolfenstein 在 KosmicKrisp 上不再导致虚拟机崩溃；MoltenVK 上 BLUE REFLECTION: Second Light 的角色可见；“创建 SteamOS 磁盘”检查实际所需空间，并说明磁盘断开、只读卷与网络错误</span></li>
+          <li><span lang="en">1.9.1: fewer GPU hangs at Steam's start on M3 and newer (KosmicKrisp); Path of Exile 2 and The Witcher 3 no longer lose their GPU or crash on KosmicKrisp; the mouse follows the Mac pointer at any Steam resolution; disk creation on exFAT drives</span><span lang="ru">1.9.1: меньше зависаний GPU при старте Steam на M3 и новее (KosmicKrisp); Path of Exile 2 и The Witcher 3 больше не теряют GPU и не падают на KosmicKrisp; мышь следует за указателем Mac при любом разрешении в Steam; создание диска на exFAT</span><span lang="zh">1.9.1：减少 M3 及更新机型在 Steam 启动时的 GPU 挂起（KosmicKrisp）；Path of Exile 2 与 The Witcher 3 在 KosmicKrisp 上不再丢失 GPU 或崩溃；任意 Steam 分辨率下鼠标都跟随 Mac 指针；可在 exFAT 磁盘上创建磁盘</span></li>
           <li><span lang="en">1.9: the launcher is in Russian and Simplified Chinese too (it follows the macOS language); multichannel sound up to 12 channels (5.1, 7.1, 5.1.2, 7.1.4) on outputs with a configured speaker layout; sound moves to a new default output such as AirPods at once</span><span lang="ru">1.9: лаунчер — также на русском и упрощённом китайском (следует языку macOS); многоканальный звук до 12 каналов (5.1, 7.1, 5.1.2, 7.1.4) на выходах с настроенной раскладкой динамиков; звук сразу переходит на новое устройство вывода по умолчанию, например AirPods</span><span lang="zh">1.9：启动器新增俄语与简体中文界面（跟随 macOS 语言）；在配置了扬声器布局的输出设备上支持最多 12 声道多声道音频（5.1、7.1、5.1.2、7.1.4）；默认输出变为 AirPods 等新设备时声音立即跟随</span></li>
           <li><span lang="en">1.8.2: a likely fix for KosmicKrisp GPU timeouts at Steam's start on M3 and newer; Steam no longer sits at 99% on Macs that got too few vCPUs; Create SteamOS Disk rejects a folder it can't write to before downloading</span><span lang="ru">1.8.2: вероятное исправление таймаутов GPU на KosmicKrisp при старте Steam на M3 и новее; Steam больше не застревает на 99% на Mac, которым доставалось слишком мало vCPU; «Создать диск SteamOS» отклоняет папку без прав записи до скачивания</span><span lang="zh">1.8.2：可能修复了 M3 及更新机型上 Steam 启动时的 KosmicKrisp GPU 超时；分配的 vCPU 过少时，Steam 不再卡在 99%；创建 SteamOS 磁盘 在下载前即拒绝无法写入的文件夹</span></li>
           <li><span lang="en">1.8.1: Counter-Strike 2 no longer crashes on MoltenVK; Dota 2 and CS2 no longer run out of GPU queries on KosmicKrisp; clearer messages for development-signed SteamOS builds</span><span lang="ru">1.8.1: Counter-Strike 2 больше не падает на MoltenVK; Dota 2 и CS2 больше не исчерпывают GPU-запросы на KosmicKrisp; понятные сообщения о сборках SteamOS с dev-подписью</span><span lang="zh">1.8.1：《反恐精英 2》在 MoltenVK 上不再崩溃；《Dota 2》与 CS2 在 KosmicKrisp 上不再耗尽 GPU 查询；开发签名 SteamOS 构建的提示更清晰</span></li>
@@ -543,6 +587,8 @@ cd steamac
   </div>
 </footer>
 
+<script src="assets/stats-api.js" defer></script>
 <script src="assets/app.js" defer></script>
+<script src="assets/supported-games.js" defer></script>
 </body>
 </html>

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
-// steamac fault reporter for emulated x86_64 games (FEX), loaded only through the game's launch
-// options: LD_PRELOAD=/usr/lib/steamac/x86_64/fault-report.so:$LD_PRELOAD %command%
+// steamac fault reporter for emulated x86_64 games (FEX), loaded only through the game's FEX
+// AppConfig (Steam launch options cannot: FEX's compat tool removes LD_PRELOAD):
+// compatdata/<appid>/fex-emu/AppConfig/<executable>.json =
+// {"Config":{"Env":"LD_PRELOAD=/usr/lib/steamac/x86_64/fault-report.so"}}
 //
 // FEX re-raises an unhandled guest SIGSEGV from its JIT code, so the core dump of an emulated
 // game shows an anonymous AArch64 address. This library runs inside the guest process: on

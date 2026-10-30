@@ -43,7 +43,9 @@
 # 10. vertex_input.c: vertex input layouts Metal's always-on vertex descriptor validation aborts on (zero
 #    strides, static/dynamic/per instance/zero divisor, attributes past the stride, attributes of undescribed
 #    bindings, with and without geometry shader emulation), one process per case; points check the
-#    elements read.
+#    elements read; a shader input without a vertex attribute (STEAMAC-2Y: Metal failed the pipeline) reads zeros;
+#    packed vertex formats (10-10-10-2, RG11B10F, RGB9E5, BGRA8) through geometry shader emulation read their values
+#    (American Truck Simulator's 2_10_10_10 normals failed pipeline creation under zink's provoking-vertex geometry shader).
 # 11. device_address.c: atomics on vector components behind buffer device addresses (vkd3d-proton's
 #    scalar-layout uvec3 counter, std430 uvec4 with a dynamic component, ivec2), values read back.
 # 12. queries.c: occlusion query results copied from a later command buffer, one copy per query with
@@ -51,10 +53,19 @@
 #    48 one-query timestamp pools on two devices (more than Metal's 32 counter heaps per process, which every guest
 #    device shares under virglrenderer) and occlusion pools of 32760, 8 and 40000 queries (more than one 256 KB
 #    visibility result buffer) with one render pass counting samples in queries of all of them (STEAMAC-G: Dota 2 /
-#    Counter-Strike 2 "vkCmdBeginQuery resulted in CS error" after a query pool failed to create on KosmicKrisp).
+#    Counter-Strike 2 "vkCmdBeginQuery resulted in CS error" after a query pool failed to create on KosmicKrisp);
+#    300 occlusion pools of 4096 (vkd3d-proton's size; 128 were KosmicKrisp's per-device limit) with 40 timestamp pools
+#    of 8192 created between them (327680 queries, more than the 131072 counter heap entries Metal gives a process),
+#    one render pass counting samples in queries of five occlusion pools with timestamps before, inside and after it,
+#    and 3 rounds of 4096 command buffers writing one timestamp each (counter heap entries return at reset), 16 timestamps
+#    written back to back (Metal's relaxed granularity sampled only 4 of a compute encoder)
+#    (STEAMAC-2X: Path of Exile 2's GPU context died on "vkCmdResetQueryPool resulted in CS error").
 # 13. texel_buffer.c: texel buffer views at offsets that are not 16-byte aligned (single texel alignment, required by
 #    vkd3d-proton): uniform/storage texel buffers, arrays, variable-count arrays, copies and push descriptors, values
-#    read back; storage buffer array sizes written one element per update.
+#    read back; storage buffer array sizes written one element per update; R32G32B32 uniform texel buffers (vkd3d-proton's
+#    views of 12-byte structured buffers; KosmicKrisp crashed in vkCreateBufferView, STEAMAC-2Z: skipped where the formats
+#    have no uniform texel buffer feature, MoltenVK) and on KosmicKrisp a view of a format without texel buffer features
+#    reading as a null descriptor.
 # 14. multi_entry.c: modules with vertex, fragment and compute entry points (shaders/multi_entry/ linked with
 #    spirv-link, SPIR-V 1.0 and 1.6) whose compute entry point has workgroup variables (one zero-initialized):
 #    the vertex/fragment pipeline draws, the compute pipeline counts in workgroup memory.
@@ -75,6 +86,9 @@
 # 17. msl_helpers.c: fragment helpers with an OpKill-only block, directly and through a nested caller
 #    (STEAMAC-1Q): discard left-half pixels, render right-half colors, suppress writes after discard;
 #    a compute helper named log10(float) (STEAMAC-1R), its implementation's values read back.
+#    a graphics link failure with a missing varying (STEAMAC-2M/41) must retain reflected stage diagnostics.
+#    texture_helpers.c (STEAMAC-3W): robust sampling through a sampler2D helper with an immutable YCbCr
+#    conversion must compile, and sampling a null descriptor must return four zeros.
 # 18. frag_output.c: fragment outputs of another numeric type than their color attachment (STEAMAC-2C: an unsigned
 #    output to R32_SINT failed in Metal): signedness changes, a padded scalar, location 1 next to a matching output,
 #    an output array indexed dynamically, float to R32_UINT and ivec4 to RGBA8_UNORM (bits checked on MoltenVK only),
@@ -114,6 +128,46 @@
 #    (also host-imported), depth/stencil, format views, layer views, 2D views of 3D images, sparse binding images, images
 #    at offsets of one allocation. Run with MTL_DEBUG_LAYER_WARNING_MODE=nslog (Metal does not report it otherwise; with
 #    warnings logged the error assert mode aborts on it), any "not added to any residency set" line fails it.
+# 23. provoking_last.c (KosmicKrisp only; STEAMAC-G): flat varyings with the last vertex provoking (zink keeps GL's) in
+#    strips, an instanced strip, fans and lists drawn into a 2560x1600 LINEAR B8G8R8A8 host pointer import (zink's window
+#    buffer); both triangles of each cell must take the last vertex's color, and the command buffers' records
+#    (MESA_KK_DEBUG=cbs, child process) must show one render pass: the unroll kernel ended the render pass around every
+#    such draw (Steam's web helper's first frame: 13 window-sized render passes, where M3+ GPUs lost the device). Direct
+#    draws (no compute encoder either: the CPU writes their indices); indexed draws whose indices a vkCmdUpdateBuffer
+#    earlier in the command buffer writes (the unroll kernels run before the render pass, after the update); two command
+#    buffers unrolling different indices, the first waiting for a timeline semaphore at its submission, the second
+#    submitted after it (each keeps its own colors); indexed indirect draws with a geometry shader draw among them (2
+#    render passes: the GS's compute pass ends the first, the unrolls' heap allocations must survive it). The records'
+#    Metal command buffers: one for direct draws, 2 for the indexed ones (the render pass in one of its own after the
+#    update and unrolls), and one for a clear, 8 blits and 8 render passes without unrolls in one command buffer (a Metal
+#    command buffer per render pass doubled the GPU time of Steam's web helper's blits).
+# 24. compilers.c (KosmicKrisp only; STEAMAC-31/39): 8 threads create an instance and a device each at the same moment
+#    (virglrenderer: one per Venus context, a ring thread each, all created as a guest session starts) and then compile
+#    16 compute pipelines each at the same time: the devices must share one MTL4Compiler (KK_WORKAROUND_11; concurrent
+#    compiles on several MTL4Compilers corrupted the heap on macOS 27 betas 1-4, where KosmicKrisp had turned it off) and
+#    compiles must still overlap on it (MESA_KK_DEBUG=compiles, child process); a compiling thread must be named after
+#    its compile (crash reports show every thread's name).
+# 25. atomic64.c: 64-bit atomic min/max on a storage buffer (32768 invocations hammering
+#    OpAtomicUMax/UMin, with the CPU recomputing every expectation; the racy fetch results
+#    checked against the values written, and the fetch result checked exactly with one invocation, through
+#    a descriptor and through a buffer device address: nir_to_msl's bounds-check `if` around the descriptor
+#    form hid a redeclared result temp that the pointer form rejected) and
+#    64-bit atomics in workgroup memory, with signed 64-bit min/max in a pipeline of its own because
+#    MSL has no atomic_long at all — Dragon's Dogma 2's first shader gap
+#    (VK_KHR_shader_atomic_int64: Metal has only a void min/max on device atomic_ulong, and nothing in
+#    threadgroup memory).
+# 26. wave_vertex.c: wave ops in the vertex stage — lane id, ballot, exclusive scan, broadcast-first,
+#    with a full and a partial-SIMD-group draw, plus the same ops in the fragment stage as a control.
+#    Dragon's Dogma 2's second gap: Metal rejects the [[thread_index_in_simdgroup]] attribute in a
+#    vertex function while allowing every SIMD-group function there.
+# 27. image_atomic64.c: the storage-image counterpart of 25 (VK_EXT_shader_image_atomic_int64):
+#    512 workgroups x 64 invocations race 64-bit imageAtomicMax/imageAtomicMin over two 16x16
+#    R64_UINT storage images, with the CPU recomputing every texel from the same mix() and the same
+#    coordinate mapping, plus a single-invocation pipeline that checks the returned (fetch) value
+#    exactly when uncontended.
+# All three print the capability they need and skip when the driver does not advertise it, so an honest
+# driver stays green; when it is advertised, the values must be right. REPRO_FORCE=1 skips the
+# capability check and makes the pipeline fail to compile, reproducing the game's failure on the host.
 # All run with Metal API validation in assert mode (MTL_DEBUG_LAYER), so a Metal validation error
 # fails the run instead of aborting a VM later.
 # All applicable tests must pass on MoltenVK. On KosmicKrisp all but 5 and 10 must pass (1 sizes the descriptor pool with
@@ -142,6 +196,12 @@ moltenvk)
 kosmickrisp)
 	work=$root/work/build/host-kosmickrisp/repro
 	kk=${1:?usage: REPRO_DRIVER=kosmickrisp $0 <libvulkan_kosmickrisp.dylib>}
+	# The loader resolves library_path relative to the ICD file's directory, so make it absolute
+	# (vkCreateInstance fails with VK_ERROR_INCOMPATIBLE_DRIVER otherwise).
+	case $kk in
+	/*) ;;
+	*) kk=$PWD/$kk ;;
+	esac
 	brew list --versions vulkan-loader > /dev/null 2>&1 || brew install vulkan-loader
 	loader=$(brew --prefix vulkan-loader)/lib
 	link="-L$loader -lvulkan -Wl,-rpath,$loader"
@@ -254,6 +314,22 @@ fi
 build device_address
 "$work/device_address" "$gspv"
 
+# 25./26./27.: Dragon's Dogma 2's shader gaps and 64-bit image atomics. shaders/dd2_wave/ is
+# compiled here because subgroup ops need SPIR-V 1.3 (the generic .vert/.frag loop above targets
+# SPIR-V 1.0); shaders/image_atomic64/ needs Vulkan 1.3 for the 64-bit image atomics.
+for s in "$here"/shaders/dd2_wave/*.vert "$here"/shaders/dd2_wave/*.frag; do
+	glslangValidator -V --quiet --target-env vulkan1.3 "$s" -o "$gspv/$(basename "$s").spv"
+done
+for s in "$here"/shaders/image_atomic64/*.comp; do
+	glslangValidator -V --quiet --target-env vulkan1.3 "$s" -o "$gspv/$(basename "$s").spv"
+done
+build atomic64
+"$work/atomic64" "$gspv"
+build wave_vertex
+"$work/wave_vertex" "$gspv"
+build image_atomic64
+"$work/image_atomic64" "$gspv"
+
 build queries
 "$work/queries" "$gspv"
 
@@ -287,6 +363,25 @@ build descriptor_heap
 
 build msl_helpers
 "$work/msl_helpers" "$gspv"
+if [ "$driver" = moltenvk ]; then
+	link_log=$work/link-log.txt
+	"$work/msl_helpers" "$gspv" link-log 2> "$link_log"
+	if grep -q '^\[mvk-msl\] // vertex entry=main hash=' "$link_log" &&
+		grep -q '^\[mvk-msl\] // fragment entry=main hash=' "$link_log" &&
+		grep -q '^\[mvk-msl\] // in location=3 component=0 type=.* width=4 ' "$link_log"; then
+		echo "OK graphics pipeline failure includes stage interfaces"
+	else
+		cat "$link_log"
+		echo "FAIL graphics pipeline failure lacks stage interfaces"
+		exit 1
+	fi
+fi
+
+if [ "$driver" = moltenvk ]; then
+	# STEAMAC-3W exercises SPIRV-Cross' dynamic sampler wrapper (KK uses its own NIR-to-MSL compiler).
+	build texture_helpers
+	"$work/texture_helpers" "$gspv"
+fi
 
 build frag_output
 "$work/frag_output" "$gspv"
@@ -299,7 +394,16 @@ fi
 build host_memory
 "$work/host_memory"
 
+# What vkd3d-proton derives for a D3D12 game from this driver, and which of it Metal cannot provide
+# (Dragon's Dogma 2 refuses the GPU over a capability named in the game's own dialog).
+build d3d12_caps
+"$work/d3d12_caps"
+
 if [ "$driver" = kosmickrisp ]; then
+	glslangValidator -V --quiet -x "$here/shaders/texture_descriptors.comp" -o "$work/texture_descriptors.comp.inc"
+	build texture_descriptors -I"$work"
+	"$work/texture_descriptors"
+
 	build sparse
 	"$work/sparse" "$gspv"
 	"$work/sparse" "$gspv" minmax-log
@@ -315,4 +419,21 @@ if [ "$driver" = kosmickrisp ]; then
 		exit 1
 	fi
 	grep -e '^OK' -e '^SKIP' "$residency_log"
+
+	# Buffer-backed texture-buffer views share one resident buffer allocation, not one set entry per view.
+	build residency_limits
+	residency_limits_log=$work/residency-limits.log
+	MTL_DEBUG_LAYER_WARNING_MODE=nslog "$work/residency_limits" "$gspv" > "$residency_limits_log" 2>&1 || { cat "$residency_limits_log"; exit 1; }
+	if grep -q 'not added to any residency set' "$residency_limits_log"; then
+		cat "$residency_limits_log"
+		echo "FAIL residency limits: buffer-backed texture views are not resident"
+		exit 1
+	fi
+	grep '^OK' "$residency_limits_log"
+
+	build provoking_last
+	"$work/provoking_last" "$gspv"
+
+	build compilers
+	"$work/compilers" "$gspv"
 fi

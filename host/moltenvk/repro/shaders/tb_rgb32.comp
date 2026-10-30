@@ -1,0 +1,50 @@
+#version 450
+// R32G32B32 uniform texel buffers (texel_buffer.c 4): vkd3d-proton views 12-byte structured buffers as R32G32B32_UINT.
+// Binding 3 is a view of a format without texel buffer features (KosmicKrisp only: reads as a null descriptor).
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0) uniform utextureBuffer u;
+layout(set = 0, binding = 1) uniform textureBuffer f;
+layout(set = 0, binding = 2) uniform itextureBuffer s;
+layout(set = 0, binding = 3) uniform utextureBuffer n;
+layout(set = 0, binding = 4) buffer out_t { uint o[]; };
+layout(push_constant) uniform pc_t { int huge; int null_view; };
+
+void main()
+{
+	for (int k = 0; k < 4; k++) {
+		uvec4 v = texelFetch(u, k);
+		o[4 * k] = v.x;
+		o[4 * k + 1] = v.y;
+		o[4 * k + 2] = v.z;
+		o[4 * k + 3] = v.w;
+	}
+	o[16] = uint(textureSize(u));
+	vec4 fv = texelFetch(f, 1);
+	o[17] = floatBitsToUint(fv.x);
+	o[18] = floatBitsToUint(fv.y);
+	o[19] = floatBitsToUint(fv.z);
+	o[20] = floatBitsToUint(fv.w);
+	o[21] = uint(textureSize(f));
+	ivec4 sv = texelFetch(s, 2);
+	o[22] = uint(sv.x);
+	o[23] = uint(sv.y);
+	o[24] = uint(sv.z);
+	o[25] = uint(sv.w);
+	uvec4 past = texelFetch(u, 4);
+	o[26] = past.x;
+	o[27] = past.y;
+	o[28] = past.z;
+	o[29] = past.w;
+	uvec4 wrap = texelFetch(u, huge);
+	o[30] = wrap.x;
+	o[31] = wrap.y;
+	o[32] = wrap.z;
+	o[33] = wrap.w;
+	if (null_view != 0) {
+		uvec4 nv = texelFetch(n, 1);
+		o[34] = nv.x | nv.y | nv.z;
+		o[35] = uint(textureSize(n));
+	}
+}

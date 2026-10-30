@@ -4,9 +4,9 @@
 #   Contents/MacOS/steamac-vrhost       experimental VR host (GPL-3.0-or-later, separate executable,
 #                                       self-contained), only when host/vrhost/build.sh built it
 #   Contents/Frameworks/*.dylib         libkrun, libvirglrenderer, libMoltenVK, libvulkan_kosmickrisp
-#                                       (when built: host/kosmickrisp, macOS 26+), libwmtr_host (when
-#                                       built: wmtr/, the DXMT graphics path) + their non-system
-#                                       dependencies (libepoxy), install names @rpath/<name>
+#                                       (when built: host/kosmickrisp, macOS 26+), libwmtr_host
+#                                       (when built: host/dxmt) + their non-system dependencies
+#                                       (libepoxy), install names @rpath/<name>
 #   Contents/Resources/                 gvproxy, Image, initramfs.cpio.gz, steamac-layer.img,
 #                                       desync + steamdeck-images.pem (Valve RAUC CA) for
 #                                       "Create New Disk…", generated licenses/ notices,
@@ -100,7 +100,7 @@ copy_lib() {
 # MoltenVK always, KosmicKrisp when it was built (macOS 26+ build hosts).
 libs=(libkrun.1.dylib libvirglrenderer.1.dylib libMoltenVK.dylib)
 [[ -f "$KRUN_PREFIX/lib/libvulkan_kosmickrisp.dylib" ]] && libs+=(libvulkan_kosmickrisp.dylib)
-# libkrun dlopens the wmtr host (Settings > Advanced "Graphics path: DXMT", STEAMAC_WMTR_LIB) when built.
+# libkrun dlopens the wmtr host (Settings > Advanced "Allow DXMT", STEAMAC_WMTR_LIB) when built.
 [[ -f "$KRUN_PREFIX/lib/libwmtr_host.dylib" ]] && libs+=(libwmtr_host.dylib)
 for lib in "${libs[@]}"; do
     copy_lib "$KRUN_PREFIX/lib/$lib"

@@ -125,62 +125,135 @@
 #              imports) or the bound view; KosmicKrisp only added heaps and buffers, and Metal API validation reported
 #              every render pass (9033 times in one Steam boot). STEAMAC-G: M3+ timeouts follow Steam's first MSAA
 #              targets/window images and window resizes. Repro: host/moltenvk/repro residency.c.
-#   0041       steamac: MESA_KK_ASYNC_PIPELINES=1|2 (unset or 0: unchanged) builds a graphics pipeline's Metal
-#              render pipeline state (the two MTLLibraries and the state; the NIR->MSL translation still happens
-#              at creation) on a util_queue worker pool, so vkCreateGraphicsPipelines returns without waiting for
-#              Metal and no recording or submission thread ever calls Metal for it. =1: a draw of a state that is
-#              not ready is skipped and the command buffer is re-recorded at submission, where the queue waits for
-#              the compile (no draw is lost, but the first submission of such a draw waits). =2 never waits: such a
-#              draw is dropped and the pipeline is used once the state is published (missing draws instead of a
-#              stall; a draw Metal cannot build sets VK_ERROR_INVALID_SHADER_NV on its command buffer). A dropped
-#              draw is decided before anything is flushed, so the encoder, dynamic state, occlusion queries and
-#              transform feedback are untouched. Pipelines with a min/max emulating companion, compute pipelines
-#              and pipeline cache hits keep the synchronous path. The job owns copies of the MSL and the descriptor
-#              inputs, so the program may be destroyed while its compile runs. MESA_KK_DEBUG=async logs compiles
-#              and dropped draws.
-#   0042       steamac: four robustness fixes from an audit of 0001-0041. kk_cmd_draw.c (0010): kk_begin_end_xfb
-#              indexed libkk_xfb_counter_copy's fixed src[4]/dest[4] with first_counter + i, unbounded, so a guest
-#              firstCounterRange past POLY_MAX_SO_BUFFERS wrote past the host stack. nir_to_msl.c (0027): the
-#              assert guarding container_of(src, nir_alu_src, src) is compiled out with -Db_ndebug=true, so a
-#              non-ALU user of a sparse fetch's def produced a bogus nir_alu_src and out-of-bounds swizzle writes.
-#              kk_shader.c (0036): the reduce-sampler scan broke as soon as a set needed minmax, so update-after-bind
-#              sets scanned later were never recorded and a reduction sampler they got after recording went
-#              unnoticed (stale plain-program results). kk_image.c (0019): pPlaneLayouts[0] was dereferenced before
-#              the check that drmFormatModifierPlaneCount is 1, so a guest explicit create info with no plane
-#              layouts read through NULL. kk_sparse.c (0031): page_count - first_page underflowed for a buffer view
-#              offset past the buffer, mapping texels beyond it.
-#   0043       steamac: MESA_KK_ASYNC_PIPELINES=1 recorded a draw whose async Metal render pipeline state had
-#              FAILED to build (kk_async_pipeline_build returned NULL, status KK_ASYNC_FAILED, pipe->gfx.render
-#              still NULL). kk_shader_async_draw_ok only special-cased PENDING/READY, so the draw was recorded and
-#              kk_flush_pipeline called mtl_render_set_pipeline_state(enc, NULL); the -Db_ndebug=true build drops
-#              the assert that would have skipped it, and the following mtl_draw_indexed_primitives messages a nil
-#              Metal object - EXC_BAD_ACCESS at a low address from AGXMetal's drawIndexedPrimitives, the app-fork
-#              "VM crashed in the GPU stack". A failed state never becomes ready, so
-#              the draw is dropped and VK_ERROR_INVALID_SHADER_NV is set on the command buffer, as mode 2 already
-#              did. Not a replay: waiting would only delay the same drop.
-
-#   0047       steamac: the MESA_KK_ASYNC_PIPELINES draw gate watched the bound VS. When a reduction sampler is
-#              bound, kk_cmd_shader_pipeline resolves the pipeline to the VS's min/max emulating companion (0029),
-#              and the companion is compiled through the same async path, so it can be async on its own (the VS is
-#              never async when it has a companion - kk_compile_graphics_pipeline skips the async path for
-#              info.minmax_sets). The gate therefore recorded a draw whose encoder kk_flush_pipeline then left
-#              without a render pipeline state (gfx->pipe->gfx.render NULL, assert compiled out by -Db_ndebug),
-#              faulting in AGXMetal's draw - the surviving 0041 SIGSEGV 0043 did not cover. Decide on the program
-#              the flush will read (kk_draw_async_action, the same kk_cmd_shader_pipeline resolve) and adopt it
-#              into gfx->pipe; make the flush and dispatch bails structural (command-buffer error, no dispatch
-#              without a render state) instead of asserts. Not yet live-verified: the recorded runs under
-#              MESA_KK_ASYNC_PIPELINES=2 predate this patch's build.
-#   0048       fxgl/steamac 1.9.1 patch 0042 (STEAMAC-2Z), null-descriptor part only: texel buffer views of formats
-#              no Metal texture buffer backs (R32G32B32_*, which vkd3d-proton creates for 12-byte structured
-#              buffers without checking format features) dereferenced the NULL kk_get_va_format result in
-#              kk_CreateBufferView (SIGSEGV). They are now created without a texture and read as null descriptors,
-#              one warning per format. Upstream's R32G32B32 uniform texel buffer support (the per-fetch shader
-#              lowering and the newly advertised formats) is left out: it is the prime suspect for stock 1.9.1's
-#              GPU hang in Unity HDRP. Test: tests/texel-view-unsupported.c.
-#   0049       steamac: kk_DestroyDevice released the Metal compiler before joining the MESA_KK_ASYNC_PIPELINES
-#              workers, so a pipeline still alive at vkDestroyDevice could have its render pipeline state built
-#              on a freed compiler (SIGSEGV / pointer-authentication fault in AGXMetal compileProgram, main thread
-#              in util_queue_destroy). The queue is now destroyed first (tests/async-teardown.c).
+#   0041       steamac: direct draws without an index buffer that need an unroll (a flat varying with the last vertex
+#              provoking, fans) get their indices from the CPU at recording; the unroll kernel ended the render pass
+#              around every such draw (attachments stored, compute pass, attachments loaded). STEAMAC-G: zink keeps
+#              GL's last provoking vertex, and Steam's web helper composites its first frame as 12 such rectangles
+#              into its LINEAR 2560x1600 window buffer: 13 render passes, 43 ms of GPU time on an M1 Max, where M3+
+#              GPUs lose the device (the GPU's recovery; 11 draws: 27 ms -> 0.37 ms). Command buffers keep a record
+#              (render passes, compute encoders, draws/dispatches, KK operations and kernels, program MSL hashes and
+#              L/D/S/A/B/W features); a command queue error prints the failed one's and, once per process, every
+#              command buffer of the process on the GPU with it and its outcome (Hang / InnocentVictim from the
+#              error's userInfo), plus MSL excerpts of programs with loops/atomics/barriers of the one that hung.
+#              0039's os_log reading is dropped (<private>, and it delayed the loss by 2-4 s). MESA_KK_DEBUG=cbs
+#              logs every command buffer's record. Repro: host/moltenvk/repro provoking_last.c.
+#   0042       steamac: R32G32B32_UINT/SINT/SFLOAT uniform texel buffers (R32 texture buffers of three texels per
+#              element, flagged in the descriptor's texel offset; fetches read three texels, alpha 1). vkd3d-proton views
+#              12-byte structured buffers as R32G32B32_UINT texel buffers without checking format features, and
+#              kk_CreateBufferView dereferenced the missing Metal format (STEAMAC-2Z: The Witcher 3 crashed the VM).
+#              Views of other formats no texture buffer backs read as null descriptors (one warning per format).
+#              Repro: host/moltenvk/repro texel_buffer.c 4.
+#   0043       steamac: unrolls of direct draws (indexed, or past 0041's CPU limit) allocate their indices from a heap
+#              of their own in command buffer memory, sized at recording; the device's 128 MB geometry heap, reset to
+#              its start by the first unroll of every command buffer and render pass, stays for indirect draws,
+#              tessellation and geometry shaders. Resetting it is only safe while the queue runs every pass after the
+#              previous one ended (end_encoder's barrier), which it does: two command buffers unrolling different
+#              indices, the first waiting for a semaphore at its submission, keep their own (provoking_last.c 3.).
+#              No 128 MB heap for processes that only unroll direct draws (zink's).
+#   0044       steamac: unroll kernels (and draw predicates) run before the render pass instead of ending it
+#              (attachments stored, compute pass, attachments loaded around every such draw). STEAMAC-G: with 0041
+#              Steam's web helper still had 194 command buffers unrolling indexed draws (zink's last provoking vertex
+#              with flat varyings), the longest 13.8 ms on an M1 Max with 37 render passes. Index, indirect and
+#              predicate data cannot be written inside a render pass, so dispatches recorded with pre_gfx while a render
+#              encoder is open go into a compute pass in a Metal command buffer of its own, committed right before the
+#              render encoder's (a render encoder starts a Metal command buffer when the current one has an encoder; a
+#              command buffer commits all of its Metal command buffers in order). Tessellation, geometry shaders and the
+#              unrolls a passthrough GS reads still end the render encoder; the geometry heap is reset for the render
+#              encoder that uses it and freed when it ends. Repro: host/moltenvk/repro provoking_last.c (11 indexed
+#              draws: 12 render passes, 2.2 ms -> 1 render pass, 0.33 ms).
+#   0045       steamac: query pools without 0037's per-device occlusion and per-process timestamp ceilings. Occlusion
+#              results had 16 chunks of 32768 per device (524288 queries: exactly 128 of vkd3d-proton's occlusion pools
+#              of 4096); the chunk table now has 4096 entries (2^27 queries, 32 GB: memory runs out first). Timestamp
+#              pools held entries of Metal's 32 counter heaps of 4096 per process for their lifetime (all timestamp pools
+#              of every guest application together: 131072 queries; D3D12 timestamp query heaps are pools of the heap's
+#              size); entries now belong to command buffers (16 per chunk, taken while recording timestamp writes,
+#              returned at reset/free), pools take none; a write finding none left makes its queries available with 0
+#              (logged once). vkCreateQueryPool failures log their reason, VkResult, type and count in release builds
+#              (STEAMAC-2X: Path of Exile 2's GPU context died on "vkCmdResetQueryPool resulted in CS error" after a
+#              query pool failed to create). Compute encoder timestamps use Metal's precise granularity: relaxed sampled
+#              only the first 4 of an encoder, the rest resolved their entry's old contents (hidden while entries were
+#              per pool; vkd3d-proton's test_query_timestamp_write_after_read). Repro: host/moltenvk/repro queries.c
+#              (300 occlusion pools of 4096 with 40 timestamp pools of 8192, one render pass over queries of five
+#              occlusion pools; 3 x 4096 command buffers writing a timestamp each; 16 timestamps back to back).
+#   0046       steamac: render encoders start a Metal command buffer of their own (0044) only in renderings whose draws
+#              recorded pre_gfx work, and the pre_gfx pass goes at the end of the Metal command buffer they started
+#              after. A Metal command buffer costs ~55 us of GPU time on an M1 Max: with one per render pass Steam's
+#              web helper's command buffer of 77 blits took 12.6 ms instead of 0042's 6.5 (STEAMAC-G). A rendering's
+#              first render encoder starts at its first use when it would follow other encoders, so that the first
+#              draw's unrolls run ahead of it in the same Metal command buffer. Records count Metal command buffers.
+#              Repro: host/moltenvk/repro provoking_last.c 5 (a clear, 8 blits, 8 render passes: one Metal command
+#              buffer, 1.7 ms as with 0042; 0001-0045: 2.2-4.3 ms).
+#   0047       steamac: KK_WORKAROUND_11 (one MTL4Compiler per MTLDevice, shared by all Vulkan devices) stays on macOS 27.
+#              Upstream turns it off from 27.0.0 (FB22683138 fixed in beta 5), which betas 1-4 report too: there
+#              virglrenderer (a device per Venus context) crashed in libmalloc's heap corruption trap with two contexts'
+#              vkCreateDevice compiling libkk pipelines on their own compilers at once as a guest session started
+#              (STEAMAC-31/13: beta 1 on an M4 Pro, beta 4 on an M3 Max; STEAMAC-39: a render pipeline, protection
+#              fault in AGX). A shared compiler compiles as concurrently. A thread compiling for Metal is named after
+#              its compile ("kk <kind> <MSL hashes> compiler <n>: <k> in flight on <m>", shown in crash reports);
+#              MESA_KK_DEBUG=compiles logs every compile. Repro: host/moltenvk/repro compilers.c.
+#   0048       steamac: subgroup operations in the vertex stage (simd_* functions are legal in MSL vertex functions,
+#              only the attributes are not). Dragon's Dogma 2 uses wave ops in vertex shaders. Repro: wave_vertex.c.
+#   0049       steamac: 64-bit buffer atomics (min/max lowered to MSL's void atomic_max/min_explicit on device
+#              atomic_ulong); the operations MSL cannot express fail at pipeline creation. Apple8 and later only
+#              (Metal's ulong min/max atomics; an M1 rejects them). Repro: atomic64.c.
+#   0050       steamac: the device keeps compiled MSL libraries, keyed by the source (a title asks for the same
+#              program ~100 times: Dragon's Dogma 2 87,243 -> 6,244 library compiles in a warm launch).
+#   0051       steamac: only the program predicted by 0036 (plain or minmax) is queued on a thread pool
+#              (MESA_KK_COMPILE_THREADS, at most 64); the other compiles at first use, tracked under the same
+#              lock so concurrent users wait. Creation keeps the minmax log; waiting for a queued creation
+#              compile is not logged as a lazy first-use compile.
+#   0052       steamac: equal pipelines share their compiled Metal pipeline states (single-flight tables per device).
+#   0053       steamac: destroying a shader whose program is queued or compiling no longer waits for it; the
+#              compiling thread frees it (also for a never-queued first-use compile). Dragon's Dogma 2's
+#              pipeline ring thread spent 73% of its time in vkDestroyPipeline waiting for compiles,
+#              which kept Metal at ~2 compiles in flight.
+#   0054       steamac: the graphics state hash covers the depth/stencil formats, the color attachment count and
+#              location map and the depth clip/clamp lowering (pipelines that differed only there shared shaders
+#              through a VkPipelineCache).
+#   0055       steamac: the device's in-memory pipeline cache and Mesa's disk cache (translated MSL), so a pipeline is
+#              translated SPIR-V -> NIR -> MSL once, not on every creation and every launch. The identity includes
+#              codegen settings, including MESA_KK_DEBUG=force_robustness and disabled workarounds.
+#   0056       steamac: MESA_KK_DEBUG=compiles lines carry start and end times ("[t <start> <end>]", ms).
+#   0057       steamac: the first use of a program that is still queued compiles it right away instead of waiting
+#              for the queue ahead of it (a draw under virglrenderer's shared submission lock froze the guest).
+#              0053 + 0057, Dragon's Dogma 2 first launch, every cache cleared, M5 Max: the game's compile screen
+#              takes ~8.5 min and gameplay renders at ~9 min, with ~7.5-9 Metal compiles in flight (62 min before
+#              0051; 0052 alone reached 16% of the compile screen in 6 min).
+#   0058       steamac: 64-bit image atomics (VK_EXT_shader_image_atomic_int64, shaderImageInt64Atomics): R64_UINT/
+#              R64_SINT storage images as R32G32_UINT, image umax/umin lowered to Metal's void texture atomic_max/min
+#              on ulong4, every other 64-bit image atomic rejected at pipeline creation (the buffer case is 0049).
+#              Needed by UE5's D3D12 SM6 path (Nanite) through vkd3d-proton; Apple8 and later only, and R64
+#              reports no format features below that; MESA_KK_DEBUG=noimageint64atomics turns it off.
+#              Repro case 27 (image_atomic64.c).
+#   0059       steamac: zero-element texel buffer views are null descriptors; oversized views are clamped after
+#              their alignment prefix to Metal's per-format capacity (2^28 texels, three per RGB32 element),
+#              not the conservative RGB32-derived advertised limit. Neither invalid width reaches Metal, whose
+#              constructors abort (STEAMAC-3S/3Z/3J/3F/4B/3K/3G/3R). Venus creates views asynchronously, so a
+#              Vulkan failure kills the guest at first use (Dragon's Dogma 2 loading a save).
+#              Repro: texture_descriptors.c (zero/oversized widths, valid boundaries, partial texel, full R32 capacity).
+#   0061       steamac: non-sparse texture-buffer views inherit their buffer's residency (STEAMAC-3V/4H/3T).
+#              Registering each shared-storage view separately exhausted IOGPU's residency-set hash table
+#              (1,048,576 slots on M1 Max), which aborts rather than returning an error. Sparse texture buffers
+#              and textures used as attachments retain their own registrations. Repro: residency_limits.c
+#              (1,100,000 simultaneous views, real texel fetches before/after removing unrelated views).
+#   0062       steamac: the device's tables of compiled MSL libraries and Metal pipeline states (0050/0052) are
+#              bounded: least recently used entries past 4096 per table (MESA_KK_METAL_CACHE_MAX) are dropped, and
+#              libraries are keyed by the blake3 digest of their source rather than the source itself (the pipeline
+#              keys name their libraries by the same digests, not by address). A publish must own the exact
+#              key reservation, even when allocation failed and another thread reserved an equal key.
+#   0063       steamac: a pipeline's program-independent depth/stencil state is built once on the plain VS
+#              at creation, even if only minmax is queued; no pool thread writes it, and binding never waits
+#              for a Metal compile (0051 waited under virglrenderer's submission lock, and took static state
+#              for dynamic when the compile failed). A program destroyed during the inline compile of its first
+#              use (0057) is freed by that thread instead of leaking.
+#   0064       steamac (Mesa util): the fallback util_barrier (macOS has no pthread barriers) may be destroyed by
+#              its serial thread, as util_queue_finish does. util_barrier_wait returned true in every thread and
+#              each destroyed the mutex while the others still re-acquired it in pthread_cond_wait; macOS cannot
+#              unlock a destroyed mutex (EINVAL), so the next thread blocked on it forever. disk_cache_destroy of
+#              0055's per-device disk cache then hung in util_queue_finish under virglrenderer's render state
+#              lock and every Venus context and virtio-gpu blob map of the guest stopped. Only the serial thread
+#              gets true now, and destroy waits for the threads it released. Mesa main has the same fallback;
+#              open MR !32068 (serial thread only) alone still deadlocks. Test: src/util/tests/u_queue_test.cpp.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -410,12 +483,16 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0038 = steamac: command queue errors name the GPU time and still unsignalled semaphore waits"
 	echo "  0039 = steamac: command queue errors name the device, timing and os_log GPU error; queue teardown waits for handlers"
 	echo "  0040 = steamac: base textures of image planes, subresource and texel buffer view textures in the residency set"
-	echo "  0041 = steamac: MESA_KK_ASYNC_PIPELINES builds a graphics pipeline's Metal render pipeline state on workers"
-	echo "  0042 = steamac: robustness fixes (XFB counter bounds, sparse container_of, minmax update-after-bind scan, sparse view underflow)"
-	echo "  0043 = steamac: drop a draw whose async render pipeline state failed instead of recording it with a NULL state"
-	echo "  0047 = steamac: gate the async draw on the program the draw actually uses (not the bound VS)"
-	echo "  0048 = fxgl/steamac 0042 (null-descriptor part): unsupported texel buffer view formats read as null descriptors"
-	echo "  0049 = steamac: join the async pipeline workers before the device releases its Metal compiler"
+	echo "  0041 = steamac: CPU unroll of direct non-indexed draws (no render pass split); command buffer records in queue errors"
+	echo "  0042 = steamac: R32G32B32 uniform texel buffers; views of unsupported formats read as null descriptors"
+	echo "  0043 = steamac: unrolls of direct draws allocate from command buffer memory, not the device geometry heap"
+	echo "  0044 = steamac: unroll kernels and draw predicates in a compute pass before the render pass, not splitting it"
+	echo "  0045 = steamac: no per-device occlusion / per-process timestamp pool ceilings; vkCreateQueryPool failures logged"
+	echo "  0046 = steamac: Metal command buffers of their own only for render passes with pre_gfx work (blits, clears: none)"
+	echo "  0047 = steamac: KK_WORKAROUND_11 (one shared MTL4Compiler) kept on macOS 27; compiling threads named after their compile"
+	echo "  0059 = steamac: zero texel-buffer widths are null; oversized views clamp to Metal's per-format capacity after alignment"
+	echo "  0061 = steamac: buffer-backed texture-buffer views inherit buffer residency, avoiding IOGPU's per-set entry limit"
+	echo "  0064 = steamac: the fallback util_barrier may be destroyed by its serial thread (util_queue_finish deadlock on macOS)"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."

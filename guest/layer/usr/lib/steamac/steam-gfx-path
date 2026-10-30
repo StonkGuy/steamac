@@ -1,5 +1,5 @@
 #!/bin/bash
-# steamac: the launcher's Settings > Advanced "Graphics path" (kernel command line steamac.gfx=dxmt|vulkan)
+# steamac: the launcher's Settings > Advanced D3D11 on Metal setting (kernel command line steamac.gfx=dxmt|vulkan)
 # for Direct3D 10/11 games in Proton.
 #   dxmt    every installed Proton's DXVK set (files/lib/wine/dxvk/x86_64-windows: d3d11, dxgi, d3d10core)
 #           becomes DXMT, and so does its vkd3d-proton d3d12.dll (files/lib/wine/vkd3d-proton/x86_64-windows) when
@@ -9,10 +9,14 @@
 #           replaced files are kept in $STATE and Proton updates are followed (--watch re-applies).
 #   vulkan  (or no steamac.gfx=) restores Proton's own files byte for byte and removes everything added,
 #           also the winemetal.dll placeholder in prefixes; Proton puts its DXVK back into each prefix.
-# The DXMT files ship in the steamac layer ($PAYLOAD, read-only). Idempotent; run as an ExecStartPre of
-# steam.service (Steam is not running then) and, with --watch, while the session runs.
+# The DXMT files ship in the steamac layer ($PAYLOAD, read-only). DXMT's dlls are x86-64, so only an x86-64
+# Proton can use them: before Steam starts, steam-compat-default sets only installed Windows games
+# with a DXMT profile and no tool of their own to Proton 10.0 (see that script).
+# Idempotent; run as an ExecStartPre of steam.service (Steam is not running then) and, with --watch, while
+# the session runs (Steam downloading Proton 10.0 is followed there).
 # Usage: steam-gfx-path [--watch]
-# Test overrides: STEAMAC_CMDLINE, STEAMAC_STEAM_ROOT, STEAMAC_DXMT_DIR, STEAMAC_GFX_STATE.
+# Test overrides: STEAMAC_CMDLINE, STEAMAC_STEAM_ROOT, STEAMAC_DXMT_DIR, STEAMAC_GFX_STATE,
+# STEAMAC_COMPAT_DEFAULT (the steam-compat-default to run).
 set -uo pipefail
 
 CMDLINE=${STEAMAC_CMDLINE:-/proc/cmdline}
@@ -25,7 +29,8 @@ MARK=.steamac-dxmt
 log() { echo "steam-gfx-path: $*" >&2; }
 
 mode=vulkan
-for w in $(cat "$CMDLINE" 2>/dev/null); do case $w in steamac.gfx=dxmt) mode=dxmt ;; esac; done
+cmdline=$(cat "$CMDLINE" 2>/dev/null)
+[[ $cmdline =~ (^|[[:space:]])steamac\.gfx=dxmt($|[[:space:]]) ]] && mode=dxmt
 if [[ $mode == dxmt && ! -f $PAYLOAD/x86_64-unix/winemetal.so ]]; then
     log "no DXMT files in $PAYLOAD; using Vulkan"; mode=vulkan
 fi
@@ -110,8 +115,10 @@ apply_dxmt() {
             local o; o=$(original "$p" "$f")
             if [[ -n $o ]] && { ours "$D/$f.dll" || is_dxmt "$D/$f.dll" \
                 || { [[ $o == "$B/$f.dll" && $(vkey "$p") == "$(cat "$B/version" 2>/dev/null)" ]] && ! cmp -s "$o" "$D/$f.dll"; }; }; then
-                cp -f "$o" "$D/$f.dll.steamac-tmp" && mv -f "$D/$f.dll.steamac-tmp" "$D/$f.dll" && changed=1 \
-                    || { log "cannot put Proton's $f.dll back in $p"; continue; }
+                if ! { cp -f "$o" "$D/$f.dll.steamac-tmp" && mv -f "$D/$f.dll.steamac-tmp" "$D/$f.dll"; }; then
+                    log "cannot put Proton's $f.dll back in $p"; continue
+                fi
+                changed=1
             elif [[ -z $o ]] && is_dxmt "$D/$f.dll"; then
                 log "WARNING: no original of $f.dll kept for $p; DXMT's file stays. Repair: in Steam, $(basename "$p") > Properties > Installed Files > Verify integrity of tool files"
             fi
@@ -220,7 +227,7 @@ reconcile() {
             rm -f "$x/drive_c/windows/system32/winemetal.dll" "$x/$MARK"
             # the prefix's DXMT copies go back to its Proton's DXVK now (Proton would do it at the next start)
             local s=$x/drive_c/windows/system32 src f
-            src=$(protons | head -1)
+            src=$(protons | sed -n 1p)   # not head -1: protons' printf would log a broken pipe
             local d
             for d in $DLLS; do
                 f=${d#*/}
@@ -240,14 +247,21 @@ reconcile() {
     fi
 }
 
+# Steam's default tool only while Steam is stopped (ExecStartPre): it rewrites config.vdf when it exits.
+if [[ ${1:-} != --watch ]]; then
+    "${STEAMAC_COMPAT_DEFAULT:-$(dirname "$0")/steam-compat-default}" "$mode" || log "default compatibility tool left as it is"
+fi
 reconcile
 [[ ${1:-} == --watch && $mode == dxmt ]] || exit 0
-# Steam updates Proton while it runs: re-apply when a Proton's DXVK set or the tool list changes.
+# Steam updates Proton while it runs: re-apply when a Proton's DXVK set or the tool list changes. A Proton
+# Steam downloads (Proton 10.0, see steam-compat-default) appears in common/ before its files are there;
+# Steam rewrites its steamapps/appmanifest_<appid>.acf when the install finishes, so steamapps/ is watched
+# too.
 command -v inotifywait >/dev/null || { log "no inotifywait; --watch disabled"; exit 0; }
 while :; do
     mapfile -t dirs < <(protons | sed 's|$|/files/lib/wine/dxvk/x86_64-windows|')
-    inotifywait -qq -t 600 -e close_write,moved_to,create,delete "$STEAM/steamapps/common" "$STEAM/steamapps/compatdata" \
-        ${dirs[@]+"${dirs[@]}"} 2>/dev/null
+    inotifywait -qq -t 600 -e close_write,moved_to,create,delete "$STEAM/steamapps" "$STEAM/steamapps/common" \
+        "$STEAM/steamapps/compatdata" ${dirs[@]+"${dirs[@]}"} 2>/dev/null
     sleep 1
     reconcile
 done

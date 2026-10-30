@@ -42,8 +42,11 @@ WINE_SHA256=289c7f19e270a3d3d0a6fdb07691b176c70a0795f6811e5255cba82425de4f10
 LLVM_MINGW="llvm-mingw-20260908-ucrt-macos-universal"
 LLVM_MINGW_URL=https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/$LLVM_MINGW.tar.xz
 LLVM_MINGW_SHA256=d1dc5d1ecf3a3ced5ed5544c72f1acd0c8e84eb3024d520ecc6b143eec62a149
-# Guest unixlib build container (debian:trixie index digest, gcc 14: DXMT's winemetal.h uses C23 enums with a fixed underlying type); wmtr_glibc_compat.h keeps its symbols <= 2.14
-CLIENT_IMAGE=docker.io/library/debian@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
+# Guest unixlib container: the linux/amd64 manifest within Debian trixie's pinned 913f6706... index.
+# Pin the platform manifest, not the index: the client is always x86-64 (including Apple silicon Docker),
+# and an existing arm64 copy of that index must not collide with the amd64 pull. GCC 14 accepts DXMT's
+# C23 fixed-underlying-type enums; wmtr_glibc_compat.h keeps the resulting symbols <= 2.14.
+CLIENT_IMAGE=docker.io/library/debian@sha256:bcf83fd8af414eda0c0a99d25a4e61dedd88e7aac7f7bc519d04555ff0c40ec5
 BREW_DEPS="meson ninja cmake pkgconf zstd"
 # Like libepoxy, virglrenderer and libkrun: the launcher's floor, whatever the build host's SDK is
 # (host/launcher/bundle.sh rejects a library with a higher LC_BUILD_VERSION minos).

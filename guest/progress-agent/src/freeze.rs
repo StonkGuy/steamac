@@ -20,6 +20,7 @@
 //! (host request, keepalive timeout, focus change, agent exit), so the
 //! launcher's "Game paused" overlay shows the real state.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -49,11 +50,10 @@ impl Freezer {
             eprintln!("fx-progress: freeze {appid}: user manager cgroup not found");
             return;
         };
-        let prefix = format!("app-steam-app{appid}-");
-        let mut scopes = Vec::new();
-        find_scopes(&root, &prefix, 0, &mut scopes);
+        let mut games = game_scopes(&root).unwrap_or_default();
+        let scopes = games.remove(&appid).unwrap_or_default();
         if scopes.is_empty() {
-            eprintln!("fx-progress: freeze {appid}: no {prefix}*.scope below {}", root.display());
+            eprintln!("fx-progress: freeze {appid}: no app-steam-app{appid}-*.scope below {}", root.display());
             return;
         }
         let mut any = false;
@@ -158,7 +158,10 @@ fn set_frozen(scope: &Path, frozen: bool) -> bool {
 }
 
 /// /sys/fs/cgroup/.../user@<uid>.service of this process (cgroup v2).
-fn user_manager_cgroup() -> Option<PathBuf> {
+pub(crate) fn user_manager_cgroup() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("FX_PROGRESS_CGROUP_ROOT") {
+        return Some(PathBuf::from(root));
+    }
     let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let path = own.lines().find_map(|l| l.strip_prefix("0::"))?;
     let mut acc = PathBuf::from("/sys/fs/cgroup");
@@ -171,18 +174,37 @@ fn user_manager_cgroup() -> Option<PathBuf> {
     None
 }
 
-fn find_scopes(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+/// Steam scopes grouped by app id, shared by freezing and session statistics.
+/// A failed root read is not an empty scan: callers must not infer game exits.
+pub(crate) fn game_scopes(root: &Path) -> std::io::Result<BTreeMap<u32, Vec<PathBuf>>> {
+    let mut out = BTreeMap::new();
+    find_scopes(std::fs::read_dir(root)?, 0, &mut out);
+    Ok(out)
+}
+
+fn find_scopes(entries: std::fs::ReadDir, depth: usize, out: &mut BTreeMap<u32, Vec<PathBuf>>) {
     for e in entries.flatten() {
         if !e.file_type().map_or(false, |t| t.is_dir()) {
             continue;
         }
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with(prefix) && name.ends_with(".scope") {
-            out.push(e.path());
+        let appid = name.strip_prefix("app-steam-app")
+            .and_then(|s| s.strip_suffix(".scope"))
+            .and_then(|s| s.split_once('-'))
+            .and_then(|(id, suffix)| {
+                if !suffix.is_empty() && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+                    id.parse::<u32>().ok()
+                } else {
+                    None
+                }
+            });
+        if let Some(appid) = appid {
+            out.entry(appid).or_default().push(e.path());
         } else if depth < 4 && (name.ends_with(".slice") || name.ends_with(".service")) {
-            find_scopes(&e.path(), prefix, depth + 1, out);
+            if let Ok(children) = std::fs::read_dir(e.path()) {
+                find_scopes(children, depth + 1, out);
+            }
         }
     }
 }

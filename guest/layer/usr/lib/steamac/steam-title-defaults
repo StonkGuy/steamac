@@ -1,0 +1,307 @@
+#!/usr/bin/python3
+"""Give titles the environment they need, as a per-title default (steamac's "config, not code").
+
+Steam passes leading launch-option assignments to a shell before reaper and
+`steam-launch-wrapper`. Our vkd3d defaults are inherited from steam.service,
+not gfx.txt (which the wrapper applies later with overwrite). The value lives in the account's
+UserLocalConfigStore (userdata/<account>/config/localconfig.vdf) under
+Software/Valve/Steam/apps/<appid>/LaunchOptions.
+
+Dragon's Dogma 2 (2054970) asks for D3D feature level 12_1. vkd3d-proton derives 12_1 from ROVs
+(VK_EXT_fragment_shader_interlock) and conservative rasterization (VK_EXT_conservative_rasterization);
+on Metal neither exists — conservative rasterization has no Metal API at all, and ROVs would need
+Metal's raster order groups mapped to the extension, which KosmicKrisp does not do yet. The title
+only checks the level, so it is reported: without it the game refuses the GPU with "Unsupported
+graphics card" before it draws a frame. Shader model 6_6 goes with it, and so do the driver's
+64-bit atomics, which steam.service keeps from D3D12 titles by default (VKD3D_DISABLE_EXTENSIONS
+in steam.service's environment; an empty list in the launch options opts back in per title).
+
+A title's entry applies only where the driver can back it: each lists the Vulkan features the
+Venus device must advertise (DD2: the 64-bit atomics, which KosmicKrisp has from Apple8/M2 on),
+read once from vulkaninfo when an entry needs applying or an owned value needs rechecking.
+If support goes away, our unchanged launch options are restored to their previous value.
+
+An observed user edit wins: the value we last wrote is remembered per account in
+~/.config/steamac/title-defaults.json; if a title's LaunchOptions changed since, this script leaves
+it alone from then on (the marker file itself is the only state it keeps). Launch options that
+already carry the words are recorded as ours too, so removing them later is an edit that wins.
+
+Profile env words override TITLES; profile removal restores the prior launch options
+(or the built-in default). Each Steam start uses steam-profiles-wait's snapshot.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+
+# appid -> (the environment assignments the title needs, in order;
+#           the Vulkan features the device must advertise for them to help).
+TITLES = {
+    # Dragon's Dogma 2: D3D feature level 12_1 and shader model 6_6, which needs the 64-bit atomics
+    # that are off by default (see the module docstring).
+    "2054970": (("VKD3D_DISABLE_EXTENSIONS=", "VKD3D_FEATURE_LEVEL=12_1", "VKD3D_SHADER_MODEL=6_6"),
+                ("shaderBufferInt64Atomics", "shaderImageInt64Atomics")),
+}
+
+VDF_PATH = ("UserLocalConfigStore", "Software", "Valve", "Steam", "apps")
+
+
+def atomic_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+        os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def vdf_unquote(token):
+    if not token.startswith('"'):
+        return token
+    return re.sub(r'\\([\\"nrt])', lambda m: {"n": "\n", "r": "\r", "t": "\t"}.get(m[1], m[1]), token[1:-1])
+
+
+def vdf_quote(value):
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + '"'
+
+
+def vdf_entries(text):
+    """Return scalar spans and block closing offsets; retain every unrelated byte."""
+    tokens = [m for m in re.finditer(r'//[^\n]*|"(?:\\.|[^"\\])*"|[{}]|[^\s{}"]+', text)
+              if not m[0].startswith("//")]
+    values, blocks, stack = {}, {}, []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token[0] == "}":
+            if not stack:
+                raise ValueError("unbalanced VDF closing brace")
+            blocks[tuple(stack)] = token.start()
+            stack.pop()
+            i += 1
+            continue
+        if token[0] == "{" or i + 1 == len(tokens):
+            raise ValueError("incomplete VDF key/value")
+        key = vdf_unquote(token[0]).lower()
+        value = tokens[i + 1]
+        if value[0] == "{":
+            stack.append(key)
+        elif value[0] == "}":
+            raise ValueError("missing VDF value")
+        else:
+            path = (*stack, key)
+            if path in values:
+                raise ValueError("duplicate VDF value")
+            values[path] = (vdf_unquote(value[0]), value.start(), value.end())
+        i += 2
+    if stack:
+        raise ValueError("unbalanced VDF opening brace")
+    return values, blocks
+
+
+def vdf_set(text, path, value):
+    values, blocks = vdf_entries(text)
+    key = tuple(part.lower() for part in path)
+    if key in values:
+        _, start, end = values[key]
+        if value is None:
+            # The key is the token immediately before its scalar value. Include its
+            # span so reverting an originally absent setting does not leave a key behind.
+            tokens = list(re.finditer(r'//[^\n]*|"(?:\\.|[^"\\])*"|[{}]|[^\s{}"]+', text[:start]))
+            key_start = next(token.start() for token in reversed(tokens) if not token[0].startswith("//"))
+            return text[:key_start] + text[end:]
+        return text[:start] + vdf_quote(value) + text[end:]
+    if value is None:
+        return text
+    # Add only missing containers, inside the deepest existing ancestor.
+    depth = len(key) - 1
+    while depth and key[:depth] not in blocks:
+        depth -= 1
+    if not depth:
+        raise ValueError("no UserLocalConfigStore block")
+    addition = "\n" + "\t" * depth + vdf_quote(path[-1]) + "\t\t" + vdf_quote(value) + "\n"
+    for level in range(len(key) - 2, depth - 1, -1):
+        addition = "\n" + "\t" * level + vdf_quote(path[level]) + "\n" + "\t" * level + "{" + addition + "\t" * level + "}\n"
+    pos = blocks[key[:depth]]
+    return text[:pos] + addition + text[pos:]
+
+
+_features = None
+
+
+def device_features():
+    """The Venus device's Vulkan features from vulkaninfo, name -> bool; None when unavailable."""
+    global _features
+    if _features is None:
+        try:
+            # Bounded: a wedged virtio-gpu fence must never block steam.service start.
+            result = subprocess.run(["timeout", "-k", "2", "10", "vulkaninfo"], capture_output=True, text=True,
+                                    check=False)
+            out = result.stdout if result.returncode == 0 else ""
+        except OSError:
+            out = ""
+        _features = {}
+        # vulkaninfo repeats the device properties/features for each GPU. Never take
+        # a CPU ICD's features, nor combine the capabilities of different devices.
+        for device in re.split(r"(?m)^GPU\d+:\s*$", out)[1:]:
+            if re.search(r"^\s*driverID\s*=\s*DRIVER_ID_MESA_VENUS\s*$", device, re.M):
+                for m in re.finditer(r"^\s*(\w+)\s*=\s*(true|false)\s*$", device, re.M):
+                    _features[m[1]] = m[2] == "true"
+                break
+        if not _features:
+            print("steam-title-defaults: no Vulkan features from vulkaninfo, leaving titles that need them", file=sys.stderr)
+            _features = False
+    return _features or None
+
+
+def device_backs(needs):
+    if not needs:
+        return True
+    features = device_features()
+    return None if features is None else all(features.get(name) for name in needs)
+
+
+def want_launch_options(current, needed):
+    """The LaunchOptions value to write, or None to leave the title alone."""
+    if current:
+        if "%command%" not in current:
+            # Raw arguments: prefixing environment words would change what Steam runs.
+            print("steam-title-defaults: launch options without %command%, leaving them", file=sys.stderr)
+            return None
+        if all(word in current.split() for word in needed):
+            return None
+        return " ".join(needed) + " " + current.lstrip()
+    return " ".join(needed) + " %command%"
+
+
+def without_defaults(current, needed):
+    """Recover a baseline for hand-added words or the old, last-only marker."""
+    if not current:
+        return current
+    return re.sub(r"(?<!\S)(?:" + "|".join(re.escape(word) for word in needed) + r")(?:\s+|$)",
+                  "", current).strip() or None
+
+
+def load_state(path):
+    try:
+        state = json.loads(path.read_text()) if path.exists() else {}
+        accounts = state.get("accounts", {})
+        if not isinstance(accounts, dict):
+            raise ValueError("accounts is not an object")
+        for titles in accounts.values():
+            if not isinstance(titles, dict):
+                raise ValueError("account is not an object")
+            for marker in titles.values():
+                if not isinstance(marker, dict):
+                    raise ValueError("title marker is not an object")
+                for key in ("last", "previous"):
+                    if marker.get(key) is not None and not isinstance(marker[key], str):
+                        raise ValueError(key + " is not a launch options value")
+        return state
+    except (ValueError, AttributeError) as error:
+        print("steam-title-defaults: ignoring corrupt marker: " + str(error), file=sys.stderr)
+        return {}
+
+
+def profile_titles():
+    persisted = Path.home() / ".config/steamac/game-profiles.json"
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or "/run/user/" + str(os.getuid())) / "steamac/game-profiles.json"
+    path = runtime if runtime.exists() else persisted
+    if not path.exists() or not path.stat().st_size:
+        return {}
+    profiles = json.loads(path.read_text())
+    result = {}
+    for appid, profile in profiles["games"].items():
+        if "env" not in profile:
+            continue
+        words = []
+        for word in profile["env"].split():
+            name, value = word.split("=", 1)
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError("invalid profile environment name")
+            # Values are data, not shell code (including telemetry's allowed ';').
+            words.append(name + "=" + (shlex.quote(value) if value else ""))
+        result[appid] = (tuple(words), ())
+    return result
+
+
+def main():
+    home = Path.home()
+    marker_path = home / ".config/steamac/title-defaults.json"
+    state = load_state(marker_path)
+    sources = dict(TITLES, **profile_titles())
+    for config in sorted((home / ".local/share/Steam/userdata").glob("[0-9]*/config/localconfig.vdf")):
+        account = config.parent.parent.name
+        if not account.isdecimal():
+            continue
+        try:
+            text = config.read_text()
+            values, _ = vdf_entries(text)
+            accounts = state.setdefault("accounts", {})
+            written, pending = {}, {}
+            for appid in sorted(set(sources) | set(accounts.get(account, {}))):
+                needed, needs = sources.get(appid, ((), ()))
+                path = (*VDF_PATH, appid, "LaunchOptions")
+                stored = values.get(tuple(part.lower() for part in path))
+                current = stored[0] if stored else None
+                marker = accounts.setdefault(account, {}).setdefault(appid, {})
+                if marker.get("user") is True or ("last" in marker and current != marker["last"]):
+                    # An observed user edit stays theirs, even if it later matches ours again.
+                    if marker.get("user") is not True:
+                        marker["user"] = True
+                        print("steam-title-defaults: keeping " + appid + " launch options (user edit)", file=sys.stderr)
+                    continue
+                owned = "last" in marker and marker.get("active", True)
+                wanted = want_launch_options(current, needed) if needed else None
+                if not owned and wanted is None:
+                    if not needed or not current or "%command%" not in current:
+                        continue
+                    # Hand-added defaults become ours, too: removing them later is a user edit.
+                    owned = True
+                backed = device_backs(needs) if needed else False
+                if backed is None:
+                    # A failed probe is not evidence that the driver lost a feature.
+                    continue
+                if owned:
+                    previous = marker.get("previous", without_defaults(current, marker.get("words", needed)))
+                    if not backed:
+                        wanted = previous
+                        next_marker = dict(marker, previous=previous, last=wanted, active=False)
+                    else:
+                        # Rebuild from the baseline, not our old words: a changed
+                        # profile replaces its assignments instead of accumulating them.
+                        wanted = want_launch_options(previous, needed)
+                        wanted = previous if wanted is None else wanted
+                        next_marker = dict(marker, previous=previous, last=wanted, active=True, words=needed)
+                elif backed:
+                    next_marker = dict(marker, previous=current, last=wanted, active=True, words=needed)
+                else:
+                    continue
+                if wanted != current:
+                    text = vdf_set(text, path, wanted)
+                    written[appid] = wanted
+                    print("steam-title-defaults: " + appid + " launch options = " + repr(wanted), file=sys.stderr)
+                pending[appid] = next_marker
+            if written:
+                # Record ownership only after every config change is on disk.
+                atomic_write(config, text)
+            accounts[account].update(pending)
+        except (OSError, ValueError) as error:
+            print("steam-title-defaults: leaving account config: " + str(error), file=sys.stderr)
+    atomic_write(marker_path, json.dumps(state, sort_keys=True) + "\n")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError) as error:
+        print("steam-title-defaults: " + str(error), file=sys.stderr)
+        sys.exit(1)
