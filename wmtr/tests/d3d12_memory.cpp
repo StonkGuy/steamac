@@ -11,6 +11,8 @@
 //   compute     a cs_5_0 shader (D3DCompile at run time, d3dcompiler_47) reads a placed upload buffer through a root
 //               SRV (its GPU virtual address) and writes a default buffer through a root UAV -> readback; skipped
 //               without a shader compiler
+//   computecommitted  the same with a committed upload buffer as the input: tells a placed-buffer GPU address problem
+//               (d3d12.cpuVisibleHeapMemory aliasing) from one in the compute path itself
 // Prints "INFO ..." lines (adapter, MULLION_CONFIG), "CASE <name> PASS|FAIL|SKIP <detail>" per case and
 // "RESULT passed=N failed=N skipped=N"; exit status 0 only when no case failed. A case that faults the process ends
 // it: the missing CASE lines show where (run one case alone with --case).
@@ -419,8 +421,8 @@ RWByteAddressBuffer dst : register(u0);
 void main(uint3 id : SV_DispatchThreadID) { dst.Store(id.x * 4, src.Load(id.x * 4) * 3u + 1u); }
 )";
 
-static void case_compute(Gpu &g) {
-  const char *name = "compute";
+static void case_compute(Gpu &g, bool placed_input) {
+  const char *name = placed_input ? "compute" : "computecommitted";
   HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
   auto compile = dc ? (pD3DCompile)(void *)GetProcAddress(dc, "D3DCompile") : nullptr;
   if (!compile) {
@@ -450,11 +452,18 @@ static void case_compute(Gpu &g) {
   TRY("CreateComputePipelineState", g.dev->CreateComputePipelineState(&pd, __uuidof(ID3D12PipelineState), (void **)&pso));
   const UINT count = 16384;
   const UINT64 span = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-  ID3D12Heap *uh = heap(g, D3D12_HEAP_TYPE_UPLOAD, 2 * span, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS, &hr);
-  TRY("upload heap", hr);
-  // the input is placed at 64 KiB: its GPU address is the heap's plus the offset
-  ID3D12Resource *in = placed(g, uh, span, count * 4, D3D12_RESOURCE_STATE_GENERIC_READ, &hr);
-  TRY("placed upload buffer", hr);
+  ID3D12Heap *uh = nullptr;
+  ID3D12Resource *in = nullptr;
+  if (placed_input) {
+    uh = heap(g, D3D12_HEAP_TYPE_UPLOAD, 2 * span, D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS, &hr);
+    TRY("upload heap", hr);
+    // the input is placed at 64 KiB: its GPU address is the heap's plus the offset
+    in = placed(g, uh, span, count * 4, D3D12_RESOURCE_STATE_GENERIC_READ, &hr);
+    TRY("placed upload buffer", hr);
+  } else {
+    in = committed(g, D3D12_HEAP_TYPE_UPLOAD, count * 4, D3D12_RESOURCE_STATE_GENERIC_READ, &hr);
+    TRY("committed upload buffer", hr);
+  }
   ID3D12Resource *res = committed(g, D3D12_HEAP_TYPE_DEFAULT, count * 4, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &hr,
                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
   TRY("default buffer", hr);
@@ -485,7 +494,8 @@ static void case_compute(Gpu &g) {
   rb->Release();
   res->Release();
   in->Release();
-  uh->Release();
+  if (uh)
+    uh->Release();
   pso->Release();
   rs->Release();
   rs_blob->Release();
@@ -557,7 +567,9 @@ int main(int argc, char **argv) {
   if (wanted("placednone"))
     case_placed(g, "placednone", D3D12_HEAP_FLAG_NONE);
   if (wanted("compute"))
-    case_compute(g);
+    case_compute(g, true);
+  if (wanted("computecommitted"))
+    case_compute(g, false);
   say("RESULT passed=%d failed=%d skipped=%d", passed, failed, skipped);
   return failed ? 1 : 0;
 }
