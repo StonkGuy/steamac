@@ -8,8 +8,9 @@
 #   dxmt    macOS  host/dxmt/build.sh fetch llvm native host: the default (DXMT) flavour of the same wmtr tree and
 #                                           its make test, so a Mullion change cannot break the DXMT path unseen
 #   e2e     macOS  e2e (after host, pe)     d3d12_memory.exe through wmtr: the pinned macOS Wine with Mullion's dlls,
-#                                           the wmtr client and wmtr-server (wmtr/tests/mullion_e2e.sh) on the
-#                                           runner's GPU
+#                                           the wmtr client and wmtr-server (wmtr/tests/mullion_e2e.sh). GitHub's
+#                                           paravirtual GPU has no MTLResidencySet, so Mullion's D3D12 device is not
+#                                           created there and the cases are skipped (logged); a Mac's GPU runs them
 # Each uploads a workflow artifact; nothing is released (an app/DMG with the Mullion path: release.yml with
 # mullion=true). By hand only (Actions > Mullion > Run workflow, or gh workflow run mullion.yml --ref <branch>).
 name: Mullion
@@ -193,6 +194,10 @@ jobs:
           name: mullion-smoke
           path: work/out/mullion-smoke
       - name: d3d12_memory through wmtr (macOS Wine 8.16, Mullion's dlls, wmtr client and server)
+        env:
+          # GitHub's paravirtual GPU has no MTLResidencySet, so Mullion creates no D3D12 device here: the job checks
+          # the chain up to the device creation and reports the cases as skipped; on a Mac's GPU they run
+          MULLION_E2E_NO_RESIDENCY_OK: '1'
         run: |
           tar -xf mullion-pe.tar
           tar -xf mullion-e2e.tar

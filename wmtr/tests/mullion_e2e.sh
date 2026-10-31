@@ -2,13 +2,14 @@
 # mullion_e2e.sh: tests/d3d12_memory.exe through the wmtr two-process path with Mullion, on a Mac (CI: Mullion workflow,
 # job e2e): an x86-64 macOS Wine (Rosetta) with Mullion's PE dlls in place of its Direct3D and the wmtr client
 # winemetal.so (socket transport), and wmtr-server running Mullion's unix side on the Mac's GPU. The client's
-# marshalling is the guest's (the VM transport differs only below it), so a Mullion call wmtr carries wrongly fails
-# here as it does in the VM: before host/mullion patch 0003 the compute cases failed (the root-argument arena was
-# memory of Mullion's own, which the executor never saw).
+# marshalling is the guest's (the VM transport differs only below it), so on a Mac's GPU a Mullion call wmtr carries
+# wrongly fails here as it does in the VM (there, without host/mullion patch 0003, the compute cases failed: the
+# root-argument arena was memory of Mullion's own, which the executor never saw).
 #   WINE=<dir with bin/wine64> PE=<Mullion's PE dlls> CLIENT=<x86_64-macos winemetal.so> SERVER=<wmtr-server>
 #   EXE=<d3d12_memory.exe> [OUT=<dir>] [MULLION_CONFIG=...] wmtr/tests/mullion_e2e.sh
 # Prints the program's report; exit status 0 only for "RESULT ... failed=0". OUT keeps the logs (server, wineboot,
-# run) and the report.
+# run) and the report. MULLION_E2E_NO_RESIDENCY_OK=1: a GPU without MTLResidencySet (GitHub's paravirtual one), where
+# Mullion creates no D3D12 device, is a skip (exit 0, "SKIPPED") once everything up to the device creation worked.
 set -u
 for v in WINE PE CLIENT SERVER EXE; do [ -e "${!v:-}" ] || { echo "mullion_e2e: $v=${!v:-} missing" >&2; exit 2; }; done
 O=${OUT:-$(mktemp -d)}
@@ -38,6 +39,12 @@ if [ ! -s "$O/report.txt" ]; then
   echo "mullion_e2e: no report; run log and server log:"; tail -30 "$O/run.log"; tail -30 "$O/server.log"; exit 1
 fi
 cat "$O/report.txt"
+if [ "${MULLION_E2E_NO_RESIDENCY_OK:-0}" = 1 ] && grep -q '^RESULT .*(D3D12CreateDevice hr=' "$O/report.txt" \
+    && grep -q 'Failed to create MTLResidencySet' "$O/run.log"; then
+  echo "mullion_e2e: SKIPPED: this GPU has no MTLResidencySet, which Mullion's D3D12 device needs (the Wine, the wmtr"
+  echo "mullion_e2e: client and server and DXGI's adapter through wmtr worked; the cases need a Mac's GPU)"
+  exit 0
+fi
 if ! grep -q '^RESULT passed=[0-9]* failed=0 skipped=' "$O/report.txt"; then
   grep -q '^RESULT' "$O/report.txt" || echo "mullion_e2e: no RESULT line: the program ended in the case after the last CASE line"
   echo "mullion_e2e: server log:"; tail -30 "$O/server.log"
