@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 03:04:36 +0200
+Subject: [PATCH 3/3] d3d12: the recording arena the GPU reads is a shared
+ Metal buffer's memory
+
+Command allocators write root argument tables, static samplers and the
+other words the GPU reads into the device's arguments arena, which was
+memory of Mullion's own (VirtualAlloc) that a no-copy buffer wrapped.
+Under a transport that runs Metal in another address space, such as
+steamac's wmtr (a VM's host), only memory the transport allocates is
+shared with the GPU: the buffer got its own copy of the arena at creation
+and later writes never reached it, so every dispatch and draw read a
+zeroed root table (a root UAV wrote nothing). The arena is now the memory
+of a shared buffer Metal allocates, the same pages for a GPU in this
+process.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/d3d12/d3d12_command_allocator.cpp | 13 ++++++++++---
+ src/d3d12/d3d12_recording_arena.hpp   | 11 +++++++----
+ 2 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/src/d3d12/d3d12_command_allocator.cpp b/src/d3d12/d3d12_command_allocator.cpp
+index f6453caf0a627fa01d96122dd4260679515f686f..b5786c999e6310eb774e35023e3f4dc126f0ea8c 100644
+--- a/src/d3d12/d3d12_command_allocator.cpp
++++ b/src/d3d12/d3d12_command_allocator.cpp
+@@ -264,19 +264,26 @@ MTLD3D12CommandAllocatorImpl::Initialize() {
+   auto &recording = device_->recording;
+   {
+     std::lock_guard<mullion::mutex> lock(recording.mutex);
+-    if (!recording.commands.Initialize() || !recording.arguments.Initialize())
++    if (!recording.commands.Initialize())
+       return FAIL(E_OUTOFMEMORY);
+     if (!recording.buffer) {
++      // the arguments are the memory of a shared buffer Metal allocates, not memory of ours the buffer wraps: the same
++      // pages for a GPU in this process, but a transport that runs Metal in another address space (steamac's wmtr,
++      // whose host is a VM's) shares only memory it allocates, and the CPU's writes to ours would never reach the GPU
+       WMTBufferInfo buffer_info;
+-      buffer_info.memory.set(recording.arguments.base);
++      buffer_info.memory.set(nullptr);
+       buffer_info.length = RecordingArena::kSize;
+       buffer_info.options = WMTResourceHazardTrackingModeUntracked;
+       recording.buffer = device_->GetMTLDevice().newBuffer(buffer_info);
+-      if (!recording.buffer) {
++      if (!recording.buffer || !buffer_info.memory.get()) {
+         ERR("CommandAllocator: failed to allocate gpu buffer");
++        recording.buffer = nullptr;
+         return E_FAIL;
+       }
+       recording.address = buffer_info.gpu_address;
++      // the device keeps the buffer, so its memory outlives the arena
++      if (!recording.arguments.Initialize(buffer_info.memory.get()))
++        return FAIL(E_OUTOFMEMORY);
+     }
+     if (!recording.zeros && !(recording.zeros = recording.arguments.Acquire(1)))
+       return FAIL(E_OUTOFMEMORY);
+diff --git a/src/d3d12/d3d12_recording_arena.hpp b/src/d3d12/d3d12_recording_arena.hpp
+index b35987afcf427d72034924d7de3b340b585556b1..eb45064c2ca8a232029a6b5e2615fa0fa51f8cef 100644
+--- a/src/d3d12/d3d12_recording_arena.hpp
++++ b/src/d3d12/d3d12_recording_arena.hpp
+@@ -25,20 +25,22 @@ public:
+   void *base = nullptr;
+ 
+   ~RecordingArena() {
+-    if (base)
++    if (base && owned_)
+       VirtualFree(base, 0, MEM_RELEASE);
+   }
+ 
+-  // blocks are what the system gives address space in
++  // blocks are what the system gives address space in. memory: kSize bytes of the caller's that outlive the arena
++  // (a Metal buffer's, which the GPU reads), else the arena's own
+   bool
+-  Initialize() {
++  Initialize(void *memory = nullptr) {
+     if (base)
+       return true;
+     SYSTEM_INFO system;
+     GetSystemInfo(&system);
+     block_ = system.dwAllocationGranularity;
+     used_.assign(kSize / block_, false);
+-    return (base = VirtualAlloc(nullptr, kSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
++    owned_ = !memory;
++    return (base = memory ? memory : VirtualAlloc(nullptr, kSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+   }
+ 
+   // the first whole blocks in one piece that hold `bytes`
+@@ -63,6 +65,7 @@ public:
+   }
+ 
+ private:
++  bool owned_ = true;
+   size_t block_ = 0;
+   std::vector<bool> used_;
+   mullion::mutex mutex_;

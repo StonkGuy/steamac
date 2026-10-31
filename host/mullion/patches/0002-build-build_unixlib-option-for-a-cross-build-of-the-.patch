@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 23:56:35 +0200
-Subject: [PATCH 2/2] build: build_unixlib option for a cross build of the
+Subject: [PATCH 2/3] build: build_unixlib option for a cross build of the
  Windows dlls only
 
 A cross build also builds the macOS unixlib (winemetal.so) and the native
