@@ -1,0 +1,311 @@
+Subject: [PATCH] virtio-snd: pace capture startup and own converters before cancellation
+
+On an M4 MacBook Pro, PipeWire entered an approximately 100 Hz capture
+PREPARE/START/STOP/RELEASE loop. The CoreAudio input callback received no
+frames, while caulk::audio_buffer_resource grew continuously. Playback-only
+and no-sound runs remained stable.
+
+The input pump completed all queued descriptors even before PCM_START, and
+also delivered unpaced silence while the asynchronous microphone worker
+opened its unit. This advances the guest capture hw_ptr outside its running
+interval or much faster than the sample clock, triggering ALSA XRUN recovery.
+
+Only pump capture during START. Wait for the opening worker, wake the pump
+when its unit is published, and pace silence at the guest rate if no input
+device can be opened. Initialize callback frame size/channels for device
+Float32 (not the guest format). Own AudioConverter immediately so failures
+and stop_pending cancellation after initialization dispose it too.
+
+Regression tests use real guest descriptors without opening a microphone:
+no completion before START/while opening/after STOP, and clock-paced U8
+fallback silence. Both new regressions fail with the original pump.
+
+--- a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
++++ b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
+@@ -1602,8 +1602,8 @@
+ /// default input device. Runs off the control-queue thread (and off `hosts`), so the guest's
+ /// PCM_START can be acknowledged immediately. On success the running unit is published in
+ /// `shared.capture`; `shared.running` was already set by `CoreAudioBackend::start`. On failure
+-/// it logs once, clears `running` and leaves `shared.capture` empty, so the pump completes
+-/// capture I/O with silence until the next START.
++/// it logs once and leaves `shared.capture` empty, so the pump supplies clock-paced
++/// capture silence until the next START.
+ fn capture_start_worker(shared: &Shared, fmt: Format, id: usize) {
+     let result = (|| -> Result<()> {
+         // A stop that arrived before this request is served must take down a unit that was
+@@ -1653,6 +1653,19 @@
+             unsafe { AudioConverterNew(&dev_fmt, &fmt.asbd(), &mut conv) },
+             "AudioConverterNew",
+         )?;
++        // Own the converter before any fallible operation or cancellation exit.
++        let converter = Converter {
++            conv,
++            in_frame_bytes: dev_fmt.mBytesPerFrame as usize,
++            staging: Vec::new(),
++        };
++        // render_input receives device Float32, not the guest's S16/other format.
++        shared
++            .frame_bytes
++            .store(dev_fmt.mBytesPerFrame, Ordering::Relaxed);
++        shared
++            .channels
++            .store(dev_fmt.mChannelsPerFrame, Ordering::Relaxed);
+         let mut unit = unit;
+         unit.initialize()?;
+         // A stop that arrived before this worker ran (found no published unit and left
+@@ -1660,14 +1673,7 @@
+         if shared.stop_pending.swap(false, Ordering::AcqRel) {
+             return Ok(());
+         }
+-        let mut state = CaptureState {
+-            unit,
+-            converter: Converter {
+-                conv,
+-                in_frame_bytes: dev_fmt.mBytesPerFrame as usize,
+-                staging: Vec::new(),
+-            },
+-        };
++        let mut state = CaptureState { unit, converter };
+         // The input callback needs the unit pointer before the unit starts producing; it reads
+         // it lock-free from `shared.unit`.
+         shared.unit.store(state.unit.au, Ordering::Release);
+@@ -1692,12 +1698,15 @@
+             return Ok(());
+         }
+         *slot = Some(state);
++        shared.wake.signal();
+         Ok(())
+     })();
+     if let Err(err) = result {
+         log::error!("snd: stream {id}: cannot start the microphone ({err}); delivering silence");
+         shared.unit.store(ptr::null_mut(), Ordering::Release);
+-        shared.running.store(false, Ordering::Release);
++        // Keep the guest's START interval alive; the pump supplies clock-paced silence
++        // when the microphone cannot be opened. Do not complete buffers in a tight loop.
++        shared.wake.signal();
+     }
+ }
+ 
+@@ -1982,6 +1991,9 @@
+     vr_retired: Vec<(Arc<VrAudio>, u64)>,
+     /// Capture: recording from the VR headset instead of a HAL unit.
+     vr_mic: Option<(Arc<VrAudio>, MicStream)>,
++    /// Capture without a device: epoch and frames delivered, so silence advances at the
++    /// guest sample rate rather than completing every queued buffer immediately.
++    capture_silence: Option<(Instant, u64)>,
+ }
+ 
+ impl HostStream {
+@@ -2019,6 +2031,7 @@
+             vr: None,
+             vr_retired: Vec::new(),
+             vr_mic: None,
++            capture_silence: None,
+         }
+     }
+ 
+@@ -2265,9 +2278,10 @@
+ 
+     /// Capture: reply to START at once and configure/start the microphone on a worker.
+     /// Creating the input unit (and its permission prompt) can take over a second, which the
+-    /// guest's 1 s control timeout does not allow; the pump completes capture I/O with silence
+-    /// until the unit runs.
++    /// guest's 1 s control timeout does not allow; queued I/O waits until the unit runs.
++    /// If opening fails, the pump supplies silence at the guest's sample rate.
+     fn start_capture(&mut self) -> Result<()> {
++        self.capture_silence = None;
+         let fmt = self
+             .guest_format
+             .ok_or(Error::UnexpectedAudioBackendConfiguration)?;
+@@ -2495,6 +2509,10 @@
+ 
+     /// Time until the oldest in-flight playback message is due, if the device has taken it.
+     fn next_completion(&self) -> Option<Duration> {
++        if self.capture_silence.is_some() && self.shared.running.load(Ordering::Acquire) {
++            // No HAL callback exists to wake us while supplying fallback capture silence.
++            return Some(Duration::from_millis(1));
++        }
+         let end = self.shared.inflight.lock().unwrap().front()?.0;
+         let fmt = self.slot.format?;
+         let due_at = end.saturating_sub(self.fifo_bytes);
+@@ -2588,6 +2606,11 @@
+     /// start). `self.slot.format` is always the guest format (set at PREPARE); the unit-configured
+     /// `format` stays `None` for capture.
+     fn pump_input(&mut self, state: &mut Option<CaptureState>, streams: &RwLock<Vec<Stream>>) {
++        // Guest capture buffers may be queued before START (or remain queued after STOP).
++        // Completing them then advances ALSA's hw_ptr outside the running interval.
++        if !self.shared.running.load(Ordering::Acquire) {
++            return;
++        }
+         let Some(fmt) = self.guest_format else {
+             return;
+         };
+@@ -2596,6 +2619,9 @@
+         let fb = fmt.frame_bytes() as usize;
+         let channels = fmt.channels;
+         let mut out = Vec::new();
++        if state.is_some() {
++            self.capture_silence = None;
++        }
+         if let Some((vr, mic)) = self.vr_mic.as_mut() {
+             // SAFETY: plain clock read.
+             let now = ticks_to_nanos(unsafe { mach_absolute_time() });
+@@ -2667,9 +2693,22 @@
+                         }
+                         packets as usize * fb
+                     }
+-                    // The microphone is not up: complete the guest's buffers with silence so
+-                    // its capture stream keeps flowing instead of timing out.
+-                    None => space,
++                    // Let the async worker finish opening the microphone. In particular,
++                    // never complete the guest's entire capture ring at START: ALSA sees a
++                    // hw_ptr overrun and PipeWire repeatedly tears down/reopens the HAL unit.
++                    None if self.shared.starting.load(Ordering::Acquire) => break,
++                    None => {
++                        // No usable input device: keep capture flowing at the sample clock.
++                        let (since, sent) = self
++                            .capture_silence
++                            .get_or_insert_with(|| (Instant::now(), 0));
++                        let due = since.elapsed().as_nanos() * fmt.rate as u128 / 1_000_000_000;
++                        let frames =
++                            due.saturating_sub(*sent as u128).min((space / fb) as u128) as usize;
++                        *sent += frames as u64;
++                        out[..frames * fb].fill(fmt.silence());
++                        frames * fb
++                    }
+                 };
+                 if produced == 0 {
+                     break;
+@@ -3231,7 +3270,7 @@
+         host.guest_format = Some(fmt);
+         if host.direction == Direction::Input {
+             // The capture unit is built by the START worker; remember the guest format so the
+-            // pump can convert (and deliver silence) as soon as START arrives.
++            // pump can convert once START's asynchronous microphone worker is ready.
+             host.slot.format = Some(fmt);
+             host.update_latency();
+             self.trace(host, "PREPARE done");
+@@ -3309,7 +3348,7 @@
+                 // The microphone (and its permission prompt) is only touched while the guest
+                 // records. Reply at once and let a worker configure/start the unit: opening
+                 // the microphone can take over a second, and the guest's control timeout is
+-                // 1 s. Capture I/O is completed with silence until the unit runs. A stop of a
++                // 1 s. Capture I/O waits for the unit; a failed open uses paced silence. A stop of a
+                 // running unit is left to the worker too (see `stop_pending`).
+                 host.shared.ring.clear();
+                 host.shared.running.store(true, Ordering::Release);
+@@ -3493,6 +3532,114 @@
+             ));
+         backend.write(0).unwrap();
+         message
++    }
++
++    /// A real guest descriptor, with no HAL device or recording needed by the test.
++    fn capture_fixture() -> (HostStream, RwLock<Vec<Stream>>, Arc<IOMessage>) {
++        let mut stream = Stream::default();
++        stream.direction = Direction::Input;
++        stream.state = PCMState::Start;
++        let fmt = Format {
++            format: VIRTIO_SND_PCM_FMT_U8,
++            rate: 48000,
++            channels: 1,
++        };
++        let mem = GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), 0x4000)]).unwrap();
++        let interrupt =
++            InterruptTransport::new(DummyIrqChip::new().into(), "capture-test".into()).unwrap();
++        let message = Arc::new(IOMessage {
++            status: AtomicU32::new(VIRTIO_SND_S_OK),
++            used_len: 0.into(),
++            latency_bytes: 0.into(),
++            head_index: 0,
++            response_descriptor: Descriptor {
++                addr: 0x100,
++                len: 8,
++                flags: 0,
++                next: 0,
++            },
++            vring: Arc::new(Mutex::new(Vring {
++                mem,
++                queue: Queue::new(16),
++                interrupt,
++            })),
++        });
++        // A 100 ms period. Its owner must retain it until capture has supplied 100 ms.
++        stream.buffers.push_back(Buffer::new(
++            Descriptor {
++                addr: 0x200,
++                len: 4800,
++                flags: 0,
++                next: 0,
++            },
++            message.clone(),
++            Direction::Input,
++        ));
++        let mut host = HostStream::new(
++            0,
++            Direction::Input,
++            Arc::new(Semaphore::new().unwrap()),
++            Arc::new(SndControl::default()),
++        );
++        host.guest_format = Some(fmt);
++        host.slot.format = Some(fmt);
++        (host, RwLock::new(vec![stream]), message)
++    }
++
++    #[test]
++    fn capture_does_not_complete_buffers_before_start_or_while_opening() {
++        let (mut host, streams, message) = capture_fixture();
++        host.pump_input(&mut None, &streams);
++        assert!(
++            !completed(&message),
++            "queued before START must not advance hw_ptr"
++        );
++        assert_eq!(streams.read().unwrap()[0].buffers[0].pos, 0);
++        host.shared.running.store(true, Ordering::Release);
++        host.shared.starting.store(true, Ordering::Release);
++        for _ in 0..20 {
++            host.pump_input(&mut None, &streams);
++        }
++        assert!(
++            !completed(&message),
++            "opening the microphone must not drain the guest ring"
++        );
++        assert_eq!(streams.read().unwrap()[0].buffers[0].pos, 0);
++        host.shared.running.store(false, Ordering::Release);
++        host.shared.starting.store(false, Ordering::Release);
++        host.pump_input(&mut None, &streams);
++        assert!(
++            !completed(&message),
++            "STOP must leave outstanding capture I/O alone"
++        );
++    }
++
++    #[test]
++    fn capture_without_a_device_paces_silence_and_uses_the_guest_format() {
++        let (mut host, streams, message) = capture_fixture();
++        host.shared.running.store(true, Ordering::Release);
++        // Put the clock in the future to make a zero-time budget deterministic.
++        host.capture_silence = Some((Instant::now() + Duration::from_secs(1), 0));
++        host.pump_input(&mut None, &streams);
++        assert!(
++            !completed(&message),
++            "silence is audio, not an instant buffer completion"
++        );
++        assert_eq!(host.next_completion(), Some(Duration::from_millis(1)));
++        // 100 ms is now due: one entire descriptor may complete, with U8 silence (128).
++        host.capture_silence = Some((Instant::now() - Duration::from_millis(100), 0));
++        host.pump_input(&mut None, &streams);
++        assert!(completed(&message));
++        let mut pcm = [0u8; 4800];
++        use vm_memory::Bytes;
++        message
++            .vring
++            .lock()
++            .unwrap()
++            .mem
++            .read_slice(&mut pcm, GuestAddress(0x200))
++            .unwrap();
++        assert!(pcm.iter().all(|&sample| sample == 128));
+     }
+ 
+     /// Holds `hosts` like a pump stuck in an AudioUnit call, until dropped.
