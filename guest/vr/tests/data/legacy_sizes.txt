@@ -1,0 +1,24 @@
+# <version> <method> <how the adapter copes with a type whose size changed since that version>
+IVRCompositor_021 GetCumulativeStats   size argument: runtime fills min(size, sizeof) (older struct is a prefix)
+IVRCompositor_022 GetCumulativeStats   size argument (prefix)
+IVRCompositor_024 GetCumulativeStats   size argument (prefix)
+IVRCompositor_026 GetCumulativeStats   size argument (prefix)
+IVRCompositor_027 GetCumulativeStats   size argument (prefix)
+IVRCompositor_021 GetFrameTiming       caller's m_nSize: runtime writes only that many bytes (prefix)
+IVRCompositor_022 GetFrameTiming       m_nSize (prefix)
+IVRCompositor_024 GetFrameTiming       m_nSize (prefix)
+IVRCompositor_026 GetFrameTiming       m_nSize (prefix)
+IVRCompositor_027 GetFrameTiming       m_nSize (prefix)
+IVRCompositor_021 GetFrameTimings      array stride = t[0].m_nSize (vr-testapp checks 176-byte stride)
+IVRCompositor_022 GetFrameTimings      array stride = t[0].m_nSize
+IVRCompositor_024 GetFrameTimings      array stride = t[0].m_nSize
+IVRCompositor_026 GetFrameTimings      array stride = t[0].m_nSize
+IVRCompositor_027 GetFrameTimings      array stride = t[0].m_nSize
+IVRInput_004 GetSkeletalActionData     hand-written override (legacy_overrides.h): 24-byte struct with bone count
+IVRInput_007 GetActionBindingInfo      size argument: each entry copied as a prefix of InputBindingInfo_t
+IVROverlay_016 PollNextOverlayEvent    size argument (prefix copy); overlays report no events
+IVROverlay_018 PollNextOverlayEvent    size argument (prefix copy); overlays report no events
+IVRRenderModels_005 LoadTexture_Async  runtime returns no texture (NotSupported); old struct is a prefix
+IVRRenderModels_005 FreeTexture        pointer only, never dereferenced
+IVRSystem_017 PollNextEvent            size argument: pop_event copies min(size, sizeof) (VREvent_t prefix)
+IVRSystem_017 PollNextEventWithPose    size argument (prefix copy)

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 18:53:29 +0300
-Subject: [PATCH 09/24] winemetal: retain the newLibraryWithSource out-error
+Subject: [PATCH 09/27] winemetal: retain the newLibraryWithSource out-error
  too
 
 Follow-up to the cherry-picked "winemetal: retain out-errors crossing the

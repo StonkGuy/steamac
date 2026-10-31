@@ -14,8 +14,8 @@ func krun(_ name: String, _ r: Int32) throws -> Int32 {
     return r
 }
 
-/// Input devices handed to the window (nil in headless mode). The gamepad is not among them: the
-/// guest creates it over fx.pad (PadPort, GamepadBridge).
+/// Input devices handed to the window (nil in headless mode). The gamepads are not among them: the
+/// guest creates them over fx.pad, fx.pad2, … (PadPort, GamepadBridge).
 struct VMInputs {
     let keyboard: InputDevice
     let tablet: InputDevice
@@ -37,7 +37,7 @@ final class VM {
     static let maxDisplaySide = 4095
 
     init(options o: Options, display: DisplayBackend, console: Console, progressPort: ProgressPort?,
-         clockPort: ClockPort?, sleepPort: SleepPort?, padPort: PadPort?, clipboardPort: ClipboardPort?,
+         clockPort: ClockPort?, sleepPort: SleepPort?, padPorts: [PadPort], clipboardPort: ClipboardPort?,
          inputs: VMInputs?, netSocket: String?) throws {
         VM.raiseFileLimit()
         try krun("krun_init_log", krun_init_log(KRUN_LOG_TARGET_DEFAULT, o.krunLogLevel, UInt32(KRUN_LOG_STYLE_AUTO), 0))
@@ -65,10 +65,11 @@ final class VM {
             try krun("krun_add_console_port_inout(\(SleepPort.name))",
                      krun_add_console_port_inout(ctx, UInt32(con), SleepPort.name, s.guestInputFd, s.guestOutputFd))
         }
-        // The Mac's controller -> the guest's uinput gamepad (fx-pad.service), its rumble back.
-        if let p = padPort {
-            try krun("krun_add_console_port_inout(\(PadPort.name))",
-                     krun_add_console_port_inout(ctx, UInt32(con), PadPort.name, p.guestInputFd, p.guestOutputFd))
+        // The Mac's controllers -> the guest's uinput gamepads (fx-pad.service, fx-pad@.service: one
+        // port per player), their rumble back.
+        for p in padPorts {
+            try krun("krun_add_console_port_inout(\(p.name))",
+                     krun_add_console_port_inout(ctx, UInt32(con), p.name, p.guestInputFd, p.guestOutputFd))
         }
         // The Mac's clipboard <-> SteamOS's (fx-clipboard-agent.service, ClipboardSync).
         if let c = clipboardPort {
@@ -98,6 +99,7 @@ final class VM {
         // GPU: Venus only (no virgl GL), host-visible shm window for blobs. virglrenderer (in this
         // process) opens the Vulkan driver named by VKR_VULKAN_DRIVER (its patch 0013).
         Self.applyGraphicsEnv(o)
+        VRHost.apply(o, ctx: ctx, sound: hasSound && o.vrHeadsetAudio) // Settings > VR "Game audio in the headset"
         setenv("VKR_VULKAN_DRIVER", "@rpath/" + o.vulkanDriver.library, 1)
         setenv("VKR_GPU_BUDGET_MIB", String(o.gpuBudgetMiB), 1)
         OverlayView.vulkanDriver = o.vulkanDriver
@@ -135,11 +137,12 @@ final class VM {
         if shutdownFd < 0 { log("warning: krun_get_shutdown_eventfd: \(shutdownFd)"); shutdownFd = -1 }
     }
 
-    /// Graphics path (Settings > Advanced): DXMT asks libkrun (patch 0021) for the wmtr virtio-gpu context,
-    /// whose host side is libwmtr_host.dylib in the app's Frameworks; the game's CAMetalLayer goes on top
-    /// of the VM view (WMTR_PRESENT=overlay). Vulkan clears all of it, also when inherited from a shell.
+    /// Settings > Advanced "Allow DXMT" (or --wmtr-lib / --no-wmtr): libkrun (patch 0018) offers the wmtr virtio-gpu
+    /// context type, whose host side is the executor library (the bundled libwmtr_host.dylib unless another is
+    /// chosen), when it builds the GPU; the game's CAMetalLayer goes on top of the VM view (WMTR_PRESENT=overlay).
+    /// Off clears all of it, also when inherited from a shell: the setting decides, not the environment.
     static func applyGraphicsEnv(_ o: Options) {
-        if o.graphicsPath == .dxmt, let lib = LauncherSettings.GraphicsPath.hostLibraryPath {
+        if let lib = o.wmtrLibrary {
             setenv("STEAMAC_WMTR", "1", 1)
             setenv("STEAMAC_WMTR_LIB", lib, 1)
             setenv("WMTR_PRESENT", "overlay", 1)

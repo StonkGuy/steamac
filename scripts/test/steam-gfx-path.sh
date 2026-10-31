@@ -14,7 +14,11 @@
 #   foreign   switching between app bundles (DXMT payload A -> B -> Vulkan with A's layer) where neither payload's
 #             checksum is kept: the DXMT file is still recognised, Proton's kept originals go back and are only then
 #             dropped (before: no restore, originals deleted, "DXVK back" logged with DXMT's d3d11/dxgi in place)
-#   noorig    a DXMT file with no kept original: it stays, a WARNING names Steam's Verify integrity, no "DXVK back"
+#   noorig    a DXMT file with no kept original and no stock copy: it stays, a WARNING names Steam's Verify integrity,
+#             no "DXVK back"
+#   oldlayer  an older layer (no stock copies) dropped $STATE/orig on a Vulkan boot and left DXMT files behind: the
+#             next Vulkan boot puts Proton's files back from $STATE/stock, the next DXMT boot keeps them as originals;
+#             a Proton update makes the stock copy stale (never restored)
 # usage: scripts/test/steam-gfx-path.sh
 set -u
 S=$(cd "$(dirname "$0")/../.." && pwd)/guest/layer/usr/lib/steamac/steam-gfx-path
@@ -114,6 +118,7 @@ D2=$P2/files/lib/wine/dxvk/x86_64-windows
 run "steamac.gfx=dxmt" "$X2"
 B2=$(echo "$T"/state/orig/*/ | tr ' ' '\n' | while read -r b; do grep -qx "$P2" "$b/path" && echo "$b"; done)
 dxblob "$B2/d3d11.dll" z                       # a poisoned kept original
+rm -rf "$T/state/stock"                        # and no stock copy either
 cp "$D2/d3d11.dll" "$T/ours.dll"; : > "$T/log"
 run "steamac.gfx=vulkan" "$X2"
 cmp -s "$D2/d3d11.dll" "$B2/d3d11.dll" 2>/dev/null && fail poisoned "poisoned backup restored"
@@ -139,11 +144,26 @@ for f in d3d11 dxgi d3d10core; do
 done
 [ -z "$(ls -A "$T/state/orig" 2>/dev/null)" ] || fail foreign "backups left after a full restore"
 # noorig: DXMT's dxgi.dll in Proton's tree with nothing kept
-run "steamac.gfx=dxmt" "$DB"; rm -rf "$T"/state/orig/*/dxgi.dll; : > "$T/log"
+run "steamac.gfx=dxmt" "$DB"; rm -rf "$T"/state/orig/*/dxgi.dll "$T"/state/stock/*/dxgi.dll; : > "$T/log"
 run "steamac.gfx=vulkan" "$DB"
 cmp -s "$D1/d3d11.dll" "$D1/d3d9.dll" || fail noorig "kept d3d11.dll not restored"
 grep -q "dxmt" "$D1/dxgi.dll" || fail noorig "dxgi.dll changed although no original was kept"
 grep -q "WARNING: no original of dxgi.dll kept for $P1.*Verify integrity" "$T/log" || fail noorig "no warning: $(cat "$T/log")"
 grep -q "DXVK back in $P1" "$T/log" && fail noorig "claims DXVK back with DXMT's dxgi.dll in place"
+# oldlayer: fresh state, DXMT boot, then an older layer's Vulkan boot dropped orig/ and left DXMT's files
+rm -rf "$T/state"; for f in d3d11 dxgi d3d10core d3d9; do blob "$D1/$f.dll" v; blob "$D2/$f.dll" v; done; : > "$T/log"
+run "steamac.gfx=dxmt" "$DB"; rm -rf "$T/state/orig"; rm -f "$P1/files/lib/wine/.steamac-dxmt"
+run "steamac.gfx=dxmt" "$DB"                   # a DXMT boot first: the stock copies become the kept originals
+for f in d3d11 dxgi d3d10core; do grep -q dxmt "$D1/$f.dll" || fail oldlayer "P1 $f.dll not DXMT"; done
+for f in d3d11 dxgi d3d10core; do grep -rlq dxmt "$T/state/orig" && fail oldlayer "DXMT file kept as an original"; done
+rm -rf "$T/state/orig"; rm -f "$P1/files/lib/wine/.steamac-dxmt" "$P1/files/lib/wine/x86_64-windows/winemetal.dll"
+run "steamac.gfx=vulkan" "$DA"
+for f in d3d11 dxgi d3d10core; do cmp -s "$D1/$f.dll" "$D1/d3d9.dll" || fail oldlayer "P1 $f.dll not restored from the stock copy"; done
+grep -q "WARNING" "$T/log" && fail oldlayer "warning although a stock copy existed: $(grep WARNING "$T/log" | head -1)"
+# stale stock copy: Proton updated after the copy was made, then DXMT left behind without originals
+run "steamac.gfx=dxmt" "$DB"; rm -rf "$T/state/orig"; echo 9 > "$P1/version"; : > "$T/log"
+run "steamac.gfx=vulkan" "$DA"
+grep -q dxmt "$D1/dxgi.dll" || fail oldlayer "stale stock copy (older Proton version) restored"
+grep -q "WARNING: no original of" "$T/log" || fail oldlayer "no warning for a stale stock copy"
 echo "steam-gfx-path: $([ $fails = 0 ] && echo passed || echo FAILED)"
 exit $((fails > 0))

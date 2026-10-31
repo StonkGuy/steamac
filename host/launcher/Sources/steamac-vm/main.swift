@@ -22,11 +22,15 @@ do {
     MainActor.assumeIsolated { AppBundle.alertIfLaunchedFromFinder("FX Steam Launcher cannot start", error.localizedDescription) }
     exit(2)
 }
+if Supervisor.isChild, let driver = Supervisor.profileDriver { options.vulkanDriver = driver }
+settings.bootedDriver = Supervisor.isChild ? options.vulkanDriver : nil
+settings.bootedDXMT = Supervisor.isChild ? options.wmtrLibrary != nil : nil
 
 if options.selftestMetalCache { MetalCompilerCache.selfTest() }
 if options.selftestGameLayers { GameLayerSelfTest.run() }
 if options.selftestL10n { L10nSelfTest.run() }
 if options.selftestGraphicsPath { GraphicsPathSelfTest.run(options) }
+if options.selftestVR { VRSelfTest.run(options) }
 // Before CrashReporting's GPU tags, the window or either Vulkan driver can initialise Metal.
 MetalCompilerCache.prepare()
 
@@ -55,6 +59,8 @@ if options.selftestPill { PillSelfTest.run(options) }
 if options.selftestSettings { SettingsSelfTest.run(options, overrides: settingsOverrides) }
 if options.selftestProvision { ProvisionSelfTest.run(options) }
 if options.selftestRemotePlay { RemotePlaySelfTest.run() }
+if options.selftestPointer { PointerSelfTest.run() }
+if options.selftestGameLayers { GameLayerSelfTest.run() }
 if options.createDisk != nil { CreateDiskCLI.run(options, settings: settings) }
 if let disk = options.growDisk {
     do {
@@ -107,16 +113,18 @@ final class Lifecycle: NSObject, NSApplicationDelegate {
     var settingsContext: SettingsContext?
     var suspender: SuspendController?
     /// Opens Report a Problem over the VM window.
+    var gameProfiles: GameProfileController?
     var report: (() -> Void)?
     private var requestedAt: Date?
     /// SteamOS can take ~2 min to stop (systemd stop-job timeouts) before libkrun exits.
     static let gracePeriod: TimeInterval = 180
 
-    /// Force quit: no relaunch even if a restart was pending.
+    /// Force quit: no relaunch even if a restart was pending; the status tells the supervisor the
+    /// user asked for it (CrashReporting.forceQuitStatus).
     private func forceQuit() -> Never {
         log("force quit")
         if let dir = Supervisor.runDir { try? FileManager.default.removeItem(atPath: Supervisor.rebootMarker(dir)) }
-        exit(1)
+        exit(CrashReporting.forceQuitStatus)
     }
 
     func requestShutdown(force: Bool = false) {
@@ -253,7 +261,11 @@ final class Lifecycle: NSObject, NSApplicationDelegate {
 
 extension Lifecycle: NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(menuMetalHUD) { item.state = LauncherSettings.shared.metalHUD ? .on : .off }
+        if item.action == #selector(menuMetalHUD) {
+            item.state = LauncherSettings.shared.metalHUD ? .on : .off
+            // libMTLHud's own item (MainMenu.adoptHUDMenuItems): titled and ticked like the View menu item.
+            if item.tag == MainMenu.adoptedHUDItemTag { item.title = String(localized: "Show Metal Performance HUD (Ctrl+Cmd+P)") }
+        }
         if item.action == #selector(menuCheckForUpdates) {
             item.title = UpdateChecker.shared.menuTitle
             item.badge = UpdateChecker.shared.available != nil ? NSMenuItemBadge(string: String(localized: "New", comment: "Badge on a menu item when an update is available")) : nil
@@ -301,6 +313,7 @@ do {
         RollingLog.console.append(BootProgress.stripANSI(line))
         progress.consoleLine(line)
         CrashReporting.consoleLine(line)
+        GameSessionTracker.consoleLine(line)
     }
     let progressPort = try ProgressPort()
     // Log bundles requested by Report a Problem arrive on the same port.
@@ -317,6 +330,8 @@ do {
     progress.onGameName = { id, name in settings.setGameName(name, for: id) }
     // `appid` tag of crash/error reports (the window and GamePause chain their handlers after this).
     progress.onFocus = { CrashReporting.focusedGame($0) }
+    lifecycle.gameProfiles = GameProfileController(settings: settings, progress: progress, port: progressPort,
+        options: options, window: { lifecycle.window?.window }, restart: { lifecycle.requestRestart() })
     progress.onProvision = { ok, reason in Provision.finished(ok: ok, reason: reason, payload: options.provisionPayload) }
     if let p = options.provisionPayload { log("provision: first boot of this disk: payload \(p) attached read-only, \(Provision.cmdlineFlag)") }
     progress.onConfig = { ok, reason in Provision.configFinished(ok: ok, reason: reason, payload: options.configPayload) }
@@ -330,15 +345,15 @@ do {
     let clockPort = try ClockPort()
     // Guest sleep needs the window (overlay, wake input): headless, the guest's sleep fails instead.
     let sleepPort = options.headless ? nil : try SleepPort()
-    // The guest's gamepad follows the Mac's controller (GamepadBridge): needs the window too.
-    let padPort = options.headless || !options.gamepad ? nil : try PadPort()
+    // The guest's gamepads follow the Mac's controllers (GamepadBridge): need the window too.
+    let padPorts = options.headless || !options.gamepad ? [] : try (0..<GamepadBridge.maxPads).map { try PadPort(player: $0) }
     // Clipboard sharing follows the app's activation (ClipboardSync): window only.
     let clipboardPort = options.headless ? nil : try ClipboardPort()
     let vm = try VM(options: options, display: display, console: console, progressPort: progressPort,
-                    clockPort: clockPort, sleepPort: sleepPort, padPort: padPort, clipboardPort: clipboardPort,
+                    clockPort: clockPort, sleepPort: sleepPort, padPorts: padPorts, clipboardPort: clipboardPort,
                     inputs: inputs, netSocket: Supervisor.netSocket)
     lifecycle.vm = vm
-    let gamepad = padPort.map { GamepadBridge(port: $0, settings: settings, typeOverride: options.padType) }
+    let gamepad = padPorts.isEmpty ? nil : GamepadBridge(ports: padPorts, settings: settings, typeOverride: options.padType)
     let sound = SoundControl()
     if vm.hasSound {
         sound.attach(ctx: vm.ctx, settings: settings)
@@ -443,7 +458,7 @@ do {
         return r == 0 || r == -ENOTSUP ? (ctrl, ring) : nil
     }
     let stall = StallMonitor(view: wc.stallView, sample: gpuCounters)
-    stall.onNotResponding = { CrashReporting.stallNotResponding(seconds: $0) }
+    stall.onNotResponding = { CrashReporting.stallNotResponding($0) }
     wc.attach(stall: stall)
     // After `ready`: "Waiting for SteamOS to draw…" when the window shows no / a black picture.
     let noPicture = NoPictureGuard { presenter.scanout.probe(sampleIfNewerThan: $0) }
@@ -451,7 +466,10 @@ do {
     // Settings > General "Pause the game" in the background; no GPU-idle card while frozen.
     let gamePause = GamePause(settings: settings, progress: progress) { progressPort.send($0) }
     gamePause.onChange = { stall.paused = $0 }
-    gamePause.onConfirmedChange = { [weak wc] in wc?.gamePaused($0) }
+    // Game statistics (Settings > Games): one report per game run, frames counted while it has focus.
+    let gameStats = GameSessionTracker(options: options, progress: progress) { [weak wc] in wc?.window }
+    DebugControl.gameStats = gameStats
+    gamePause.onConfirmedChange = { [weak wc] in wc?.gamePaused($0); gameStats.gamePaused($0) }
     // Settings > General "Share clipboard with SteamOS" (fx.clipboard).
     let clipboard = clipboardPort.map { ClipboardSync(port: $0, settings: settings) }
     let suspender = SuspendController(ctx: vm.ctx, clock: clockPort, sleepPort: sleepPort, window: wc, presenter: presenter,
@@ -462,6 +480,7 @@ do {
         noPicture.vmPaused = paused
         gamepad?.vmPaused(paused)
         clipboard?.vmPaused = paused
+        gameStats.vmPaused = paused
         if paused {
             activity.map(ProcessInfo.processInfo.endActivity)
             activity = nil
@@ -527,7 +546,18 @@ do {
     }
     console.start()
     vm.start()
-    withExtendedLifetime((presenter, gamepad, progressPort, supervisorWatch, perfSubscription, gamePause, suspender, clipboard)) {
+    // VR boots: "Start in VR" / the headset's app list reach the guest agent; the pairing PIN shows on the window.
+    var vrRelay: VRRelay?
+    if options.vr {
+        VRHost.guestSend = { progressPort.send($0) }
+        vrRelay = MainActor.assumeIsolated {
+            VRRelay { [weak wc] pin in
+                wc?.window.subtitle = pin.map { String(localized: "VR pairing PIN \($0)") } ?? ""
+            }
+        }
+    }
+    withExtendedLifetime((presenter, gamepad, progressPort, supervisorWatch, perfSubscription, gamePause, suspender, clipboard,
+                          gameStats, vrRelay)) {
         app.run()
     }
 } catch {

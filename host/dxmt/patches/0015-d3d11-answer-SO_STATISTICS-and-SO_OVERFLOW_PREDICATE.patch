@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Mybono <81219764+Mybono@users.noreply.github.com>
 Date: Mon, 5 Oct 2026 20:50:10 +0300
-Subject: [PATCH 15/24] d3d11: answer SO_STATISTICS and SO_OVERFLOW_PREDICATE
+Subject: [PATCH 15/27] d3d11: answer SO_STATISTICS and SO_OVERFLOW_PREDICATE
  queries with a dummy
 
 World of Tanks (Lesta client 1.45) creates a D3D11_QUERY_SO_STATISTICS query while it loads

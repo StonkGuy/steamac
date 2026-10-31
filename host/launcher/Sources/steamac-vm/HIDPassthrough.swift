@@ -38,13 +38,29 @@ final class HIDPassthrough {
         let identity: Identity
         let maxInput: Int
         let maxFeature: Int
-        fileprivate var inputBuffer: UnsafeMutablePointer<UInt8>?
+        /// Where IOKit copies the device's input reports, for as long as the device lives.
+        /// IOHIDLib's device plugin keeps the buffer of the last input report callback
+        /// registered and copies every report into it while the device is open, also after the
+        /// callback is unregistered (a nil callback only drops it from IOHIDDevice's callback
+        /// set): a buffer freed on deactivation took the next reports of a still connected
+        /// controller (STEAMAC-35: a USB DualSense's 64-byte reports overwrote a freed 64-byte
+        /// block that libobjc had reused for a GameController class's method cache, abort
+        /// "Method cache corrupted").
+        fileprivate let inputBuffer: UnsafeMutablePointer<UInt8>
 
         init(ref: IOHIDDevice, identity: Identity, maxInput: Int, maxFeature: Int) {
             self.ref = ref
             self.identity = identity
             self.maxInput = maxInput
             self.maxFeature = maxFeature
+            inputBuffer = .allocate(capacity: maxInput)
+        }
+
+        /// Only on the main thread (HIDPassthrough keeps devices there): its reports are
+        /// delivered on the main run loop, which this unschedules before the buffer goes.
+        deinit {
+            IOHIDDeviceUnscheduleFromRunLoop(ref, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+            inputBuffer.deallocate()
         }
     }
 
@@ -140,24 +156,20 @@ final class HIDPassthrough {
     func activate(_ d: Device) {
         guard active !== d else { return }
         deactivate()
-        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: d.maxInput)
-        d.inputBuffer = buf
         active = d
         let ctx = Unmanaged.passUnretained(self).toOpaque()
-        IOHIDDeviceRegisterInputReportCallback(d.ref, buf, d.maxInput, { ctx, result, _, _, _, report, length in
+        IOHIDDeviceRegisterInputReportCallback(d.ref, d.inputBuffer, d.maxInput, { ctx, result, _, _, _, report, length in
             guard let ctx, result == kIOReturnSuccess, length > 0 else { return }
             let me = Unmanaged<HIDPassthrough>.fromOpaque(ctx).takeUnretainedValue()
             me.onInput?(UnsafeBufferPointer(start: report, count: length))
         }, ctx)
     }
 
+    /// A nil callback unregisters ours (callbacks run on this, the main thread). IOKit keeps
+    /// copying the device's reports into its buffer, which lives as long as the Device.
     func deactivate() {
-        guard let d = active, let buf = d.inputBuffer else { return }
-        // A nil callback unregisters; the callback runs on this (main) thread, so nothing writes
-        // to the buffer afterwards.
-        IOHIDDeviceRegisterInputReportCallback(d.ref, buf, d.maxInput, nil, nil)
-        buf.deallocate()
-        d.inputBuffer = nil
+        guard let d = active else { return }
+        IOHIDDeviceRegisterInputReportCallback(d.ref, d.inputBuffer, d.maxInput, nil, nil)
         active = nil
     }
 
@@ -175,13 +187,14 @@ final class HIDPassthrough {
 
     /// GET_REPORT of report `id`: the report (ID first) or an error, on the main queue.
     func getReport(_ d: Device, type: ReportType, id: UInt8, done: @escaping (Result<[UInt8], IOReturnError>) -> Void) {
-        let size = type == .input ? d.maxInput : d.maxFeature
+        // The IOHIDDevice, not the Device: a Device is released on the main thread only (deinit).
+        let ref = d.ref, size = type == .input ? d.maxInput : d.maxFeature
         io.async {
             var buf = [UInt8](repeating: 0, count: size)
             buf[0] = id
             var len = CFIndex(size)
             let r = buf.withUnsafeMutableBufferPointer {
-                IOHIDDeviceGetReport(d.ref, type.io, CFIndex(id), $0.baseAddress!, &len)
+                IOHIDDeviceGetReport(ref, type.io, CFIndex(id), $0.baseAddress!, &len)
             }
             let result: Result<[UInt8], IOReturnError> =
                 r == kIOReturnSuccess ? .success(Array(buf.prefix(len))) : .failure(IOReturnError(code: r))
@@ -192,9 +205,10 @@ final class HIDPassthrough {
     /// SET_REPORT / an output report (ID first, as the guest sends it), done on the main queue.
     func setReport(_ d: Device, type: ReportType, data: [UInt8], done: ((IOReturn) -> Void)? = nil) {
         guard !data.isEmpty else { done?(kIOReturnBadArgument); return }
+        let ref = d.ref
         io.async {
             let r = data.withUnsafeBufferPointer {
-                IOHIDDeviceSetReport(d.ref, type.io, CFIndex(data[0]), $0.baseAddress!, data.count)
+                IOHIDDeviceSetReport(ref, type.io, CFIndex(data[0]), $0.baseAddress!, data.count)
             }
             if r != kIOReturnSuccess { log("hid passthrough: \(type.rawValue) report \(data[0]): \(HIDPassthrough.describe(r))") }
             if let done { DispatchQueue.main.async { done(r) } }

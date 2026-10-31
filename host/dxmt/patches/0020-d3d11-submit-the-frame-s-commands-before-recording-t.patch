@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 19:07:54 +0300
-Subject: [PATCH 20/24] d3d11: submit the frame's commands before recording the
+Subject: [PATCH 20/27] d3d11: submit the frame's commands before recording the
  present
 
 The present is recorded into the same command chunk as the frame's last

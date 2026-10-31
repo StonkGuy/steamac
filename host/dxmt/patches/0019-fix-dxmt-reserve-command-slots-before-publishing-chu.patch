@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?=E6=97=B6=E9=9B=A8?= <270598250@qq.com>
 Date: Thu, 21 May 2026 18:13:27 +0800
-Subject: [PATCH 19/24] fix(dxmt): reserve command slots before publishing
+Subject: [PATCH 19/27] fix(dxmt): reserve command slots before publishing
  chunks
 
 (cherry picked from commit a350b20e51d8dd23d8244451f482151b146877a1)

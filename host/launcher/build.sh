@@ -56,6 +56,7 @@ SWIFT_FLAGS=(
     --package-path "$HERE"
     --scratch-path "$HERE/.build"
     -Xcc "-I$KRUN_PREFIX/include"
+    -Xcc "-I$ROOT/host/vrhost/include"   # vraudio.h (plain C, Apache-2.0 OR GPL-3.0-or-later)
     -Xlinker "-L$KRUN_PREFIX/lib"
     -Xlinker -rpath -Xlinker @executable_path/host/lib
     -Xlinker -rpath -Xlinker "$KRUN_PREFIX/lib"

@@ -66,6 +66,8 @@ struct Options {
     var network = true
     var lanRemotePlay = false
     var selftestRemotePlay = false
+    var selftestPointer = false
+    var selftestGameLayers = false
     var sound = true
     var sshPort = 2222
     /// Steam client of this boot (kernel cmdline `steamac.steam_client=`).
@@ -74,11 +76,40 @@ struct Options {
     var macTime = true
     /// Host Vulkan driver of this boot (virglrenderer opens it; VM.start).
     var vulkanDriver = LauncherSettings.VulkanDriver.moltenvk
-    var graphicsPath = LauncherSettings.GraphicsPath.vulkan
+    /// Experimental wmtr context type: its executor library (STEAMAC_WMTR_LIB, set by VM.start
+    /// with STEAMAC_WMTR=1); nil = off.
+    var wmtrLibrary: String?
+    /// The graphics path of this start: DXMT when the wmtr context type is offered (wmtrLibrary), else Vulkan.
+    var graphicsPath: LauncherSettings.GraphicsPath { wmtrLibrary == nil ? .vulkan : .dxmt }
     var selftestGraphicsPath = false
     /// Settings > Advanced "Frame latency" (kernel cmdline `steamac.frame_latency=1`): the guest's
     /// DXVK config gets dxgi.maxFrameLatency = 1 for the Vulkan path. Default false: unset.
     var frameLatency = false
+    /// Settings > VR "VR (experimental)" / --vr: start steamac-vrhost with the VM (VRHost) and tell the
+    /// guest (kernel cmdline `steamac.vr=1`). Default off.
+    var vr = false
+    /// Settings > VR "Bitrate" / --vr-bitrate: total stream bitrate, Mbit/s.
+    var vrBitrateMbps = LauncherSettings.vrDefaultBitrateMbps
+    /// Settings > VR "Resolution per eye" / --vr-size WxH: "" = the headset's own stream size.
+    var vrEyeSize = ""
+    /// Settings > VR "Codec" / --vr-codec auto|hevc|h264.
+    var vrCodec = LauncherSettings.VRCodec.automatic
+    /// Settings > VR "Let new headsets ask to pair" / --vr-pair-on-request, --no-vr-pair-on-request.
+    var vrPairOnRequest = true
+    /// Settings > VR "Game audio in the headset" / --no-vr-audio.
+    var vrHeadsetAudio = true
+    /// Settings > VR "Game": Steam app id offered in the headset's app list (0 = none).
+    var vrGameAppID = LauncherSettings.vrDefaultGameAppID
+    /// Settings > VR quality / codec / stream options (machine-side; see LauncherSettings).
+    var vrRenderScale = 1.0
+    var vrUpscaler = LauncherSettings.VRUpscaler.metalfx
+    var vrSharpness = 0.0
+    var vrForceSRGB = false
+    var vrKeyframeInterval = 0.0
+    var vrTCPOnly = false
+    /// Its name as the guest agent reported it (`game <appid> <name>`), if seen before.
+    var vrGameName: String?
+    var selftestVR = false
     var shmMiB = 8192
     var gpuFlags: UInt32? = nil
     var gvproxyPath: String?
@@ -86,7 +117,7 @@ struct Options {
     var mouseMode: MouseMode = .auto
     var controlFifo: String?
     var autoCapture: Bool?
-    /// The guest gets a gamepad over fx.pad (`--no-gamepad`: no port, no pad this run).
+    /// The guest gets gamepads over fx.pad, fx.pad2, … (`--no-gamepad`: no ports, no pads this run).
     var gamepad = true
     /// `--pad`: what the guest's gamepad is this run (instead of Settings > Controller).
     var padType: LauncherSettings.PadType?
@@ -120,7 +151,6 @@ struct Options {
     var acceptLicense = false
     var selftestProvision = false
     var selftestMetalCache = false
-    var selftestGameLayers = false
     var selftestL10n = false
     var referenceDisk: String?
     /// --ssh-password DISK: print the disk's generated guest password (GuestPassword) and exit.
@@ -141,8 +171,11 @@ struct Options {
                       [--mouse auto|tablet|capture] [--no-gamepad] [--pad auto|xbox360|dualsense|dualshock4]
                       [--krun-log-level 0-5] [--perf-stats]
                       [--no-crash-reports] [--steam-client frame|deck|deckbeta]
-                      [--vulkan-driver moltenvk|kosmickrisp] [--graphics-path dxmt|vulkan]
-                      [--frame-latency | --no-frame-latency] [--lan-remote-play | --no-lan-remote-play]
+                      [--vulkan-driver moltenvk|kosmickrisp] [--wmtr-lib PATH | --no-wmtr]
+                      [--graphics-path dxmt|vulkan] [--frame-latency | --no-frame-latency]
+                      [--lan-remote-play | --no-lan-remote-play]
+                      [--vr | --no-vr] [--vr-bitrate MBIT] [--vr-size WxH]
+                      [--vr-codec auto|hevc|h264] [--no-vr-pair-on-request] [--no-vr-audio]
            steamac-vm --selftest-display [--headless] [--selftest-out DIR] [--display WxH]
            steamac-vm --selftest-overlay [--selftest-out DIR] [--display WxH]
            steamac-vm --selftest-stall [--selftest-out DIR] [--display WxH]
@@ -154,6 +187,7 @@ struct Options {
            steamac-vm --selftest-game-layers
            steamac-vm --selftest-l10n
            steamac-vm --selftest-graphics-path [--graphics-path dxmt|vulkan]
+           steamac-vm --selftest-pointer
            steamac-vm --create-disk PATH [--branch stable|rc] [--home-gib N]
                       [--password PW] [--keep-cache] [--accept-eula]
            steamac-vm --ssh-password DISK
@@ -220,6 +254,9 @@ struct Options {
                            (xpad); dualsense, dualshock4: Sony pad as the Linux hid-playstation /
                            hid-sony drivers expose it (PlayStation button glyphs in Steam). Any
                            connected controller drives it; its rumble plays on that controller.
+                           Further controllers are players 2-4 with a pad each (auto: of
+                           its own controller's kind; Settings > Controller "Additional
+                           controllers").
       --krun-log-level N   libkrun log level 0=off .. 5=trace (default 1=error)
       --steam-client C     Steam client SteamOS starts (kernel cmdline steamac.steam_client=C, added on
                            every boot; default: Settings > Advanced "Steam client", deck unless changed):
@@ -234,11 +271,30 @@ struct Options {
                            include it: host/kosmickrisp);
                            moltenvk: MoltenVK with steamac's patches (every Mac).
                            Switching makes Steam and games rebuild their shader caches.
+      --wmtr-lib PATH      experimental: offer the guest the wmtr virtio-gpu context type (capset 30), DXMT's
+                           winemetal calls run on this Mac's Metal by the executor library PATH
+                           (default: Settings > Advanced "Allow DXMT", off unless changed)
+      --no-wmtr            the guest gets no wmtr context type for this run
+      --graphics-path P    dxmt: --wmtr-lib with the bundled executor; vulkan: --no-wmtr (scripts of
+                           the earlier "Graphics path" setting)
       --frame-latency      frame latency mode on (kernel cmdline steamac.frame_latency=1; default:
                            Settings > Advanced "Frame latency", off): the guest's DXVK config gets
                            dxgi.maxFrameLatency = 1 (Vulkan path only), trading some throughput for
                            lower input latency. Off means no key is added, so the guest side is
                            unchanged. --no-frame-latency turns it off for this run.
+      --vr                 VR, experimental (default: Settings > VR "VR (experimental)", off):
+                           starts steamac-vrhost (WiVRn-compatible headset server, bundled) with the
+                           VM and links it to the DXMT path's Metal executor, so games' eye textures
+                           stream to a headset running the WiVRn client. Needs the DXMT graphics
+                           path; the guest is told with kernel cmdline steamac.vr=1 (no key when
+                           off). --no-vr turns it off for this run. Log:
+                           ~/Library/Logs/es.fxgam.steamac/steamac-vrhost.log
+      --vr-bitrate MBIT    total VR stream bitrate, 5-200 Mbit/s (default: Settings > VR, 50)
+      --vr-size WxH        encoded size per eye (default: Settings > VR; the headset's own size)
+      --vr-codec C         auto (HEVC when the headset has it), hevc or h264 (default: Settings > VR)
+      --no-vr-pair-on-request  an unpaired headset is refused instead of opening pairing with a new PIN
+      --no-vr-audio        keep the guest's audio on the Mac while a headset is connected
+      --selftest-vr        spawn/teardown self-test of steamac-vrhost (no VM, no headset)
 
     Creating a SteamOS disk (no Docker; the same code as Settings > Advanced "Create New Disk…"):
       --create-disk PATH   download the signed SteamOS bundle of the branch (default: the saved setting,
@@ -294,6 +350,9 @@ struct Options {
       --selftest-metal-cache reproduce an inaccessible Metal module cache and verify startup recovery
       --selftest-l10n      the bundle's ru and zh-Hans tables: present, the same keys, the same format
                            arguments, the launcher's settings strings translated
+      --selftest-pointer   host pointer -> guest cursor mapping (Retina on/off, window vs scanout size,
+                           full-screen letterbox, MetalFX, the guest's focused surface from focus lines)
+      --selftest-game-layers verify game layer visibility and the Metal HUD's game/picture policy
       --resize-selftest S  S seconds after Steam is ready, resize the window 1600x1000 -> fullscreen ->
                            windowed -> 1280x800, wait for the guest's new scanout each time and dump
                            frames to <--frame-dump>-resize-N-*.png
@@ -306,7 +365,9 @@ struct Options {
                            -screen = as composited on screen, Metal HUD included) |
                            settings TAB|close | settings-dump PNG | set KEY VALUE | restart |
                            update check|startup|state | update press download|skip|later|ok |
-                           update dump PNG (+ -with-vm = beside the VM window, as on screen)
+                           update dump PNG (+ -with-vm = beside the VM window, as on screen) |
+                           stats state|flush|ask|reset-question | stats press share|decline |
+                           stats dump PNG (game statistics question window)
 
     Window keys: Ctrl+Cmd+F fullscreen, Ctrl+Cmd+G capture/release the mouse, Ctrl+Option release,
     Ctrl+Cmd+P Metal Performance HUD on/off (Settings > Display).
@@ -387,16 +448,36 @@ struct Options {
                 guard let g = LauncherSettings.GraphicsPath(rawValue: v) else {
                     throw OptionError("--graphics-path: dxmt or vulkan")
                 }
-                o.graphicsPath = g
+                o.wmtrLibrary = g == .dxmt ? LauncherSettings.Wmtr.path(for: "") : nil
             case "--selftest-graphics-path": o.selftestGraphicsPath = true
             case "--frame-latency": o.frameLatency = true
             case "--no-frame-latency": o.frameLatency = false
+            case "--vr": o.vr = true
+            case "--no-vr": o.vr = false
+            case "--vr-bitrate":
+                let n = try int(a)
+                guard LauncherSettings.vrBitrateRange.contains(n) else { throw OptionError("--vr-bitrate: 5-200 (Mbit/s)") }
+                o.vrBitrateMbps = n
+            case "--vr-size":
+                let s = try value(a)
+                guard LauncherSettings.vrEyeSizeValid(s) else { throw OptionError("--vr-size: WxH, even sides, 256-4096") }
+                o.vrEyeSize = s
+            case "--vr-codec":
+                let s = try value(a)
+                guard let c = LauncherSettings.VRCodec(rawValue: s) else { throw OptionError("--vr-codec: auto, hevc or h264") }
+                o.vrCodec = c
+            case "--vr-pair-on-request": o.vrPairOnRequest = true
+            case "--no-vr-pair-on-request": o.vrPairOnRequest = false
+            case "--no-vr-audio": o.vrHeadsetAudio = false
+            case "--selftest-vr": o.selftestVR = true
             case "--vulkan-driver":
                 let v = try value(a)
                 guard let d = LauncherSettings.VulkanDriver(rawValue: v) else {
                     throw OptionError("--vulkan-driver: moltenvk or kosmickrisp")
                 }
                 o.vulkanDriver = d
+            case "--wmtr-lib": o.wmtrLibrary = try value(a)
+            case "--no-wmtr": o.wmtrLibrary = nil
             case "--shm-mib": o.shmMiB = try int(a)
             case "--gpu-flags":
                 let v = try value(a)
@@ -442,6 +523,7 @@ struct Options {
             case "--selftest-metal-cache": o.selftestMetalCache = true
             case "--selftest-game-layers": o.selftestGameLayers = true
             case "--selftest-l10n": o.selftestL10n = true
+            case "--selftest-pointer": o.selftestPointer = true
             case "--reference-disk": o.referenceDisk = try value(a)
             case "--create-disk": o.createDisk = try value(a)
             case "--grow-disk": o.growDisk = try value(a)
@@ -491,9 +573,16 @@ struct Options {
         on ? ("steamac.frame_latency", "1") : nil
     }
 
+    /// Settings > VR "VR (experimental)" -> kernel cmdline key: `steamac.vr=1` when this boot starts the
+    /// VR host, nothing otherwise (absent is the default, so the guest side is unchanged).
+    static func vrArg(_ on: Bool) -> (key: String, value: String)? {
+        on ? ("steamac.vr", "1") : nil
+    }
+
     var isSelftest: Bool {
         selftestDisplay || selftestOverlay || selftestStall || selftestPill || selftestSettings || selftestProvision || selftestRemotePlay
-            || selftestMetalCache || selftestGameLayers || selftestL10n || createDisk != nil || growDisk != nil
+            || selftestMetalCache || selftestPointer || selftestGameLayers || selftestVR || selftestL10n || createDisk != nil
+            || growDisk != nil
             || showSSHPassword != nil
     }
 
@@ -502,19 +591,19 @@ struct Options {
     static func resolve(_ argv: [String], settings: LauncherSettings) throws -> (Options, [LauncherSettings.Key: String]) {
         var o = try parse(argv)
         var overrides = o.applySettings(settings)
-        if let reason = o.graphicsPath.unavailableReason {
-            guard !o.explicit.contains("--graphics-path") else {
-                throw OptionError("--graphics-path \(o.graphicsPath.rawValue): \(o.graphicsPath.name) \(reason)")
-            }
-            log("gpu: \(o.graphicsPath.name) \(reason); using Vulkan")
-            o.graphicsPath = .vulkan
-        }
         if !o.isSelftest, let reason = o.vulkanDriver.unavailableReason {
             guard !o.explicit.contains("--vulkan-driver") else {
                 throw OptionError("--vulkan-driver \(o.vulkanDriver.rawValue): \(o.vulkanDriver.name) \(reason)")
             }
             log("gpu: \(o.vulkanDriver.name) \(reason); using MoltenVK")
             o.vulkanDriver = .moltenvk
+        }
+        if !o.isSelftest, let lib = o.wmtrLibrary, let reason = LauncherSettings.Wmtr.unavailableReason(lib) {
+            guard !o.explicit.contains("--wmtr-lib") && !o.explicit.contains("--graphics-path") else {
+                throw OptionError("\(o.explicit.contains("--wmtr-lib") ? "--wmtr-lib" : "--graphics-path dxmt"): \(reason)")
+            }
+            log("gpu: wmtr: \(reason); the guest gets no wmtr context type")
+            o.wmtrLibrary = nil
         }
         if !o.isSelftest {
             AppBundle.fill(&o, settings: settings, overrides: &overrides)
@@ -527,11 +616,11 @@ struct Options {
             }
             add("steamac.ssh", o.sshPort == 0 ? "0" : "1")
             add("steamac.steam_client", o.steamClient.rawValue)
+            add("steamac.gfx", o.wmtrLibrary == nil ? "vulkan" : "dxmt")
             add("steamac.gpu_mib", String(VMSizing.gpuBudgetMiB(memMiB: o.memMiB)))
-            // the guest's Proton-lean tool uses DXMT only when the host offers the wmtr context
-            add("steamac.gfx", o.graphicsPath.rawValue)
             // only written when on; absent is the default (off), so an explicit =0 needs no key
             if let a = Options.frameLatencyArg(o.frameLatency) { add(a.key, a.value) }
+            if let a = Options.vrArg(o.vr && VRHost.unavailableReason(o) == nil) { add(a.key, a.value) }
             if o.macTime {
                 add("steamac.tz", MacTime.zone)
                 add("steamac.clock24", MacTime.clock24.map { $0 ? "1" : "0" })
@@ -585,10 +674,28 @@ struct Options {
         macTime = s.followMacTime
         if given("--steam-client") { ov[.steamClient] = "--steam-client \(steamClient.rawValue)" } else { steamClient = s.steamClient }
         if given("--vulkan-driver") { ov[.vulkanDriver] = "--vulkan-driver \(vulkanDriver.rawValue)" } else { vulkanDriver = s.vulkanDriver }
-        if given("--graphics-path") { ov[.graphicsPath] = "--graphics-path \(graphicsPath.rawValue)" } else { graphicsPath = s.graphicsPath }
+        if given("--wmtr-lib") || given("--no-wmtr") || given("--graphics-path") {
+            let flag = wmtrLibrary.map { "--wmtr-lib \($0)" } ?? "--no-wmtr"
+            ov[.wmtr] = flag
+            ov[.wmtrLibrary] = flag
+        } else {
+            wmtrLibrary = s.wmtr ? LauncherSettings.Wmtr.path(for: s.wmtrLibrary) : nil
+        }
         if given("--frame-latency") || given("--no-frame-latency") {
             ov[.frameLatency] = frameLatency ? "--frame-latency" : "--no-frame-latency"
         } else { frameLatency = s.frameLatency }
+        if given("--vr") || given("--no-vr") { ov[.vrEnabled] = vr ? "--vr" : "--no-vr" } else { vr = s.vrEnabled }
+        if given("--vr-bitrate") { ov[.vrBitrateMbps] = "--vr-bitrate \(vrBitrateMbps)" } else { vrBitrateMbps = s.vrBitrateMbps }
+        if given("--vr-size") { ov[.vrEyeSize] = "--vr-size \(vrEyeSize)" } else { vrEyeSize = s.vrEyeSize }
+        if given("--vr-codec") { ov[.vrCodec] = "--vr-codec \(vrCodec.rawValue)" } else { vrCodec = s.vrCodec }
+        if given("--vr-pair-on-request") || given("--no-vr-pair-on-request") {
+            ov[.vrPairOnRequest] = vrPairOnRequest ? "--vr-pair-on-request" : "--no-vr-pair-on-request"
+        } else { vrPairOnRequest = s.vrPairOnRequest }
+        if given("--no-vr-audio") { ov[.vrHeadsetAudio] = "--no-vr-audio" } else { vrHeadsetAudio = s.vrHeadsetAudio }
+        vrGameAppID = s.vrGameAppID
+        vrGameName = s.gameName(vrGameAppID)
+        vrRenderScale = s.vrRenderScale; vrUpscaler = s.vrUpscaler; vrSharpness = s.vrSharpness; vrForceSRGB = s.vrForceSRGB
+        vrKeyframeInterval = s.vrKeyframeInterval; vrTCPOnly = s.vrTCPOnly
         if given("--no-sound") { ov[.soundEnabled] = "--no-sound" } else { sound = s.soundEnabled }
         if given("--no-gamepad") { ov[.virtualPad] = "--no-gamepad" }
         if let padType { ov[.padType] = "--pad \(padType.rawValue)" }

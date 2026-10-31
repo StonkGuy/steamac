@@ -38,7 +38,7 @@ DXMT (single runs, see [docs/eac-performance.md](docs/eac-performance.md)).
 
 1. Build the app from this fork's `main` branch or a [release](https://github.com/StonkGuy/steamac/releases) tag:
    `./build.sh` ([requirements and building](docs/upstream/requirements-and-building.md); the DXMT path also needs
-   `make dxmt-payload` in `wmtr/` before the layer step). Or download the DMG
+   `./build.sh dxmt` before the layer step). Or download the DMG
    attached to a [release](https://github.com/StonkGuy/steamac/releases) (from v1.9-eac.1, built by GitHub Actions, ad-hoc signed). Copy
    **FX Steam Launcher.app** from `work/out/` (or the DMG) to Applications and open it (see *First open* below).
 2. On first start, choose **Create New Disk…**. The app downloads Valve's SteamOS image, verifies it and sets it up.
@@ -61,13 +61,15 @@ The fork's builds are ad-hoc signed and not notarized, so macOS Gatekeeper block
 
 ## Choosing the graphics path
 
-Settings > Advanced > **Graphics path**: *DXMT (lean)* or *Vulkan (classic)*; it applies from the next start. Nothing
-to set per game: when Steam starts, every installed Proton gets the selected path, and Proton puts it into each game's
-prefix. Switching back to *Vulkan* restores Proton's own files exactly. If Proton's original files are missing (for
+Settings > Advanced > **Allow DXMT (D3D11 on the Mac's Metal)**: on is the DXMT path, off the Vulkan path; it applies
+from the next start. Nothing to set per game: when Steam starts, every installed Proton gets DXMT, and Proton puts it
+into each game's prefix (Settings > Games can additionally give a game a profile; one that selects DXMT moves a game
+without a compatibility tool of its own to Proton 10.0, since DXMT needs an x86-64 Proton). Turning it off restores
+Proton's own files exactly. If Proton's original files are missing (for
 example after switching between two builds of the app on one disk), the files stay DXMT's and the boot log says so;
 repair Proton in Steam: the Proton tool > Properties > Installed Files > **Verify integrity of tool files**. DXMT
-covers Direct3D 11 (and 10); play Direct3D 12 games on *Vulkan* (DXMT's Direct3D 12 is limited). EAC on DXMT is
-verified with VRChat; if EAC fails in another game, switch to *Vulkan*.
+covers Direct3D 11 (and 10); play Direct3D 12 games on the Vulkan path (DXMT's Direct3D 12 is limited). EAC on DXMT is
+verified with VRChat; if EAC fails in another game, turn **Allow DXMT** off.
 
 | use | when |
 |---|---|
@@ -101,7 +103,7 @@ manual steps are required for VRChat; both are planned to become automatic:
 | symptom | what to do |
 |---|---|
 | the DXMT setting seems to have no effect | the setting applies at the next VM start: restart the VM after changing it. If the app lacks the DXMT host library, Settings says so and the app uses Vulkan (boot log: `gpu: graphics path Vulkan`) |
-| EAC fails on DXMT | switch to *Vulkan* and restart the launcher |
+| EAC fails on DXMT | turn **Allow DXMT** off and restart the launcher |
 | Direct3D 11 games fail on *Vulkan* after using DXMT | Proton still has DXMT's files: in Steam, the Proton tool > Properties > Installed Files > Verify integrity of tool files |
 | EAC does not finish, or fails after a Steam update | the patched FEX is missing or was replaced by Valve's; run `sh install-fex-tool.sh status` |
 | about a minute's stall before joining | check that `WINE_CPU_TOPOLOGY` is in the launch options |
@@ -131,8 +133,7 @@ whose peak needs more than the VM and the Mac have (see *Limits*).
   reaches `301` (not played further). Other titles are untested and results differ game by game.
 - 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
   memory on both paths with an 8 GiB VM.
-- VR (Meta Quest 3 over WiVRn) is not on this branch yet. It is experimental, on the
-  [`vr-polish`](https://github.com/StonkGuy/steamac/tree/vr-polish) branch, with its guide in `docs/vr.md` there.
+- VR (Meta Quest 3 over WiVRn) is experimental and off by default: see [docs/vr.md](docs/vr.md).
 - DXMT: Direct3D 11/10. Its Direct3D 12 is limited (feature level 11_1, DXBC only, no DXIL, no ray tracing;
   ExecuteIndirect stalls the GPU); use *Vulkan* for Direct3D 12 games.
 - DXMT: Direct3D 11 stream output with rasterization or from a geometry shader is not implemented upstream; such games
@@ -141,9 +142,11 @@ whose peak needs more than the VM and the Mac have (see *Limits*).
 - The DXMT setting applies to every game; on it the game's Metal layer covers the whole VM view (a windowed game or alt-tab
   shows the game layer).
 - Games that need more memory than the VM gets (Settings > Advanced) will swap.
-- Switching the graphics path changes every installed Proton at the next boot; see *Choosing the graphics path* for
+- Turning **Allow DXMT** on or off changes every installed Proton at the next boot; see *Choosing the graphics path* for
   the repair if a Proton was left with DXMT's files.
-- Asynchronous pipeline compilation exists in the build but is off and not recommended (measured worse).
+- KosmicKrisp compiles pipelines on a thread pool and waits at their first use (fxgl/steamac's series;
+  `MESA_KK_COMPILE_THREADS` sets the pool size). This fork's earlier opt-in variant is parked in
+  `host/kosmickrisp/patches-fork-pending/`.
 - The microphone has had little testing; a freeze after a microphone start is not fully ruled out. A rebuilt or re-signed
   app asks again for microphone permission.
 
@@ -155,6 +158,7 @@ whose peak needs more than the VM and the Mac have (see *Limits*).
 | [docs/fork.md](docs/fork.md) | what changed in this fork and its status |
 | [docs/eac-how-it-works.md](docs/eac-how-it-works.md) | the EAC chain and why the FEX swap is needed |
 | [docs/eac-performance.md](docs/eac-performance.md) | measurements and limits |
+| [docs/vr.md](docs/vr.md) | VR with a Quest 3 over WiVRn (experimental): setup, pairing, options, limits |
 | [fex-eac/README.md](fex-eac/README.md) | patched FEX setup and launch options |
 | [docs/upstream/README.md](docs/upstream/README.md) | upstream steamac's documentation (Apache-2.0, © FX GAMES FZ LLC) |
 

@@ -24,14 +24,34 @@ MIT (LICENSES/MIT.txt) - derived from Valve Corporation's deckard-steamvr-sessio
   guest/layer/usr/share/deckard/mesavars.sh
   Copyright (c) Valve Corporation; changes Copyright 2026 FX GAMES FZ LLC
 
-LGPL-2.1-or-later (LICENSES/LGPL-2.1-only.txt) - DXMT (github.com/3Shain/dxmt, (c) Feifan He for CodeWeavers),
-compiled into libwmtr_host.dylib, the host library of the DXMT graphics path (winemetal_unix.c and its
-airconv shader compiler with DXBCParser). The library is loaded by libkrun at run time with dlopen, so a
-rebuilt one of the same name replaces it. The pinned DXMT source, host/dxmt/patches/ and wmtr/ are attached
-to each release in FX-Steam-Launcher-<version>-gpl-sources.tar (pin: host/dxmt/pin.env).
+LGPL-2.1-or-later (LICENSES/LGPL-2.1-only.txt) - DXMT (github.com/3Shain/dxmt,
+Copyright Feifan He for CodeWeavers): winemetal_unix.c, airconv and DXBCParser compiled into
+libwmtr_host.dylib, and the guest layer's /usr/lib/steamac/dxmt/x86_64-windows/
+{d3d11,dxgi,d3d10core,winemetal}.dll. The guest winemetal.so transport also uses DXMT's
+LGPL headers. libkrun loads the host library with dlopen; a rebuilt library of the same
+name can replace it. The layer payload can likewise be replaced and the layer rebuilt.
+The pinned DXMT source, its DirectX headers, host/dxmt/patches/ and wmtr/ are attached to
+each release in FX-Steam-Launcher-<version>-gpl-sources.tar (pin: host/dxmt/pin.env).
 
-Apache-2.0 WITH LLVM-exception (LICENSES/LLVM-15-Apache-2.0-WITH-LLVM-exception.txt) - LLVM 15.0.7, linked
-statically into libwmtr_host.dylib by airconv.
+LGPL-2.1-or-later (LICENSES/LGPL-2.1-only.txt) - patches to DXMT:
+  host/dxmt/patches/ - generated from github.com/StonkGuy/dxmt, branch steamac.
+  Adopted commits retain their authors: David Grinberg, osy, Holly Hamilton, SteveTanSaMa,
+  hanzpo, Mybono, NerRobDog, 时雨 and Jakey-Jakey; credits in the patched STEAMAC-README.md.
+
+BSD-3-Clause (LICENSES/BSD-3-Clause.txt) - wmtr/, the DXMT remoting layer:
+  Copyright 2026 StonkGuy and the eac-arm64-emulation-poc contributors.
+  Linked into libwmtr_host.dylib and the guest layer's
+  /usr/lib/steamac/dxmt/x86_64-unix/winemetal.so (BSD-3-Clause AND LGPL-2.1-or-later).
+
+BSD-3-Clause (LICENSES/BSD-3-Clause.txt, guest/vr/third_party/openvr/LICENSE) - Valve's OpenVR API header,
+compiled into the guest OpenVR runtime (guest/vr, Apache-2.0 otherwise):
+  guest/vr/third_party/openvr/openvr.h   Copyright (c) 2015, Valve Corporation
+
+LGPL-2.1-or-later (LICENSES/LGPL-2.1-only.txt) - patches for Proton's vrclient_x64 (Wine code):
+  guest/proton-vrclient/patches/
+
+Apache-2.0 WITH LLVM-exception (LICENSES/LLVM-15-Apache-2.0-WITH-LLVM-exception.txt) -
+LLVM 15.0.7, linked statically into libwmtr_host.dylib by airconv.
 
 Not covered by any license of this project:
   scripts/keys/steamdeck-images.pem - Valve's public RAUC CA certificate, included only to
@@ -44,9 +64,9 @@ Valve's signed image from Valve's servers after the user accepts Valve's End Use
 Agreement for SteamOS and Steam Client Back-Up Image and the Steam Subscriber Agreement.
 
 Third-party software distributed in the app (FX Steam Launcher.app/Contents/Resources/licenses):
-libkrun, virglrenderer, MoltenVK, libepoxy, gvproxy, desync, zstd, sentry-cocoa, DXMT, LLVM, the Linux
-kernel, busybox, dosfstools, e2fsprogs, btrfs-progs, Mesa and their dependencies, each under its
-own license. Complete corresponding source for the GPL and LGPL components of each release is attached
+libkrun, virglrenderer, MoltenVK, libepoxy, gvproxy, desync, zstd, sentry-cocoa, DXMT, LLVM, wmtr,
+the Linux kernel, busybox, dosfstools, e2fsprogs, btrfs-progs, Mesa and their dependencies, each
+under its own license. Complete corresponding source for the GPL and LGPL components of each release is attached
 to that release on GitHub (FX-Steam-Launcher-<version>-gpl-sources.tar).
 
 Steam, the Steam logo, SteamOS, Steam Deck and Steam Frame are trademarks and/or registered
@@ -68,6 +88,10 @@ fork are listed in docs/fork.md. New files added by this fork:
                            github.com/StonkGuy/dxmt branch steamac; adopted commits keep their authors
                            (David Grinberg, osy, Holly Hamilton, SteveTanSaMa, hanzpo, Mybono,
                            NerRobDog, 时雨, Jakey-Jakey), credits in that branch's STEAMAC-README.md
+  host/vrhost/             steamac-vrhost, the experimental VR host: GPL-3.0-or-later (host/vrhost/COPYING),
+                           because it contains WiVRn code (github.com/WiVRn/WiVRn, GPL-3.0-or-later). It is a
+                           separate executable; steamac-vm does not link it. magic_enum (vendored by WiVRn) is MIT.
+  docs/vr.md, docs/vr-interfaces.md  fork documentation, Apache-2.0
   docs/upstream/           upstream steamac's README text, reorganised into pages
                            (upstream text, Apache-2.0, © 2026 FX GAMES FZ LLC)
 

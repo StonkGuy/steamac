@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Assemble work/out/FX Steam Launcher.app (called by build.sh with the freshly built binary):
 #   Contents/MacOS/steamac-vm           launcher, rpath @executable_path/../Frameworks only
+#   Contents/MacOS/steamac-vrhost       experimental VR host (GPL-3.0-or-later, separate executable,
+#                                       self-contained), only when host/vrhost/build.sh built it
 #   Contents/Frameworks/*.dylib         libkrun, libvirglrenderer, libMoltenVK, libvulkan_kosmickrisp
-#                                       (when built: host/kosmickrisp, macOS 26+), libwmtr_host (when
-#                                       built: wmtr/, the DXMT graphics path) + their non-system
-#                                       dependencies (libepoxy), install names @rpath/<name>
+#                                       (when built: host/kosmickrisp, macOS 26+), libwmtr_host
+#                                       (when built: host/dxmt) + their non-system dependencies
+#                                       (libepoxy), install names @rpath/<name>
 #   Contents/Resources/                 gvproxy, Image, initramfs.cpio.gz, steamac-layer.img,
 #                                       desync + steamdeck-images.pem (Valve RAUC CA) for
 #                                       "Create New Disk…", generated licenses/ notices,
@@ -51,6 +53,15 @@ printf 'APPL????' > "$TMP/Contents/PkgInfo"
 exe="$TMP/Contents/MacOS/steamac-vm"
 cp "$BIN" "$exe"
 chmod u+w "$exe"
+# VR host (VRHost.swift finds it with Bundle.main.path(forAuxiliaryExecutable:)); absent = no VR in this app.
+VRHOST="$OUT/host/bin/steamac-vrhost"
+if [[ -f $VRHOST ]]; then
+    if otool -L "$VRHOST" | awk 'NR > 1 {print $1}' | grep -Ev '^(/usr/lib/|/System/)' >&2; then
+        echo "bundle.sh: steamac-vrhost links non-system libraries (above)" >&2; exit 1
+    fi
+    cp "$VRHOST" "$TMP/Contents/MacOS/steamac-vrhost"
+    chmod 755 "$TMP/Contents/MacOS/steamac-vrhost"
+fi
 
 is_system() { [[ "$1" == /usr/lib/* || "$1" == /System/* ]]; }
 
@@ -89,7 +100,7 @@ copy_lib() {
 # MoltenVK always, KosmicKrisp when it was built (macOS 26+ build hosts).
 libs=(libkrun.1.dylib libvirglrenderer.1.dylib libMoltenVK.dylib)
 [[ -f "$KRUN_PREFIX/lib/libvulkan_kosmickrisp.dylib" ]] && libs+=(libvulkan_kosmickrisp.dylib)
-# libkrun dlopens the wmtr host (Settings > Advanced "Graphics path: DXMT", STEAMAC_WMTR_LIB) when built.
+# libkrun dlopens the wmtr host (Settings > Advanced "Allow DXMT", STEAMAC_WMTR_LIB) when built.
 [[ -f "$KRUN_PREFIX/lib/libwmtr_host.dylib" ]] && libs+=(libwmtr_host.dylib)
 for lib in "${libs[@]}"; do
     copy_lib "$KRUN_PREFIX/lib/$lib"
@@ -184,6 +195,9 @@ python3 "$ROOT/scripts/guest-artifacts.py" check-bundle "$TMP/Contents/Resources
 for f in "$FW"/*.dylib "$TMP/Contents/Resources/gvproxy" "$TMP/Contents/Resources/desync"; do
     codesign --force --sign - --timestamp=none "$f"
 done
+# Keeps its identifier: macOS keys the Local Network permission on it.
+[[ ! -f $TMP/Contents/MacOS/steamac-vrhost ]] ||
+    codesign --force --sign - --timestamp=none --identifier com.steamac.vrhost "$TMP/Contents/MacOS/steamac-vrhost"
 codesign --force --sign - --timestamp=none --entitlements "$HERE/steamac-vm.entitlements" "$TMP"
 codesign --verify --deep --strict "$TMP"
 

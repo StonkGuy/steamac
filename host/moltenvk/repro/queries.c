@@ -361,6 +361,188 @@ int main(int argc, char **argv)
 		for (int i = 0; i < 3; i++)
 			vkDestroyQueryPool(dev, big[i], NULL);
 	}
+
+	/* STEAMAC-2X: vkd3d-proton takes occlusion queries from pools of 4096 (each command allocator holds the ones it
+	 * used until its reset, the device keeps up to 128 free ones) and makes every D3D12 timestamp query heap a
+	 * timestamp pool of the heap's size. KosmicKrisp had 524288 occlusion queries per device (128 such pools; the next
+	 * failed to create) and 131072 timestamp queries per process, shared by every pool of every device; Venus lost the
+	 * refused pool and Path of Exile 2's first vkCmdResetQueryPool on it was a CS error. 300 occlusion pools of 4096
+	 * with 40 timestamp pools of 8192 (327680 queries) created between them; one render pass counts the triangle in
+	 * queries of occlusion pools 0, 127, 128, 200 (its last query), 299 and 0 again (four visibility result buffers,
+	 * back to the first), with timestamps before, inside and after it in timestamp pools 0, 20 and 39. */
+	{
+		enum { NOQ = 300, NTS = 40 };
+		static VkQueryPool oqs[NOQ], tss[NTS];
+		int noq = 0, nts = 0;
+		VkResult orr = VK_SUCCESS, trr = VK_SUCCESS;
+		VkQueryPoolCreateInfo o4096 = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_OCCLUSION,
+			.queryCount = 4096 };
+		VkQueryPoolCreateInfo t8192 = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+			.queryCount = 8192 };
+		for (int i = 0; i < NOQ; i++) {
+			if (orr == VK_SUCCESS && (orr = vkCreateQueryPool(dev, &o4096, NULL, &oqs[i])) == VK_SUCCESS)
+				noq++;
+			else
+				oqs[i] = VK_NULL_HANDLE;
+			if (i % 7 == 0 && i / 7 < NTS) {
+				if (trr == VK_SUCCESS && (trr = vkCreateQueryPool(dev, &t8192, NULL, &tss[i / 7])) == VK_SUCCESS)
+					nts++;
+				else
+					tss[i / 7] = VK_NULL_HANDLE;
+			}
+		}
+		uint64_t got[6] = { 0 }, copied[12], tsv[3][2] = { { 0 } };
+		memset(copied, 0, sizeof(copied));
+		const int ran = orr == VK_SUCCESS && trr == VK_SUCCESS;
+		if (ran) {
+			struct { VkQueryPool pool; uint32_t query; } q[6] = {
+				{ oqs[0], 1 }, { oqs[127], 2 }, { oqs[128], 3 }, { oqs[200], 4095 }, { oqs[299], 0 }, { oqs[0], 2 } };
+			struct { VkQueryPool pool; uint32_t query; } t[3] = { { tss[0], 0 }, { tss[20], 4000 }, { tss[NTS - 1], 8191 } };
+			VkCommandBuffer c;
+			ai.commandBufferCount = 1;
+			CK(vkAllocateCommandBuffers(dev, &ai, &c));
+			CK(vkBeginCommandBuffer(c, &bi));
+			for (int i = 0; i < 6; i++)
+				vkCmdResetQueryPool(c, q[i].pool, q[i].query, 1);
+			for (int i = 0; i < 3; i++)
+				vkCmdResetQueryPool(c, t[i].pool, t[i].query, 1);
+			vkCmdWriteTimestamp2(c, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, t[0].pool, t[0].query);
+			vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+			                     NULL, 0, NULL, 1, &ib);
+			vkCmdBeginRendering(c, &rinfo);
+			vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+			for (int i = 0; i < 6; i++) {
+				vkCmdBeginQuery(c, q[i].pool, q[i].query, VK_QUERY_CONTROL_PRECISE_BIT);
+				vkCmdDraw(c, 3, 1, 0, 0);
+				vkCmdEndQuery(c, q[i].pool, q[i].query);
+				if (i == 2)
+					vkCmdWriteTimestamp2(c, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, t[1].pool, t[1].query);
+			}
+			vkCmdEndRendering(c);
+			vkCmdWriteTimestamp2(c, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, t[2].pool, t[2].query);
+			for (int i = 0; i < 6; i++)
+				vkCmdCopyQueryPoolResults(c, q[i].pool, q[i].query, 1, buf, 16 * i, 16, fb | VK_QUERY_RESULT_WAIT_BIT);
+			vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+			CK(vkEndCommandBuffer(c));
+			si.pCommandBuffers = &c;
+			CK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+			CK(vkQueueWaitIdle(queue));
+			memcpy(copied, map, sizeof(copied));
+			for (int i = 0; i < 6; i++)
+				CK(vkGetQueryPoolResults(dev, q[i].pool, q[i].query, 1, 8, &got[i], 8,
+				                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT));
+			for (int i = 0; i < 3; i++)
+				CK(vkGetQueryPoolResults(dev, t[i].pool, t[i].query, 1, sizeof(tsv[i]), tsv[i], 16,
+				                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
+				                         VK_QUERY_RESULT_WAIT_BIT));
+		}
+		int ok = ran && got[0] > 0;
+		for (int i = 0; i < 6; i++)
+			ok &= got[i] == got[0] && copied[2 * i] == got[0] && copied[2 * i + 1] == 1;
+		printf("%-4s %d occlusion pools of 4096 (%d created, VkResult %d), one render pass over queries of pools 0, 127, "
+		       "128, 200, 299, 0: samples %llu %llu %llu %llu %llu %llu, copies %llu %llu %llu %llu %llu %llu\n",
+		       ok ? "OK" : "FAIL", NOQ, noq, orr, (unsigned long long)got[0], (unsigned long long)got[1],
+		       (unsigned long long)got[2], (unsigned long long)got[3], (unsigned long long)got[4],
+		       (unsigned long long)got[5], (unsigned long long)copied[0], (unsigned long long)copied[2],
+		       (unsigned long long)copied[4], (unsigned long long)copied[6], (unsigned long long)copied[8],
+		       (unsigned long long)copied[10]);
+		fails += !ok;
+		int tok = ran;
+		for (int i = 0; i < 3; i++)
+			tok &= tsv[i][1] == 1 && tsv[i][0] != 0;
+		printf("%-4s %d timestamp pools of 8192 between them (%d created, VkResult %d), written before, inside and after "
+		       "the render pass: available %llu %llu %llu, values %llu %llu %llu\n", tok ? "OK" : "FAIL", NTS, nts, trr,
+		       (unsigned long long)tsv[0][1], (unsigned long long)tsv[1][1], (unsigned long long)tsv[2][1],
+		       (unsigned long long)tsv[0][0], (unsigned long long)tsv[1][0], (unsigned long long)tsv[2][0]);
+		fails += !tok;
+		for (int i = 0; i < NOQ; i++)
+			vkDestroyQueryPool(dev, oqs[i], NULL);
+		for (int i = 0; i < NTS; i++)
+			vkDestroyQueryPool(dev, tss[i], NULL);
+	}
+
+	/* Timestamp counter heap entries belong to the recording command buffer and return to the process at its reset:
+	 * 4096 command buffers write one timestamp each (query k of a pool of 8192, KosmicKrisp takes a chunk of 16 entries
+	 * per command buffer: 65536), submitted together; three rounds with the command pool reset between them (196608
+	 * entries, more than the 131072 Metal gives the process). Every query available and non-zero in every round. */
+	{
+		enum { NCB = 4096, ROUNDS = 3 };
+		VkQueryPool tp2;
+		VkQueryPoolCreateInfo t8192 = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+			.queryCount = 8192 };
+		CK(vkCreateQueryPool(dev, &t8192, NULL, &tp2));
+		VkCommandPoolCreateInfo rcp = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+		VkCommandPool rpool;
+		CK(vkCreateCommandPool(dev, &rcp, NULL, &rpool));
+		VkCommandBufferAllocateInfo rai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = rpool,
+			.commandBufferCount = NCB };
+		static VkCommandBuffer cbs[NCB];
+		CK(vkAllocateCommandBuffers(dev, &rai, cbs));
+		static uint64_t res[NCB][2];
+		int rounds = 0, bad = 0;
+		for (int r = 0; r < ROUNDS && !bad; r++) {
+			CK(vkResetCommandPool(dev, rpool, 0));
+			for (uint32_t k = 0; k < NCB; k++) {
+				CK(vkBeginCommandBuffer(cbs[k], &bi));
+				vkCmdResetQueryPool(cbs[k], tp2, k, 1);
+				vkCmdWriteTimestamp2(cbs[k], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, tp2, k);
+				CK(vkEndCommandBuffer(cbs[k]));
+			}
+			VkSubmitInfo s = { VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = NCB, .pCommandBuffers = cbs };
+			CK(vkQueueSubmit(queue, 1, &s, VK_NULL_HANDLE));
+			CK(vkQueueWaitIdle(queue));
+			memset(res, 0, sizeof(res));
+			CK(vkGetQueryPoolResults(dev, tp2, 0, NCB, sizeof(res), res, 16,
+			                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT |
+			                         VK_QUERY_RESULT_WAIT_BIT));
+			for (uint32_t k = 0; k < NCB; k++)
+				bad += res[k][1] != 1 || res[k][0] == 0;
+			rounds += !bad;
+		}
+		const int ok = rounds == ROUNDS;
+		printf("%-4s %d command buffers writing one timestamp each, %d rounds with the command pool reset between them: "
+		       "%d rounds with every query available and non-zero, %d bad\n", ok ? "OK" : "FAIL", NCB, ROUNDS, rounds, bad);
+		fails += !ok;
+		vkDestroyCommandPool(dev, rpool, NULL);
+		vkDestroyQueryPool(dev, tp2, NULL);
+	}
+
+	/* 16 timestamps written back to back outside a render pass (vkd3d-proton's EndQuery(TIMESTAMP) with the resets
+	 * hoisted): KosmicKrisp sampled them with Metal's relaxed granularity, which sampled only the first 4 of a compute
+	 * encoder; the others resolved whatever their counter heap entry held (0 or a stale sample). Every one available,
+	 * non-zero and not decreasing. */
+	{
+		enum { NT = 16 };
+		VkQueryPool tp3;
+		VkQueryPoolCreateInfo t16 = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+			.queryCount = NT };
+		CK(vkCreateQueryPool(dev, &t16, NULL, &tp3));
+		VkCommandBuffer c[2];
+		ai.commandBufferCount = 2;
+		CK(vkAllocateCommandBuffers(dev, &ai, c));
+		CK(vkBeginCommandBuffer(c[0], &bi));
+		vkCmdResetQueryPool(c[0], tp3, 0, NT);
+		CK(vkEndCommandBuffer(c[0]));
+		CK(vkBeginCommandBuffer(c[1], &bi));
+		for (uint32_t k = 0; k < NT; k++)
+			vkCmdWriteTimestamp2(c[1], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, tp3, k);
+		CK(vkEndCommandBuffer(c[1]));
+		VkSubmitInfo s = { VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 2, .pCommandBuffers = c };
+		CK(vkQueueSubmit(queue, 1, &s, VK_NULL_HANDLE));
+		CK(vkQueueWaitIdle(queue));
+		uint64_t res[NT][2];
+		memset(res, 0, sizeof(res));
+		CK(vkGetQueryPoolResults(dev, tp3, 0, NT, sizeof(res), res, 16,
+		                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT | VK_QUERY_RESULT_WAIT_BIT));
+		int good = 0;
+		for (uint32_t k = 0; k < NT; k++)
+			good += res[k][1] == 1 && res[k][0] != 0 && (k == 0 || res[k][0] >= res[k - 1][0]);
+		printf("%-4s %d timestamps written back to back in one command buffer: %d available, non-zero and not decreasing "
+		       "(first %llu, last %llu)\n", good == NT ? "OK" : "FAIL", NT, good, (unsigned long long)res[0][0],
+		       (unsigned long long)res[NT - 1][0]);
+		fails += good != NT;
+		vkDestroyQueryPool(dev, tp3, NULL);
+	}
 	if (fails) { printf("queries: %d failure(s)\n", fails); return 1; }
 	return 0;
 }

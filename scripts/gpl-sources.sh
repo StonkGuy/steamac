@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Package corresponding source for a release: the GPL kernel and static initramfs tools, and the LGPL
-# DXMT source (pinned tarball, host/dxmt/patches, wmtr/) behind libwmtr_host.dylib.
+# Package corresponding GPL/LGPL source for the kernel, static initramfs tools and
+# DXMT graphics path (host executor and the guest layer's PE DLLs and winemetal.so), and the GPL-3.0
+# steamac-vrhost (host/vrhost + its pinned OpenSSL tarball) when the app bundles it.
 # Usage: scripts/gpl-sources.sh [GIT_REF] (HEAD uses the current working tree).
 # The tagged files are read with git archive, never checked out over the working tree.
 set -euo pipefail
@@ -23,8 +24,14 @@ if [[ $REF == HEAD ]]; then
     done
     cp -R "$ROOT/guest/kernel" "$ST/repo/guest/"
     if [[ -f $ROOT/host/dxmt/pin.env ]]; then
-        # Tracked files only: build output under wmtr/ stays out.
-        git -C "$ROOT" ls-files -z -- host/dxmt wmtr | tar -C "$ROOT" --null -T - -cf - | tar -xf - -C "$ST/repo"
+        # Include new source files in local builds, but not ignored wmtr/build output.
+        git -C "$ROOT" ls-files -z --cached --others --exclude-standard -- \
+            host/dxmt wmtr host/vrhost/include/vrlink.h guest/vr/include/steamac_vr_guest.h \
+            scripts/steps/30-layer.sh \
+            LICENSE NOTICE LICENSES | tar -C "$ROOT" --null -T - -cf - | tar -xf - -C "$ST/repo"
+    fi
+    if [[ -f $ROOT/work/out/host/bin/steamac-vrhost ]]; then
+        git -C "$ROOT" ls-files -z -- host/vrhost | tar -C "$ROOT" --null -T - -cf - | tar -xf - -C "$ST/repo"
     fi
 else
     git -C "$ROOT" rev-parse --verify "$REF^{commit}" >/dev/null
@@ -34,7 +41,14 @@ else
     cp "$ST/repo/host/launcher/Info.plist" "$ST/Info.plist"
     rm -rf "$ST/repo/host"
     if git -C "$ROOT" cat-file -e "$REF:host/dxmt/pin.env" 2>/dev/null; then
-        git -C "$ROOT" archive "$REF" host/dxmt wmtr | tar -xf - -C "$ST/repo"
+        git -C "$ROOT" archive "$REF" host/dxmt wmtr \
+            host/vrhost/include/vrlink.h guest/vr/include/steamac_vr_guest.h \
+            scripts/steps/30-layer.sh \
+            LICENSE NOTICE LICENSES | tar -xf - -C "$ST/repo"
+    fi
+    # The VR host ships only in apps built with host/vrhost/build.sh; include its source whenever the tag has it.
+    if git -C "$ROOT" cat-file -e "$REF:host/vrhost/CMakeLists.txt" 2>/dev/null; then
+        git -C "$ROOT" archive "$REF" host/vrhost | tar -xf - -C "$ST/repo"
     fi
 fi
 version=$(plutil -extract CFBundleShortVersionString raw -o - "$ST/Info.plist")
@@ -75,7 +89,8 @@ copy_source "$ROOT/work/cache/e2fsprogs/$E2FSPROGS_VERSION/e2fsprogs-$E2FSPROGS_
 copy_source "$ROOT/work/cache/btrfs-progs/$BTRFSPROGS_VERSION/btrfs-progs-v$BTRFSPROGS_VERSION.tar.xz" \
     "$BTRFSPROGS_URL" "$BTRFSPROGS_SHA256" "btrfs-progs-v$BTRFSPROGS_VERSION.tar.xz"
 
-# DXMT (LGPL-2.1-or-later), present from the release that ships the DXMT graphics path.
+# Include DXMT even in a layer-only build: the Windows DLLs and unixlib ship there
+# independently of whether this machine has built libwmtr_host.dylib.
 dxmt_notes=
 if [[ -f $ST/repo/host/dxmt/pin.env ]]; then
     . "$ST/repo/host/dxmt/pin.env"
@@ -83,20 +98,66 @@ if [[ -f $ST/repo/host/dxmt/pin.env ]]; then
         echo 'invalid host/dxmt/pin.env' >&2; exit 1;
     }
     copy_source "$ROOT/work/cache/dxmt/dxmt-$DXMT_COMMIT.tar.gz" "$DXMT_URL" "$DXMT_SHA256" "dxmt-$DXMT_COMMIT.tar.gz"
+    # The pinned DirectX headers are a source dependency of the shipped PE DLLs.
+    headers_record=$(awk -F= '/^DXHEADERS_(COMMIT|SHA256)=/ { print $1, $2 }' "$ST/repo/host/dxmt/build.sh")
+    headers_commit=$(printf '%s\n' "$headers_record" | awk '$1 == "DXHEADERS_COMMIT" { print $2 }')
+    headers_sha=$(printf '%s\n' "$headers_record" | awk '$1 == "DXHEADERS_SHA256" { print $2 }')
+    [[ $headers_commit =~ ^[[:xdigit:]]{40}$ && $headers_sha =~ ^[[:xdigit:]]{64}$ ]] || {
+        echo 'missing pinned DXMT DirectX headers' >&2; exit 1;
+    }
+    copy_source "$ROOT/work/cache/dxmt/mingw-directx-headers-$headers_commit.tar.gz" \
+        "https://github.com/misyltoad/mingw-directx-headers/archive/$headers_commit.tar.gz" \
+        "$headers_sha" "mingw-directx-headers-$headers_commit.tar.gz"
     dxmt_notes="
-libwmtr_host.dylib (the DXMT graphics path, loaded by libkrun at run time and
-replaceable by a rebuilt library of the same name): DXMT, LGPL-2.1-or-later,
+DXMT graphics path (LGPL-2.1-or-later): libwmtr_host.dylib and the guest layer's
+/usr/lib/steamac/dxmt/x86_64-windows/{d3d11,dxgi,d3d10core,winemetal}.dll and
+x86_64-unix/winemetal.so. Complete DXMT source:
 sources/dxmt-$DXMT_COMMIT.tar.gz ($DXMT_REPO at that commit, SHA-256
 $DXMT_SHA256). Apply repo/host/dxmt/patches/*.patch in filename order with
-git apply (patch -p1 also works). repo/wmtr/ links DXMT's
-src/winemetal/unix/winemetal_unix.c and its src/airconv (with DXBCParser)
-into the library: build per the header of repo/wmtr/Makefile (make host).
-DXMT's own git submodules (NVIDIA nvapi and misyltoad's mingw-directx-headers,
-revisions recorded in the DXMT commit) are used only for the Windows-side DLLs
-and are not part of the library. The shader compiler links LLVM $LLVM_VERSION
-statically (Apache-2.0 with LLVM exception; its licence text is in the app's
-licenses folder), built from the llvmorg-$LLVM_VERSION tag of
-github.com/llvm/llvm-project."
+git apply. Extract sources/mingw-directx-headers-$headers_commit.tar.gz into
+DXMT's include/native/directx with --strip-components=1.
+
+repo/wmtr/ contains the BSD-3-Clause remoting implementation. Its host executor
+links DXMT's src/winemetal/unix/winemetal_unix.c and src/airconv (with DXBCParser);
+its guest winemetal.so uses DXMT's LGPL headers. The VR interface headers used by
+the executor are in repo/host/vrhost/include/ and repo/guest/vr/include/.
+Build with repo/host/dxmt/build.sh: fetch llvm native host pe client payload.
+The fetch step performs the extraction and patching described above; pe builds
+the four Windows DLLs, client builds winemetal.so in Docker, and payload stages
+both in work/out/dxmt for scripts/steps/30-layer.sh. The script pins the Wine
+and llvm-mingw build tools and every downloaded source with SHA-256.
+
+libkrun loads libwmtr_host.dylib at run time; a rebuilt library of the same
+name can replace it. To replace the guest DLLs/unixlib, rebuild the payload,
+then rebuild the layer with scripts/build-image.sh layer. These layer build
+scripts and the rest of steamac are available at https://github.com/StonkGuy/steamac
+at $REF. The shader compiler statically links LLVM $LLVM_VERSION (Apache-2.0
+WITH LLVM-exception), built from github.com/llvm/llvm-project's
+llvmorg-$LLVM_VERSION release; its license is in repo/LICENSES/ and the app's
+licenses folder."
+fi
+
+# steamac-vrhost (GPL-3.0-or-later: contains WiVRn code), present when the app bundles the VR host.
+vrhost_notes=
+if [[ -f $ST/repo/host/vrhost/CMakeLists.txt ]]; then
+    ossl_version=$(sed -n 's/^[[:space:]]*set(VRHOST_OPENSSL_VERSION \(.*\))$/\1/p' "$ST/repo/host/vrhost/CMakeLists.txt")
+    ossl_sha=$(sed -n 's/^[[:space:]]*set(VRHOST_OPENSSL_SHA256 \(.*\))$/\1/p' "$ST/repo/host/vrhost/CMakeLists.txt")
+    [[ $ossl_version =~ ^[0-9]+(\.[0-9]+)*$ && $ossl_sha =~ ^[[:xdigit:]]{64}$ ]] || {
+        echo 'missing OpenSSL pin in host/vrhost/CMakeLists.txt' >&2; exit 1;
+    }
+    copy_source "$ROOT/work/build/host-vrhost/openssl_static-prefix/src/openssl-$ossl_version.tar.gz" \
+        "https://github.com/openssl/openssl/releases/download/openssl-$ossl_version/openssl-$ossl_version.tar.gz" \
+        "$ossl_sha" "openssl-$ossl_version.tar.gz"
+    vrhost_notes="
+Contents/MacOS/steamac-vrhost (experimental VR host, a separate executable):
+GPL-3.0-or-later, repo/host/vrhost/ (licence: repo/host/vrhost/COPYING). It
+contains WiVRn v26.9 code, vendored unmodified in
+repo/host/vrhost/third_party/wivrn/ (see UPSTREAM.md there). Build with
+repo/host/vrhost/build.sh (CMake + Ninja). It links libcrypto from OpenSSL
+$ossl_version (Apache-2.0) statically: sources/openssl-$ossl_version.tar.gz
+(SHA-256 $ossl_sha), configured as in repo/host/vrhost/CMakeLists.txt.
+Header-only build inputs fetched by CMake at pinned tags: OpenXR-SDK
+release-1.1.58 and Boost.PFR boost-1.89.0."
 fi
 
 # Resolve busybox-static's *source* version from the same snapshot/architecture
@@ -153,7 +214,7 @@ done <<< "$source_checksums"
 [[ $count -ge 2 ]] || { echo "incomplete source in $dsc_name" >&2; exit 1; }
 
 cat > "$ST/README.txt" <<EOF
-FX Steam Launcher $version — corresponding GPL source ($REF)
+FX Steam Launcher $version — corresponding GPL/LGPL source ($REF)
 
 The DMG contains the following binaries. The tarballs in sources/ are the
 complete upstream sources; repo/ contains this release's exact configuration,
@@ -186,6 +247,7 @@ repo/guest/initramfs/init. Its static binaries are:
     statically in step 20. See that script for all configure/make flags.
 
 $dxmt_notes
+$vrhost_notes
 Debian snapshot archive: $snapshot
 EOF
 

@@ -35,7 +35,7 @@ final class SettingsContext: ObservableObject {
 /// App menu "FX Steam Launcher → Settings…" (Cmd+,): toolbar-style tabs, one SwiftUI form each.
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     enum Tab: Int, CaseIterable {
-        case general, display, mouse, controller, sound, advanced
+        case general, display, mouse, controller, sound, games, vr, advanced
 
         var name: String {
             switch self {
@@ -44,6 +44,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return "mouse"
             case .controller: return "controller"
             case .sound: return "sound"
+            case .games: return "games"
+            case .vr: return "vr"
             case .advanced: return "advanced"
             }
         }
@@ -55,6 +57,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return String(localized: "Mouse")
             case .controller: return String(localized: "Controller")
             case .sound: return String(localized: "Sound")
+            case .games: return String(localized: "Games", comment: "Settings tab: game statistics")
+            case .vr: return String(localized: "VR")
             case .advanced: return String(localized: "Advanced")
             }
         }
@@ -66,6 +70,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return "computermouse"
             case .controller: return "gamecontroller"
             case .sound: return "speaker.wave.2"
+            case .games: return "chart.bar.xaxis"
+            case .vr: return "visionpro"
             case .advanced: return "slider.horizontal.3"
             }
         }
@@ -78,6 +84,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return 470
             case .controller: return 620
             case .sound: return 440
+            case .games: return 620
+            case .vr: return 800
             case .advanced: return 720
             }
         }
@@ -179,6 +187,8 @@ private struct SettingsTabRoot: View {
                 case .mouse: MouseTab()
                 case .controller: ControllerTab()
                 case .sound: SoundTab()
+                case .games: GamesTab()
+                case .vr: VRTab()
                 case .advanced: AdvancedTab()
                 }
             }
@@ -190,7 +200,7 @@ private struct SettingsTabRoot: View {
 }
 
 /// "applies now" / "applies on next start" + the command-line override note.
-private struct Applies: View {
+struct Applies: View {
     let now: Bool
     var key: LauncherSettings.Key? = nil
     @EnvironmentObject var settings: LauncherSettings
@@ -210,18 +220,35 @@ private struct Applies: View {
 }
 
 /// A labelled row: title, optional explanation, the "applies" tag.
-private struct Label2: View {
+struct Label2: View {
     let title: LocalizedStringResource
     var detail: String? = nil
     let now: Bool
     var key: LauncherSettings.Key? = nil
+    /// Unfinished feature: an "Experimental" badge next to the title.
+    var experimental = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title)
+            HStack(spacing: 6) {
+                Text(title)
+                if experimental { ExperimentalBadge() }
+            }
             if let detail { Text(verbatim: detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             Applies(now: now, key: key)
         }
+    }
+}
+
+/// Marks a setting whose feature is not finished (may not work, may stop the VM).
+private struct ExperimentalBadge: View {
+    var body: some View {
+        Text("Experimental", comment: "Badge next to a setting whose feature is not finished")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .overlay(Capsule().strokeBorder(Color.orange.opacity(0.7)))
     }
 }
 
@@ -564,14 +591,16 @@ private struct MouseTab: View {
 
 // MARK: - Controller
 
-/// Connected GameController gamepads, updated on connect/disconnect.
+/// Connected GameController gamepads, updated on connect/disconnect, and the player each one is
+/// (GamepadBridge.players).
 final class ControllerMonitor: ObservableObject {
     @Published private(set) var controllers: [GCController] = []
+    @Published private(set) var players: [ObjectIdentifier: Int] = [:]
     private var observers: [NSObjectProtocol] = []
 
     init() {
         let nc = NotificationCenter.default
-        for name in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect] {
+        for name in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect, .gamepadPlayersChanged] {
             observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.reload() })
         }
         GCController.shouldMonitorBackgroundEvents = true
@@ -579,17 +608,16 @@ final class ControllerMonitor: ObservableObject {
         reload()
     }
 
-    private func reload() { controllers = GamepadBridge.connected }
+    private func reload() {
+        controllers = GamepadBridge.connected
+        players = GamepadBridge.players
+    }
 }
 
 private struct ControllerTab: View {
     @EnvironmentObject var settings: LauncherSettings
     @EnvironmentObject var context: SettingsContext
     @StateObject private var monitor = ControllerMonitor()
-
-    private var feeding: GCController? {
-        monitor.controllers.first { GamepadBridge.identifier(of: $0) == settings.controllerID } ?? monitor.controllers.first
-    }
 
     var body: some View {
         Form {
@@ -629,6 +657,12 @@ private struct ControllerTab: View {
                 } label: {
                     Label2(title: "Controller that drives it", now: true)
                 }
+                Toggle(isOn: $settings.additionalPads) {
+                    Label2(title: "Additional controllers",
+                           detail: String(localized: "Further connected controllers are players 2 to 4 in SteamOS, each with a gamepad of its own, for local co-op. A player keeps their controller until it disconnects. Off: only one controller is used."),
+                           now: true)
+                }
+                .disabled(!settings.virtualPad)
                 Toggle(isOn: $settings.swapABXY) {
                     Label2(title: "Swap A/B and X/Y", detail: String(localized: "For Nintendo-style button layouts."), now: true)
                 }
@@ -651,8 +685,8 @@ private struct ControllerTab: View {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text(verbatim: GamepadBridge.displayName(of: c)).font(.headline)
-                            if c === feeding && context.vmHasPad {
-                                Text("drives the virtual pad").font(.caption)
+                            if context.vmHasPad, let player = monitor.players[ObjectIdentifier(c)] {
+                                Text("Player \(player)").font(.caption)
                                     .padding(.horizontal, 6).padding(.vertical, 1)
                                     .background(Capsule().fill(Color.accentColor.opacity(0.2)))
                             }
@@ -889,12 +923,22 @@ private struct AdvancedTab: View {
 
     private var diskStatus: (String, Bool) {
         if !settings.diskImage.isEmpty {
-            let ok = FileManager.default.isReadableFile(atPath: settings.diskImage)
+            let ok = AppBundle.isDiskImage(settings.diskImage)
             let path = (settings.diskImage as NSString).abbreviatingWithTildeInPath
             return (ok ? path : String(localized: "\(path) (not found)"), ok)
         }
         if let d = AppBundle.defaultDisk() { return (String(localized: "Default: \((d as NSString).abbreviatingWithTildeInPath)"), true) }
         return (String(localized: "Default: none found"), false)
+    }
+
+    /// The executor library the next start offers (bundled unless chosen) and whether it loads.
+    private var wmtrStatus: (String, Bool) {
+        let path = LauncherSettings.Wmtr.path(for: settings.wmtrLibrary)
+        let shown = settings.wmtrLibrary.isEmpty
+            ? String(localized: "Bundled: \(LauncherSettings.Wmtr.bundledLibrary)")
+            : (settings.wmtrLibrary as NSString).abbreviatingWithTildeInPath
+        guard let reason = LauncherSettings.Wmtr.localizedUnavailableReason(path) else { return (shown, true) }
+        return (String(localized: "\(shown): \(reason); SteamOS gets no wmtr channel."), false)
     }
 
     var body: some View {
@@ -1045,24 +1089,36 @@ private struct AdvancedTab: View {
                                    " " + String(localized: "Not available here: \($0); MoltenVK is used.") } ?? ""),
                            now: false, key: .vulkanDriver)
                 }
-                Picker(selection: $settings.graphicsPath) {
-                    ForEach(LauncherSettings.GraphicsPath.allCases) { g in
-                        Text(verbatim: g.title).tag(g)
-                            .disabled(g.unavailableReason != nil && g != settings.graphicsPath)
-                    }
-                } label: {
-                    Label2(title: "Graphics path",
-                           detail: settings.graphicsPath.detail + " " + LauncherSettings.GraphicsPath.switchNote
-                               + (settings.graphicsPath.localizedUnavailableReason.map {
-                                   " " + String(localized: "Not available here: \($0); Vulkan is used.") } ?? ""),
-                           now: false, key: .graphicsPath)
-                }
                 Toggle(isOn: $settings.frameLatency) {
                     Label2(title: "Frame latency",
                            detail: String(localized: "Vulkan path only: let the CPU run at most one frame ahead of the GPU (DXVK's dxgi.maxFrameLatency = 1) for lower input latency at some cost in throughput. Writes into the guest's DXVK config before Steam starts. Off leaves it unchanged."),
                            now: false, key: .frameLatency)
                 }
-                .disabled(settings.graphicsPath == .dxmt)
+            }
+            Section {
+                Toggle(isOn: $settings.wmtr) {
+                    Label2(title: "Allow DXMT (D3D11 on the Mac's Metal)",
+                           detail: GameProfile.securityText,
+                           now: false, key: .wmtr, experimental: true)
+                }
+                if settings.wmtr {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label2(title: "Executor library",
+                               detail: String(localized: "The bundled libwmtr_host.dylib runs DXMT's Metal calls on the Mac. Choose another executor library only if you trust it."),
+                               now: false, key: .wmtrLibrary)
+                        HStack {
+                            Text(verbatim: wmtrStatus.0)
+                                .font(.callout).foregroundStyle(wmtrStatus.1 ? Color.secondary : Color.red)
+                                .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                            Spacer()
+                        }
+                        HStack {
+                            Spacer()
+                            Button("Choose Library…") { chooseWmtrLibrary() }
+                            Button("Use Bundled") { settings.wmtrLibrary = "" }.disabled(settings.wmtrLibrary.isEmpty)
+                        }
+                    }
+                }
             }
             Section {
                 HStack {
@@ -1123,14 +1179,23 @@ private struct AdvancedTab: View {
 
     private func chooseDisk() {
         let panel = NSOpenPanel()
-        panel.title = String(localized: "Choose a SteamOS disk image")
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
+        AppBundle.configureDiskPanel(panel)
         if !settings.diskImage.isEmpty {
             panel.directoryURL = URL(fileURLWithPath: (settings.diskImage as NSString).deletingLastPathComponent)
         }
         if panel.runModal() == .OK, let url = panel.url { settings.diskImage = url.path }
+    }
+
+    private func chooseWmtrLibrary() {
+        let panel = NSOpenPanel()
+        panel.title = String(localized: "Choose a wmtr executor library")
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if !settings.wmtrLibrary.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: (settings.wmtrLibrary as NSString).deletingLastPathComponent)
+        }
+        if panel.runModal() == .OK, let url = panel.url { settings.wmtrLibrary = url.path }
     }
 }
 

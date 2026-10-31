@@ -1,0 +1,14 @@
+name = "steamac-game-stats"
+main = "src/index.js"
+compatibility_date = "2026-08-22"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "steamac-game-stats"
+database_id = "e2867797-50ee-46db-b9ba-d839bc66ba43"
+migrations_dir = "migrations"
+
+[[ratelimits]]
+name = "POST_LIMITER"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }

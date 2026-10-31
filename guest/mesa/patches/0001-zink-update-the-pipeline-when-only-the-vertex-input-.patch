@@ -1,0 +1,48 @@
+From 6abefa5177eddd4ae28e7b9bbe7abea4bd8dd089 Mon Sep 17 00:00:00 2001
+From: Leon Seemann <leon@seemann.nrw>
+Date: Mon, 12 Oct 2026 18:18:30 +0000
+Subject: [PATCH] zink: update the pipeline when only the vertex input state
+ changes
+
+Without VK_EXT_vertex_input_dynamic_state the vertex input state is baked
+into the pipeline. Binding new vertex elements only sets
+ctx->vertex_state_changed, which zink_get_gfx_pipeline() uses to rehash
+the vertex state, but zink_draw() does not check it before calling
+update_gfx_pipeline() and clears it after the draw. A draw that only
+changes the vertex layout (same program, otherwise unchanged state) then
+keeps using the previous pipeline with the wrong attribute formats and
+offsets.
+
+Seen on KosmicKrisp, which lacks vertex input dynamic state: two draws
+with the same program but different vertex layouts (display list replay
+vs. a regular VAO) break each other, whichever comes first in a batch
+wins. Also reproducible on lavapipe with the extension disabled.
+
+Cc: mesa-stable
+Closes: https://gitlab.freedesktop.org/mesa/mesa/-/issues/16562
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/45132>
+---
+ src/gallium/drivers/zink/zink_draw.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/zink/zink_draw.cpp b/src/gallium/drivers/zink/zink_draw.cpp
+index 52d5c96d48ee..d3539e0c1f29 100644
+--- a/src/gallium/drivers/zink/zink_draw.cpp
++++ b/src/gallium/drivers/zink/zink_draw.cpp
+@@ -749,8 +749,12 @@ zink_draw(struct pipe_context *pctx,
+    if (have_streamout && ctx->dirty_so_targets)
+       zink_emit_stream_output_targets(pctx);
+ 
++   /* without dynamic vertex input, the vertex input state is part of the pipeline */
++   const bool vertex_input_changed = DYNAMIC_STATE != ZINK_DYNAMIC_VERTEX_INPUT &&
++                                     DYNAMIC_STATE != ZINK_DYNAMIC_VERTEX_INPUT2 &&
++                                     ctx->vertex_state_changed;
+    bool pipeline_changed = false;
+-   if (ctx->gfx_pipeline_state.dirty || rp_state != ctx->gfx_pipeline_state.rp_state || ctx->gfx_dirty || ctx->dirty_gfx_stages || prim_changed || BATCH_CHANGED) {
++   if (ctx->gfx_pipeline_state.dirty || rp_state != ctx->gfx_pipeline_state.rp_state || ctx->gfx_dirty || ctx->dirty_gfx_stages || prim_changed || vertex_input_changed || BATCH_CHANGED) {
+       if (!update_gfx_pipeline<DYNAMIC_STATE, BATCH_CHANGED>(ctx, bs, mode, &pipeline_changed))
+          return;
+    }
+-- 
+GitLab
+

@@ -1,9 +1,9 @@
 import Foundation
 
-/// --selftest-graphics-path: the graphics path this launch resolved (saved setting, or --graphics-path)
-/// reaches the VM's kernel command line and the environment libkrun reads, and the other path's
-/// environment is cleared. Run through `open` with only `defaults write ... graphicsPath` changed, this
-/// shows that a plain double-click start enables the chosen path.
+/// --selftest-graphics-path: the graphics path this launch resolved (Settings > Advanced "Allow DXMT", or
+/// --wmtr-lib / --no-wmtr / --graphics-path) reaches the VM's kernel command line and the environment libkrun
+/// reads, and the other path's environment is cleared. Run through `open` with only `defaults write ... wmtr`
+/// changed, this shows that a plain double-click start enables the chosen path.
 enum GraphicsPathSelfTest {
     static func run(_ resolved: Options) -> Never {
         var failures = 0
@@ -13,16 +13,18 @@ enum GraphicsPathSelfTest {
               "kernel command line lacks steamac.gfx=\(resolved.graphicsPath.rawValue)")
         for path in [resolved.graphicsPath] + LauncherSettings.GraphicsPath.allCases.filter({ $0 != resolved.graphicsPath }) {
             var o = resolved
-            o.graphicsPath = path
+            o.wmtrLibrary = path == .dxmt ? (resolved.wmtrLibrary ?? LauncherSettings.Wmtr.path(for: "")) : nil
             // left over from a shell or an earlier start: must not survive the Vulkan path
             setenv("STEAMAC_WMTR", "1", 1); setenv("STEAMAC_WMTR_LIB", "/nonexistent", 1)
             VM.applyGraphicsEnv(o)
             let wmtr = ProcessInfo.processInfo.environment["STEAMAC_WMTR"]
             let lib = ProcessInfo.processInfo.environment["STEAMAC_WMTR_LIB"]
-            if path == .dxmt && path.unavailableReason == nil {
+            if path == .dxmt, let want = o.wmtrLibrary, let reason = LauncherSettings.Wmtr.unavailableReason(want) {
+                // Options.resolve drops an executor that does not load, so a start never gets here with it
+                log("selftest-graphics-path: DXMT executor not checked here (\(reason))")
+            } else if path == .dxmt, let want = o.wmtrLibrary {
                 check(wmtr == "1", "DXMT: STEAMAC_WMTR not set")
-                check(lib.map { $0.hasSuffix("/" + LauncherSettings.GraphicsPath.hostLibrary) } ?? false,
-                      "DXMT: STEAMAC_WMTR_LIB is \(lib ?? "unset")")
+                check(lib == want, "DXMT: STEAMAC_WMTR_LIB is \(lib ?? "unset"), not \(want)")
                 if let lib, let h = dlopen(lib, RTLD_LAZY | RTLD_LOCAL) {
                     check(dlsym(h, "wmtr_host_create") != nil, "DXMT: \(lib) has no wmtr_host_create")
                     dlclose(h)

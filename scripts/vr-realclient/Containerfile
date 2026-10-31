@@ -1,0 +1,22 @@
+# Build/run environment for the WiVRn Linux client on Monado (simulated HMD).
+FROM registry.fedoraproject.org/fedora:44
+RUN dnf -y install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm && \
+    dnf -y install --allowerasing --skip-unavailable \
+      git cmake ninja-build gcc gcc-c++ pkgconf-pkg-config python3 glslang glslc gettext \
+      spirv-tools vulkan-headers vulkan-loader-devel vulkan-tools mesa-vulkan-drivers mesa-dri-drivers \
+      openxr-devel openxr monado monado-devel \
+      ffmpeg ffmpeg-devel \
+      glm-devel freetype-devel harfbuzz-devel fontconfig-devel spdlog-devel fmt-devel simdjson-devel \
+      openssl-devel boost-devel cli11-devel json-devel librsvg2-devel libuuid-devel eigen3-devel \
+      systemd-devel avahi-devel libX11-devel libxcb-devel libXrandr-devel wayland-devel libxkbcommon-devel \
+      SDL2-devel hidapi-devel libusb1-devel libdrm-devel libva-devel pipewire-devel pulseaudio-libs-devel \
+      libcap-devel libpng-devel cjson-devel libbsd-devel \
+      nmap-ncat iproute procps-ng xorg-x11-server-Xvfb weston strace gdb less which patch dejavu-sans-fonts && \
+    dnf clean all
+RUN dnf -y install --skip-unavailable iproute-tc nftables librsvg2-tools libcurl-devel libarchive-devel libnotify-devel glib2-devel ktx-devel && dnf clean all
+# The client build needs the `ktx` tool (KTX-Software). Fedora does not package it and v4.4.2 does not compile with
+# GCC 16 (bundled fmt), so use the upstream release tarball.
+RUN dnf -y install bzip2 && dnf clean all && \
+    curl -sSL -o /tmp/ktx.tar.bz2 https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.2/KTX-Software-4.4.2-Linux-x86_64.tar.bz2 && \
+    tar -xjf /tmp/ktx.tar.bz2 -C /usr/local --strip-components=1 && rm /tmp/ktx.tar.bz2 && \
+    echo /usr/local/lib > /etc/ld.so.conf.d/local.conf && ldconfig

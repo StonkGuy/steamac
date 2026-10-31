@@ -6,8 +6,8 @@ apk add --no-cache -q binutils coreutils grep >/dev/null
 m=/out/MANIFEST.txt
 {
 cat <<EOF
-steamac guest Venus (virtio-gpu) Vulkan ICD tree
-================================================
+steamac guest Mesa tree: Venus (virtio-gpu) Vulkan ICD + patched zink GL stack
+==============================================================================
 Overlay: copy usr/ onto guest "/" (paths below are final in-guest paths). MANIFEST.txt is not part of the overlay.
 Built by guest/mesa/build.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -15,17 +15,21 @@ Mesa:            $MESA_URL @ $MESA_COMMIT (26.3.0-devel, contains 4cf0989083d "v
 venus-protocol:  v1.1.3 @ $VENUS_PROTOCOL_COMMIT
 aarch64 build:   $AARCH64_IMAGE (holo-deckard base-devel = Steam Frame userspace)
 x86 builds:      $X86_IMAGE re-pointed at $STEAMOS_X86_MIRROR/{core,extra,multilib}-$STEAMOS_X86_BRANCH
-Meson:           -Dvulkan-drivers=virtio -Dgallium-drivers= -Dplatforms=x11,wayland -Dllvm=disabled -Dvideo-codecs= --buildtype=release (full list: guest/mesa/container/common.sh)
+Meson (Venus):   -Dvulkan-drivers=virtio -Dgallium-drivers= -Dplatforms=x11,wayland -Dllvm=disabled -Dvideo-codecs= --buildtype=release
+Meson (GL):      -Dgallium-drivers=zink -Dvulkan-drivers= -Dglx=dri -Degl=enabled -Dgbm=enabled -Dglvnd=enabled -Dllvm=disabled (full lists: guest/mesa/container/common.sh)
+GL patches:      $(cd /patches && ls *.patch | tr '\n' ' ')(guest/mesa/patches, on top of the commit above)
 
 Files (path | ELF machine/class | size | sha256):
 EOF
 cd /out
 find usr -type f | sort | while read -r f; do
     case $f in
-        *.so) arch=$(readelf -h "$f" | sed -n 's/^ *Machine: *//p')
+        *.so|*.so.*) arch=$(readelf -h "$f" | sed -n 's/^ *Machine: *//p')
               cls=$(readelf -h "$f" | sed -n 's/^ *Class: *//p')
               desc="$arch/$cls" ;;
-        *) desc="ICD manifest -> $(sed -n 's/.*"library_path": *"\([^"]*\)".*/\1/p' "$f"), library_arch $(sed -n 's/.*"library_arch": *"\([^"]*\)".*/\1/p' "$f")" ;;
+        */vulkan/icd.d/*) desc="ICD manifest -> $(sed -n 's/.*"library_path": *"\([^"]*\)".*/\1/p' "$f"), library_arch $(sed -n 's/.*"library_arch": *"\([^"]*\)".*/\1/p' "$f")" ;;
+        */glvnd/egl_vendor.d/*) desc="glvnd EGL vendor -> $(sed -n 's/.*"library_path": *"\([^"]*\)".*/\1/p' "$f")" ;;
+        *) desc="data" ;;
     esac
     printf '/%s | %s | %s | %s\n' "$f" "$desc" "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
 done
@@ -40,16 +44,22 @@ DXVK/vkd3d in Windows games reach the native aarch64 loader -> /usr/lib/libvulka
 binaries run under the FEX compat tool (Steam app 3127680) + Steam Linux Runtime with STEAM_COMPAT_GRAPHICS_PROVIDER
 = the fex-mesa provider, whose stock Vulkan driver is an emulated x86 Turnip -> they need the x86_64/i386 builds.
 
+GL stack: the image's (and provider's) stock zink lacks the fixes in guest/mesa/patches, so the same
+frontends and libgallium are built from the pinned Mesa with them and replace the stock files of the same
+names (libGLX_mesa, libEGL_mesa, libgbm, libgallium-*.so, gbm/dri_gbm.so, dri/*_dri.so, glvnd 50_mesa.json,
+drirc 00-mesa/00-zink defaults) in /usr/lib and in the provider's usr/lib + usr/lib32. Frontends and libgallium
+must come from one build (private interface); the stock Turnip, its drirc and the freedreno tools stay.
+
 NEEDED:
 EOF
-find usr -name '*.so' | sort | while read -r f; do
+find usr -type f \( -name '*.so' -o -name '*.so.*' \) | sort | while read -r f; do
     printf '/%s: %s\n' "$f" "$(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
 done
 cat <<EOF
 
 Highest required symbol versions:
 EOF
-find usr -name '*.so' | sort | while read -r f; do
+find usr -type f \( -name '*.so' -o -name '*.so.*' \) | sort | while read -r f; do
     vers=$(readelf -V -W "$f" | grep -oE 'Name: (GLIBC|GLIBCXX|CXXABI)_[0-9.]+' | cut -d' ' -f2 | sort -u)
     top=
     for p in GLIBC GLIBCXX CXXABI; do
@@ -73,13 +83,14 @@ Vulkan ICD selection: none. The loader finds virtio_icd.*.json next to the stock
   skipped and Venus binds /dev/dri/renderD128. Do NOT set VK_DRIVER_FILES/VK_ICD_FILENAMES globally: the
   values leak into pressure-vessel/FEX, where an aarch64 json path is wrong for the x86 provider.
 GL: MESA_LOADER_DRIVER_OVERRIDE=zink
-  The stock libgallium has zink but no virtio_gpu (virgl) driver; without the override the DRI loader looks
-  for virtio_gpu_dri.so and GL fails. The variable passes into pressure-vessel and also selects the
-  provider's x86 zink_dri.so (-> x86 Venus) for FEX-emulated GL apps. Put it in mesavars.sh (EnvironmentFile
+  libgallium (ours, as the stock one) has zink but no virtio_gpu (virgl) driver; without the override the DRI loader
+  looks for virtio_gpu_dri.so and GL fails. The variable passes into pressure-vessel and also selects the
+  provider's x86 zink (-> x86 Venus) for FEX-emulated GL apps. Put it in mesavars.sh (EnvironmentFile
   of steam/gamescope/steamvr units) and in the session environment (environment.d) for all GL clients.
-MESA_GL_VERSION_OVERRIDE=4.3 / MESA_GLSL_VERSION_OVERRIDE=430: keep. zink's native GL version follows the host
-  Vulkan features Venus passes through (geometryShader gates GL 3.2, tessellation GL 4.0). Stock MoltenVK has no
-  geometryShader; the host/moltenvk UTM fork emulates it. The override keeps 4.3 contexts available either way.
+MESA_GL_VERSION_OVERRIDE=4.6 / MESA_GLSL_VERSION_OVERRIDE=460: keep. zink's native GL version follows the host
+  Vulkan features Venus passes through (geometryShader gates GL 3.2, tessellation GL 4.0); KosmicKrisp reaches 4.6.
+  Stock MoltenVK has no geometryShader; the host/moltenvk UTM fork emulates it. The override is an exact version,
+  so a lower value caps KosmicKrisp too: 4.3 broke American Truck Simulator, which requests a 4.6 core context.
 VRAM report layer: ENABLE_MESA_VRAM_REPORT_LIMIT=1 + VK_VRAM_REPORT_LIMIT_DEVICE_ID=0x5143:0x43051401 only
   matches the Adreno, so it is a no-op on Venus. Venus passes the host vendorID/deviceID through; MoltenVK
   reports vendorID 0x106b and a deviceID that encodes the macOS version and Apple GPU family, so it must be

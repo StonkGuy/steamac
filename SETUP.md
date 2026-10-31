@@ -10,7 +10,7 @@ enforcement is the game publisher's decision.
 
 Status: only one machine (M2 MacBook Air, 16 GB, macOS 27.0) has been verified. VRChat is verified in game on both
 graphics paths; Mini Royale's EAC launcher also reaches `301` (not played further). Results differ game by game.
-VR is not part of this release.
+VR is experimental and off by default ([docs/vr.md](docs/vr.md)).
 
 ## Requirements
 
@@ -29,7 +29,7 @@ VR is not part of this release.
    tag, ad-hoc signed, SHA-256 next to it; [release builds](docs/release-build.md)), or check out `main` or a
    [release](https://github.com/StonkGuy/steamac/releases) tag and build with `./build.sh`
    ([requirements and building](docs/upstream/requirements-and-building.md)). For the DXMT path, run
-   `make dxmt-payload` in `wmtr/` before the layer step; without it the app offers only the Vulkan path.
+   `./build.sh dxmt` before the layer step; without it the app offers only the Vulkan path.
 2. Copy **FX Steam Launcher.app** from the DMG or `work/out/` to Applications.
 3. **First open.** The fork's builds are ad-hoc signed and not notarized, so macOS Gatekeeper blocks the first open. This
    is needed once. Right-click (or Control-click) the app, choose **Open**, then **Open** again. If macOS 15 or newer does
@@ -71,7 +71,9 @@ Switching between Steam client builds downloads up to about 1 GB; progress shows
 
 ## Choosing the graphics path
 
-Settings > Advanced > **Graphics path**: **DXMT (lean)** or **Vulkan (classic)**. Restart the launcher to switch.
+Settings > Advanced > **Allow DXMT (D3D11 on the Mac's Metal)**: on is **DXMT (lean)**, off is **Vulkan (classic)**.
+Restart the launcher to switch. Settings > Games can also give a game a profile; one that selects DXMT moves a game
+without a compatibility tool of its own to Proton 10.0 (DXMT needs an x86-64 Proton).
 
 | path | what it is | when to use it |
 |---|---|---|
@@ -177,7 +179,7 @@ on an external APFS, Mac OS Extended or exFAT volume (FAT32 is rejected). exFAT 
   ([docs/eac-performance.md](docs/eac-performance.md)). GPU-bound and power-limited.
 - 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
   memory on both paths with an 8 GiB VM.
-- VR is not part of this branch (experimental, [`vr-polish`](https://github.com/StonkGuy/steamac/tree/vr-polish) branch, guide in `docs/vr.md` there).
+- VR is experimental and off by default: see [docs/vr.md](docs/vr.md).
 - Anti-cheat that blocks virtual machines will not work.
 - DXMT: Direct3D 11/10. Direct3D 12 under the DXMT setting is limited (see above); use Vulkan for those games.
 - The DXMT setting applies to every game; there is no per-game opt-out.

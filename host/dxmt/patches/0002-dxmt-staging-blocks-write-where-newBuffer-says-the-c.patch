@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
 Date: Sat, 10 Oct 2026 15:14:52 +0300
-Subject: [PATCH 02/24] dxmt: staging blocks write where newBuffer says the
+Subject: [PATCH 02/27] dxmt: staging blocks write where newBuffer says the
  contents are
 
 StagingBufferBlockAllocator placed its own malloc() under each block and

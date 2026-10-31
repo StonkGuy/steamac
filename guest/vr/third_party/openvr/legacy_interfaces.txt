@@ -1,0 +1,1940 @@
+# OpenVR interface method lists by version, extracted from ValveSoftware/openvr headers/openvr.h
+# (BSD-3-Clause, Copyright (c) 2015, Valve Corporation) by tools/gen_legacy.py extract.
+# @<version> <class> <first tag>, then one method per line: return|name|arg types (;)|const
+@IVRApplications_006 IVRApplications v1.0.10
+EVRApplicationError|AddApplicationManifest|const char *;bool|
+EVRApplicationError|RemoveApplicationManifest|const char *|
+bool|IsApplicationInstalled|const char *|
+uint32_t|GetApplicationCount||
+EVRApplicationError|GetApplicationKeyByIndex|uint32_t;char *;uint32_t|
+EVRApplicationError|GetApplicationKeyByProcessId|uint32_t;char *;uint32_t|
+EVRApplicationError|LaunchApplication|const char *|
+EVRApplicationError|LaunchTemplateApplication|const char *;const char *;const AppOverrideKeys_t *;uint32_t|
+EVRApplicationError|LaunchApplicationFromMimeType|const char *;const char *|
+EVRApplicationError|LaunchDashboardOverlay|const char *|
+bool|CancelApplicationLaunch|const char *|
+EVRApplicationError|IdentifyApplication|uint32_t;const char *|
+uint32_t|GetApplicationProcessId|const char *|
+const char *|GetApplicationsErrorNameFromEnum|EVRApplicationError|
+uint32_t|GetApplicationPropertyString|const char *;EVRApplicationProperty;char *;uint32_t;EVRApplicationError *|
+bool|GetApplicationPropertyBool|const char *;EVRApplicationProperty;EVRApplicationError *|
+uint64_t|GetApplicationPropertyUint64|const char *;EVRApplicationProperty;EVRApplicationError *|
+EVRApplicationError|SetApplicationAutoLaunch|const char *;bool|
+bool|GetApplicationAutoLaunch|const char *|
+EVRApplicationError|SetDefaultApplicationForMimeType|const char *;const char *|
+bool|GetDefaultApplicationForMimeType|const char *;char *;uint32_t|
+bool|GetApplicationSupportedMimeTypes|const char *;char *;uint32_t|
+uint32_t|GetApplicationsThatSupportMimeType|const char *;char *;uint32_t|
+uint32_t|GetApplicationLaunchArguments|uint32_t;char *;uint32_t|
+EVRApplicationError|GetStartingApplication|char *;uint32_t|
+EVRApplicationTransitionState|GetTransitionState||
+EVRApplicationError|PerformApplicationPrelaunchCheck|const char *|
+const char *|GetApplicationsTransitionStateNameFromEnum|EVRApplicationTransitionState|
+bool|IsQuitUserPromptRequested||
+EVRApplicationError|LaunchInternalProcess|const char *;const char *;const char *|
+uint32_t|GetCurrentSceneProcessId||
+@IVRApplications_007 IVRApplications v1.8.19
+EVRApplicationError|AddApplicationManifest|const char *;bool|
+EVRApplicationError|RemoveApplicationManifest|const char *|
+bool|IsApplicationInstalled|const char *|
+uint32_t|GetApplicationCount||
+EVRApplicationError|GetApplicationKeyByIndex|uint32_t;char *;uint32_t|
+EVRApplicationError|GetApplicationKeyByProcessId|uint32_t;char *;uint32_t|
+EVRApplicationError|LaunchApplication|const char *|
+EVRApplicationError|LaunchTemplateApplication|const char *;const char *;const AppOverrideKeys_t *;uint32_t|
+EVRApplicationError|LaunchApplicationFromMimeType|const char *;const char *|
+EVRApplicationError|LaunchDashboardOverlay|const char *|
+bool|CancelApplicationLaunch|const char *|
+EVRApplicationError|IdentifyApplication|uint32_t;const char *|
+uint32_t|GetApplicationProcessId|const char *|
+const char *|GetApplicationsErrorNameFromEnum|EVRApplicationError|
+uint32_t|GetApplicationPropertyString|const char *;EVRApplicationProperty;char *;uint32_t;EVRApplicationError *|
+bool|GetApplicationPropertyBool|const char *;EVRApplicationProperty;EVRApplicationError *|
+uint64_t|GetApplicationPropertyUint64|const char *;EVRApplicationProperty;EVRApplicationError *|
+EVRApplicationError|SetApplicationAutoLaunch|const char *;bool|
+bool|GetApplicationAutoLaunch|const char *|
+EVRApplicationError|SetDefaultApplicationForMimeType|const char *;const char *|
+bool|GetDefaultApplicationForMimeType|const char *;char *;uint32_t|
+bool|GetApplicationSupportedMimeTypes|const char *;char *;uint32_t|
+uint32_t|GetApplicationsThatSupportMimeType|const char *;char *;uint32_t|
+uint32_t|GetApplicationLaunchArguments|uint32_t;char *;uint32_t|
+EVRApplicationError|GetStartingApplication|char *;uint32_t|
+EVRSceneApplicationState|GetSceneApplicationState||
+EVRApplicationError|PerformApplicationPrelaunchCheck|const char *|
+const char *|GetSceneApplicationStateNameFromEnum|EVRSceneApplicationState|
+EVRApplicationError|LaunchInternalProcess|const char *;const char *;const char *|
+uint32_t|GetCurrentSceneProcessId||
+@IVRApplications_008 IVRApplications v2.15.6
+EVRApplicationError|AddApplicationManifest|const char *;bool|
+EVRApplicationError|RemoveApplicationManifest|const char *|
+bool|IsApplicationInstalled|const char *|
+uint32_t|GetApplicationCount||
+EVRApplicationError|GetApplicationKeyByIndex|uint32_t;char *;uint32_t|
+EVRApplicationError|GetApplicationKeyByProcessId|uint32_t;char *;uint32_t|
+EVRApplicationError|LaunchApplication|const char *|
+EVRApplicationError|LaunchTemplateApplication|const char *;const char *;const AppOverrideKeys_t *;uint32_t|
+EVRApplicationError|LaunchApplicationFromMimeType|const char *;const char *|
+EVRApplicationError|LaunchDashboardOverlay|const char *|
+bool|CancelApplicationLaunch|const char *|
+EVRApplicationError|IdentifyApplication|uint32_t;const char *|
+uint32_t|GetApplicationProcessId|const char *|
+const char *|GetApplicationsErrorNameFromEnum|EVRApplicationError|
+uint32_t|GetApplicationPropertyString|const char *;EVRApplicationProperty;char *;uint32_t;EVRApplicationError *|
+bool|GetApplicationPropertyBool|const char *;EVRApplicationProperty;EVRApplicationError *|
+uint64_t|GetApplicationPropertyUint64|const char *;EVRApplicationProperty;EVRApplicationError *|
+EVRApplicationError|SetApplicationAutoLaunch|const char *;bool|
+bool|GetApplicationAutoLaunch|const char *|
+EVRApplicationError|SetDefaultApplicationForMimeType|const char *;const char *|
+bool|GetDefaultApplicationForMimeType|const char *;char *;uint32_t|
+bool|GetApplicationSupportedMimeTypes|const char *;char *;uint32_t|
+uint32_t|GetApplicationsThatSupportMimeType|const char *;char *;uint32_t|
+uint32_t|GetApplicationLaunchArguments|uint32_t;char *;uint32_t|
+EVRApplicationError|GetStartingApplication|char *;uint32_t|
+EVRSceneApplicationState|GetSceneApplicationState||
+EVRApplicationError|PerformApplicationPrelaunchCheck|const char *|
+const char *|GetSceneApplicationStateNameFromEnum|EVRSceneApplicationState|
+EVRApplicationError|LaunchInternalProcess|const char *;const char *;const char *|
+EVRApplicationError|RegisterSubprocess|uint32_t|
+uint32_t|GetCurrentSceneProcessId||
+@IVRChaperone_003 IVRChaperone v1.0.10
+ChaperoneCalibrationState|GetCalibrationState||
+bool|GetPlayAreaSize|float *;float *|
+bool|GetPlayAreaRect|HmdQuad_t *|
+void|ReloadInfo||
+void|SetSceneColor|HmdColor_t|
+void|GetBoundsColor|HmdColor_t *;int;float;HmdColor_t *|
+bool|AreBoundsVisible||
+void|ForceBoundsVisible|bool|
+@IVRChaperone_004 IVRChaperone v1.14.15
+ChaperoneCalibrationState|GetCalibrationState||
+bool|GetPlayAreaSize|float *;float *|
+bool|GetPlayAreaRect|HmdQuad_t *|
+void|ReloadInfo||
+void|SetSceneColor|HmdColor_t|
+void|GetBoundsColor|HmdColor_t *;int;float;HmdColor_t *|
+bool|AreBoundsVisible||
+void|ForceBoundsVisible|bool|
+void|ResetZeroPose|ETrackingUniverseOrigin|
+@IVRCompositor_021 IVRCompositor v1.0.10
+void|SetTrackingSpace|ETrackingUniverseOrigin|
+ETrackingUniverseOrigin|GetTrackingSpace||
+EVRCompositorError|WaitGetPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoseForTrackedDeviceIndex|TrackedDeviceIndex_t;TrackedDevicePose_t *;TrackedDevicePose_t *|
+EVRCompositorError|Submit|EVREye;const Texture_t *;const VRTextureBounds_t *;EVRSubmitFlags|
+void|ClearLastSubmittedFrame||
+void|PostPresentHandoff||
+bool|GetFrameTiming|Compositor_FrameTiming *;uint32_t|
+uint32_t|GetFrameTimings|Compositor_FrameTiming *;uint32_t|
+float|GetFrameTimeRemaining||
+void|GetCumulativeStats|Compositor_CumulativeStats *;uint32_t|
+void|FadeToColor|float;float;float;float;float;bool|
+HmdColor_t|GetCurrentFadeColor|bool|
+void|FadeGrid|float;bool|
+float|GetCurrentGridAlpha||
+EVRCompositorError|SetSkyboxOverride|const Texture_t *;uint32_t|
+void|ClearSkyboxOverride||
+void|CompositorBringToFront||
+void|CompositorGoToBack||
+void|CompositorQuit||
+bool|IsFullscreen||
+uint32_t|GetCurrentSceneFocusProcess||
+uint32_t|GetLastFrameRenderer||
+bool|CanRenderScene||
+void|ShowMirrorWindow||
+void|HideMirrorWindow||
+bool|IsMirrorWindowVisible||
+void|CompositorDumpImages||
+bool|ShouldAppRenderWithLowResources||
+void|ForceInterleavedReprojectionOn|bool|
+void|ForceReconnectProcess||
+void|SuspendRendering|bool|
+EVRCompositorError|GetMirrorTextureD3D11|EVREye;void *;void * *|
+void|ReleaseMirrorTextureD3D11|void *|
+EVRCompositorError|GetMirrorTextureGL|EVREye;glUInt_t *;glSharedTextureHandle_t *|
+bool|ReleaseSharedGLTexture|glUInt_t;glSharedTextureHandle_t|
+void|LockGLSharedTextureForAccess|glSharedTextureHandle_t|
+void|UnlockGLSharedTextureForAccess|glSharedTextureHandle_t|
+uint32_t|GetVulkanInstanceExtensionsRequired|char *;uint32_t|
+uint32_t|GetVulkanDeviceExtensionsRequired|VkPhysicalDevice_T *;char *;uint32_t|
+void|SetExplicitTimingMode|bool|
+EVRCompositorError|SubmitExplicitTimingData||
+@IVRCompositor_022 IVRCompositor v1.0.17
+void|SetTrackingSpace|ETrackingUniverseOrigin|
+ETrackingUniverseOrigin|GetTrackingSpace||
+EVRCompositorError|WaitGetPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoseForTrackedDeviceIndex|TrackedDeviceIndex_t;TrackedDevicePose_t *;TrackedDevicePose_t *|
+EVRCompositorError|Submit|EVREye;const Texture_t *;const VRTextureBounds_t *;EVRSubmitFlags|
+void|ClearLastSubmittedFrame||
+void|PostPresentHandoff||
+bool|GetFrameTiming|Compositor_FrameTiming *;uint32_t|
+uint32_t|GetFrameTimings|Compositor_FrameTiming *;uint32_t|
+float|GetFrameTimeRemaining||
+void|GetCumulativeStats|Compositor_CumulativeStats *;uint32_t|
+void|FadeToColor|float;float;float;float;float;bool|
+HmdColor_t|GetCurrentFadeColor|bool|
+void|FadeGrid|float;bool|
+float|GetCurrentGridAlpha||
+EVRCompositorError|SetSkyboxOverride|const Texture_t *;uint32_t|
+void|ClearSkyboxOverride||
+void|CompositorBringToFront||
+void|CompositorGoToBack||
+void|CompositorQuit||
+bool|IsFullscreen||
+uint32_t|GetCurrentSceneFocusProcess||
+uint32_t|GetLastFrameRenderer||
+bool|CanRenderScene||
+void|ShowMirrorWindow||
+void|HideMirrorWindow||
+bool|IsMirrorWindowVisible||
+void|CompositorDumpImages||
+bool|ShouldAppRenderWithLowResources||
+void|ForceInterleavedReprojectionOn|bool|
+void|ForceReconnectProcess||
+void|SuspendRendering|bool|
+EVRCompositorError|GetMirrorTextureD3D11|EVREye;void *;void * *|
+void|ReleaseMirrorTextureD3D11|void *|
+EVRCompositorError|GetMirrorTextureGL|EVREye;glUInt_t *;glSharedTextureHandle_t *|
+bool|ReleaseSharedGLTexture|glUInt_t;glSharedTextureHandle_t|
+void|LockGLSharedTextureForAccess|glSharedTextureHandle_t|
+void|UnlockGLSharedTextureForAccess|glSharedTextureHandle_t|
+uint32_t|GetVulkanInstanceExtensionsRequired|char *;uint32_t|
+uint32_t|GetVulkanDeviceExtensionsRequired|VkPhysicalDevice_T *;char *;uint32_t|
+void|SetExplicitTimingMode|EVRCompositorTimingMode|
+EVRCompositorError|SubmitExplicitTimingData||
+@IVRCompositor_024 IVRCompositor v1.9.16
+void|SetTrackingSpace|ETrackingUniverseOrigin|
+ETrackingUniverseOrigin|GetTrackingSpace||
+EVRCompositorError|WaitGetPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoseForTrackedDeviceIndex|TrackedDeviceIndex_t;TrackedDevicePose_t *;TrackedDevicePose_t *|
+EVRCompositorError|Submit|EVREye;const Texture_t *;const VRTextureBounds_t *;EVRSubmitFlags|
+void|ClearLastSubmittedFrame||
+void|PostPresentHandoff||
+bool|GetFrameTiming|Compositor_FrameTiming *;uint32_t|
+uint32_t|GetFrameTimings|Compositor_FrameTiming *;uint32_t|
+float|GetFrameTimeRemaining||
+void|GetCumulativeStats|Compositor_CumulativeStats *;uint32_t|
+void|FadeToColor|float;float;float;float;float;bool|
+HmdColor_t|GetCurrentFadeColor|bool|
+void|FadeGrid|float;bool|
+float|GetCurrentGridAlpha||
+EVRCompositorError|SetSkyboxOverride|const Texture_t *;uint32_t|
+void|ClearSkyboxOverride||
+void|CompositorBringToFront||
+void|CompositorGoToBack||
+void|CompositorQuit||
+bool|IsFullscreen||
+uint32_t|GetCurrentSceneFocusProcess||
+uint32_t|GetLastFrameRenderer||
+bool|CanRenderScene||
+void|ShowMirrorWindow||
+void|HideMirrorWindow||
+bool|IsMirrorWindowVisible||
+void|CompositorDumpImages||
+bool|ShouldAppRenderWithLowResources||
+void|ForceInterleavedReprojectionOn|bool|
+void|ForceReconnectProcess||
+void|SuspendRendering|bool|
+EVRCompositorError|GetMirrorTextureD3D11|EVREye;void *;void * *|
+void|ReleaseMirrorTextureD3D11|void *|
+EVRCompositorError|GetMirrorTextureGL|EVREye;glUInt_t *;glSharedTextureHandle_t *|
+bool|ReleaseSharedGLTexture|glUInt_t;glSharedTextureHandle_t|
+void|LockGLSharedTextureForAccess|glSharedTextureHandle_t|
+void|UnlockGLSharedTextureForAccess|glSharedTextureHandle_t|
+uint32_t|GetVulkanInstanceExtensionsRequired|char *;uint32_t|
+uint32_t|GetVulkanDeviceExtensionsRequired|VkPhysicalDevice_T *;char *;uint32_t|
+void|SetExplicitTimingMode|EVRCompositorTimingMode|
+EVRCompositorError|SubmitExplicitTimingData||
+bool|IsMotionSmoothingEnabled||
+bool|IsMotionSmoothingSupported||
+bool|IsCurrentSceneFocusAppLoading||
+EVRCompositorError|SetStageOverride_Async|const char *;const HmdMatrix34_t *;const Compositor_StageRenderSettings *;uint32_t|
+void|ClearStageOverride||
+@IVRCompositor_026 IVRCompositor v1.10.30
+void|SetTrackingSpace|ETrackingUniverseOrigin|
+ETrackingUniverseOrigin|GetTrackingSpace||
+EVRCompositorError|WaitGetPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoseForTrackedDeviceIndex|TrackedDeviceIndex_t;TrackedDevicePose_t *;TrackedDevicePose_t *|
+EVRCompositorError|Submit|EVREye;const Texture_t *;const VRTextureBounds_t *;EVRSubmitFlags|
+void|ClearLastSubmittedFrame||
+void|PostPresentHandoff||
+bool|GetFrameTiming|Compositor_FrameTiming *;uint32_t|
+uint32_t|GetFrameTimings|Compositor_FrameTiming *;uint32_t|
+float|GetFrameTimeRemaining||
+void|GetCumulativeStats|Compositor_CumulativeStats *;uint32_t|
+void|FadeToColor|float;float;float;float;float;bool|
+HmdColor_t|GetCurrentFadeColor|bool|
+void|FadeGrid|float;bool|
+float|GetCurrentGridAlpha||
+EVRCompositorError|SetSkyboxOverride|const Texture_t *;uint32_t|
+void|ClearSkyboxOverride||
+void|CompositorBringToFront||
+void|CompositorGoToBack||
+void|CompositorQuit||
+bool|IsFullscreen||
+uint32_t|GetCurrentSceneFocusProcess||
+uint32_t|GetLastFrameRenderer||
+bool|CanRenderScene||
+void|ShowMirrorWindow||
+void|HideMirrorWindow||
+bool|IsMirrorWindowVisible||
+void|CompositorDumpImages||
+bool|ShouldAppRenderWithLowResources||
+void|ForceInterleavedReprojectionOn|bool|
+void|ForceReconnectProcess||
+void|SuspendRendering|bool|
+EVRCompositorError|GetMirrorTextureD3D11|EVREye;void *;void * *|
+void|ReleaseMirrorTextureD3D11|void *|
+EVRCompositorError|GetMirrorTextureGL|EVREye;glUInt_t *;glSharedTextureHandle_t *|
+bool|ReleaseSharedGLTexture|glUInt_t;glSharedTextureHandle_t|
+void|LockGLSharedTextureForAccess|glSharedTextureHandle_t|
+void|UnlockGLSharedTextureForAccess|glSharedTextureHandle_t|
+uint32_t|GetVulkanInstanceExtensionsRequired|char *;uint32_t|
+uint32_t|GetVulkanDeviceExtensionsRequired|VkPhysicalDevice_T *;char *;uint32_t|
+void|SetExplicitTimingMode|EVRCompositorTimingMode|
+EVRCompositorError|SubmitExplicitTimingData||
+bool|IsMotionSmoothingEnabled||
+bool|IsMotionSmoothingSupported||
+bool|IsCurrentSceneFocusAppLoading||
+EVRCompositorError|SetStageOverride_Async|const char *;const HmdMatrix34_t *;const Compositor_StageRenderSettings *;uint32_t|
+void|ClearStageOverride||
+bool|GetCompositorBenchmarkResults|Compositor_BenchmarkResults *;uint32_t|
+EVRCompositorError|GetLastPosePredictionIDs|uint32_t *;uint32_t *|
+EVRCompositorError|GetPosesForFrame|uint32_t;TrackedDevicePose_t *;uint32_t|
+@IVRCompositor_027 IVRCompositor v1.16.8
+void|SetTrackingSpace|ETrackingUniverseOrigin|
+ETrackingUniverseOrigin|GetTrackingSpace||
+EVRCompositorError|WaitGetPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoseForTrackedDeviceIndex|TrackedDeviceIndex_t;TrackedDevicePose_t *;TrackedDevicePose_t *|
+EVRCompositorError|Submit|EVREye;const Texture_t *;const VRTextureBounds_t *;EVRSubmitFlags|
+void|ClearLastSubmittedFrame||
+void|PostPresentHandoff||
+bool|GetFrameTiming|Compositor_FrameTiming *;uint32_t|
+uint32_t|GetFrameTimings|Compositor_FrameTiming *;uint32_t|
+float|GetFrameTimeRemaining||
+void|GetCumulativeStats|Compositor_CumulativeStats *;uint32_t|
+void|FadeToColor|float;float;float;float;float;bool|
+HmdColor_t|GetCurrentFadeColor|bool|
+void|FadeGrid|float;bool|
+float|GetCurrentGridAlpha||
+EVRCompositorError|SetSkyboxOverride|const Texture_t *;uint32_t|
+void|ClearSkyboxOverride||
+void|CompositorBringToFront||
+void|CompositorGoToBack||
+void|CompositorQuit||
+bool|IsFullscreen||
+uint32_t|GetCurrentSceneFocusProcess||
+uint32_t|GetLastFrameRenderer||
+bool|CanRenderScene||
+void|ShowMirrorWindow||
+void|HideMirrorWindow||
+bool|IsMirrorWindowVisible||
+void|CompositorDumpImages||
+bool|ShouldAppRenderWithLowResources||
+void|ForceInterleavedReprojectionOn|bool|
+void|ForceReconnectProcess||
+void|SuspendRendering|bool|
+EVRCompositorError|GetMirrorTextureD3D11|EVREye;void *;void * *|
+void|ReleaseMirrorTextureD3D11|void *|
+EVRCompositorError|GetMirrorTextureGL|EVREye;glUInt_t *;glSharedTextureHandle_t *|
+bool|ReleaseSharedGLTexture|glUInt_t;glSharedTextureHandle_t|
+void|LockGLSharedTextureForAccess|glSharedTextureHandle_t|
+void|UnlockGLSharedTextureForAccess|glSharedTextureHandle_t|
+uint32_t|GetVulkanInstanceExtensionsRequired|char *;uint32_t|
+uint32_t|GetVulkanDeviceExtensionsRequired|VkPhysicalDevice_T *;char *;uint32_t|
+void|SetExplicitTimingMode|EVRCompositorTimingMode|
+EVRCompositorError|SubmitExplicitTimingData||
+bool|IsMotionSmoothingEnabled||
+bool|IsMotionSmoothingSupported||
+bool|IsCurrentSceneFocusAppLoading||
+EVRCompositorError|SetStageOverride_Async|const char *;const HmdMatrix34_t *;const Compositor_StageRenderSettings *;uint32_t|
+void|ClearStageOverride||
+bool|GetCompositorBenchmarkResults|Compositor_BenchmarkResults *;uint32_t|
+EVRCompositorError|GetLastPosePredictionIDs|uint32_t *;uint32_t *|
+EVRCompositorError|GetPosesForFrame|uint32_t;TrackedDevicePose_t *;uint32_t|
+@IVRCompositor_028 IVRCompositor v2.2.3
+void|SetTrackingSpace|ETrackingUniverseOrigin|
+ETrackingUniverseOrigin|GetTrackingSpace||
+EVRCompositorError|WaitGetPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoseForTrackedDeviceIndex|TrackedDeviceIndex_t;TrackedDevicePose_t *;TrackedDevicePose_t *|
+EVRCompositorError|Submit|EVREye;const Texture_t *;const VRTextureBounds_t *;EVRSubmitFlags|
+EVRCompositorError|SubmitWithArrayIndex|EVREye;const Texture_t *;uint32_t;const VRTextureBounds_t *;EVRSubmitFlags|
+void|ClearLastSubmittedFrame||
+void|PostPresentHandoff||
+bool|GetFrameTiming|Compositor_FrameTiming *;uint32_t|
+uint32_t|GetFrameTimings|Compositor_FrameTiming *;uint32_t|
+float|GetFrameTimeRemaining||
+void|GetCumulativeStats|Compositor_CumulativeStats *;uint32_t|
+void|FadeToColor|float;float;float;float;float;bool|
+HmdColor_t|GetCurrentFadeColor|bool|
+void|FadeGrid|float;bool|
+float|GetCurrentGridAlpha||
+EVRCompositorError|SetSkyboxOverride|const Texture_t *;uint32_t|
+void|ClearSkyboxOverride||
+void|CompositorBringToFront||
+void|CompositorGoToBack||
+void|CompositorQuit||
+bool|IsFullscreen||
+uint32_t|GetCurrentSceneFocusProcess||
+uint32_t|GetLastFrameRenderer||
+bool|CanRenderScene||
+void|ShowMirrorWindow||
+void|HideMirrorWindow||
+bool|IsMirrorWindowVisible||
+void|CompositorDumpImages||
+bool|ShouldAppRenderWithLowResources||
+void|ForceInterleavedReprojectionOn|bool|
+void|ForceReconnectProcess||
+void|SuspendRendering|bool|
+EVRCompositorError|GetMirrorTextureD3D11|EVREye;void *;void * *|
+void|ReleaseMirrorTextureD3D11|void *|
+EVRCompositorError|GetMirrorTextureGL|EVREye;glUInt_t *;glSharedTextureHandle_t *|
+bool|ReleaseSharedGLTexture|glUInt_t;glSharedTextureHandle_t|
+void|LockGLSharedTextureForAccess|glSharedTextureHandle_t|
+void|UnlockGLSharedTextureForAccess|glSharedTextureHandle_t|
+uint32_t|GetVulkanInstanceExtensionsRequired|char *;uint32_t|
+uint32_t|GetVulkanDeviceExtensionsRequired|VkPhysicalDevice_T *;char *;uint32_t|
+void|SetExplicitTimingMode|EVRCompositorTimingMode|
+EVRCompositorError|SubmitExplicitTimingData||
+bool|IsMotionSmoothingEnabled||
+bool|IsMotionSmoothingSupported||
+bool|IsCurrentSceneFocusAppLoading||
+EVRCompositorError|SetStageOverride_Async|const char *;const HmdMatrix34_t *;const Compositor_StageRenderSettings *;uint32_t|
+void|ClearStageOverride||
+bool|GetCompositorBenchmarkResults|Compositor_BenchmarkResults *;uint32_t|
+EVRCompositorError|GetLastPosePredictionIDs|uint32_t *;uint32_t *|
+EVRCompositorError|GetPosesForFrame|uint32_t;TrackedDevicePose_t *;uint32_t|
+@IVRCompositor_029 IVRCompositor v2.12.14
+void|SetTrackingSpace|ETrackingUniverseOrigin|
+ETrackingUniverseOrigin|GetTrackingSpace||
+EVRCompositorError|WaitGetPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoses|TrackedDevicePose_t *;uint32_t;TrackedDevicePose_t *;uint32_t|
+EVRCompositorError|GetLastPoseForTrackedDeviceIndex|TrackedDeviceIndex_t;TrackedDevicePose_t *;TrackedDevicePose_t *|
+EVRCompositorError|GetSubmitTexture|Texture_t *;bool *;EVRCompositorTextureUsage;const Texture_t *;const VRTextureBounds_t *;EVRSubmitFlags|
+EVRCompositorError|Submit|EVREye;const Texture_t *;const VRTextureBounds_t *;EVRSubmitFlags|
+EVRCompositorError|SubmitWithArrayIndex|EVREye;const Texture_t *;uint32_t;const VRTextureBounds_t *;EVRSubmitFlags|
+void|ClearLastSubmittedFrame||
+void|PostPresentHandoff||
+bool|GetFrameTiming|Compositor_FrameTiming *;uint32_t|
+uint32_t|GetFrameTimings|Compositor_FrameTiming *;uint32_t|
+float|GetFrameTimeRemaining||
+void|GetCumulativeStats|Compositor_CumulativeStats *;uint32_t|
+void|FadeToColor|float;float;float;float;float;bool|
+HmdColor_t|GetCurrentFadeColor|bool|
+void|FadeGrid|float;bool|
+float|GetCurrentGridAlpha||
+EVRCompositorError|SetSkyboxOverride|const Texture_t *;uint32_t|
+void|ClearSkyboxOverride||
+void|CompositorBringToFront||
+void|CompositorGoToBack||
+void|CompositorQuit||
+bool|IsFullscreen||
+uint32_t|GetCurrentSceneFocusProcess||
+uint32_t|GetLastFrameRenderer||
+bool|CanRenderScene||
+void|ShowMirrorWindow||
+void|HideMirrorWindow||
+bool|IsMirrorWindowVisible||
+void|CompositorDumpImages||
+bool|ShouldAppRenderWithLowResources||
+void|ForceInterleavedReprojectionOn|bool|
+void|ForceReconnectProcess||
+void|SuspendRendering|bool|
+EVRCompositorError|GetMirrorTextureD3D11|EVREye;void *;void * *|
+void|ReleaseMirrorTextureD3D11|void *|
+EVRCompositorError|GetMirrorTextureGL|EVREye;glUInt_t *;glSharedTextureHandle_t *|
+bool|ReleaseSharedGLTexture|glUInt_t;glSharedTextureHandle_t|
+void|LockGLSharedTextureForAccess|glSharedTextureHandle_t|
+void|UnlockGLSharedTextureForAccess|glSharedTextureHandle_t|
+uint32_t|GetVulkanInstanceExtensionsRequired|char *;uint32_t|
+uint32_t|GetVulkanDeviceExtensionsRequired|VkPhysicalDevice_T *;char *;uint32_t|
+void|SetExplicitTimingMode|EVRCompositorTimingMode|
+EVRCompositorError|SubmitExplicitTimingData||
+bool|IsMotionSmoothingEnabled||
+bool|IsMotionSmoothingSupported||
+bool|IsCurrentSceneFocusAppLoading||
+EVRCompositorError|SetStageOverride_Async|const char *;const HmdMatrix34_t *;const Compositor_StageRenderSettings *;uint32_t|
+void|ClearStageOverride||
+bool|GetCompositorBenchmarkResults|Compositor_BenchmarkResults *;uint32_t|
+EVRCompositorError|GetLastPosePredictionIDs|uint32_t *;uint32_t *|
+EVRCompositorError|GetPosesForFrame|uint32_t;TrackedDevicePose_t *;uint32_t|
+@IVRInput_004 IVRInput v1.0.17
+EVRInputError|SetActionManifestPath|const char *|
+EVRInputError|GetActionSetHandle|const char *;VRActionSetHandle_t *|
+EVRInputError|GetActionHandle|const char *;VRActionHandle_t *|
+EVRInputError|GetInputSourceHandle|const char *;VRInputValueHandle_t *|
+EVRInputError|UpdateActionState|VRActiveActionSet_t *;uint32_t;uint32_t|
+EVRInputError|GetDigitalActionData|VRActionHandle_t;InputDigitalActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetAnalogActionData|VRActionHandle_t;InputAnalogActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionData|VRActionHandle_t;ETrackingUniverseOrigin;float;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetSkeletalActionData|VRActionHandle_t;InputSkeletalActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetSkeletalBoneData|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalMotionRange;VRBoneTransform_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetSkeletalBoneDataCompressed|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalMotionRange;void *;uint32_t;uint32_t *;VRInputValueHandle_t|
+EVRInputError|DecompressSkeletalBoneData|void *;uint32_t;EVRSkeletalTransformSpace *;VRBoneTransform_t *;uint32_t|
+EVRInputError|TriggerHapticVibrationAction|VRActionHandle_t;float;float;float;float;VRInputValueHandle_t|
+EVRInputError|GetActionOrigins|VRActionSetHandle_t;VRActionHandle_t;VRInputValueHandle_t *;uint32_t|
+EVRInputError|GetOriginLocalizedName|VRInputValueHandle_t;char *;uint32_t|
+EVRInputError|GetOriginTrackedDeviceInfo|VRInputValueHandle_t;InputOriginInfo_t *;uint32_t|
+EVRInputError|ShowActionOrigins|VRActionSetHandle_t;VRActionHandle_t|
+EVRInputError|ShowBindingsForActionSet|VRActiveActionSet_t *;uint32_t;uint32_t;VRInputValueHandle_t|
+@IVRInput_005 IVRInput v1.1.3b
+EVRInputError|SetActionManifestPath|const char *|
+EVRInputError|GetActionSetHandle|const char *;VRActionSetHandle_t *|
+EVRInputError|GetActionHandle|const char *;VRActionHandle_t *|
+EVRInputError|GetInputSourceHandle|const char *;VRInputValueHandle_t *|
+EVRInputError|UpdateActionState|VRActiveActionSet_t *;uint32_t;uint32_t|
+EVRInputError|GetDigitalActionData|VRActionHandle_t;InputDigitalActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetAnalogActionData|VRActionHandle_t;InputAnalogActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionData|VRActionHandle_t;ETrackingUniverseOrigin;float;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetSkeletalActionData|VRActionHandle_t;InputSkeletalActionData_t *;uint32_t|
+EVRInputError|GetBoneCount|VRActionHandle_t;uint32_t *|
+EVRInputError|GetBoneHierarchy|VRActionHandle_t;BoneIndex_t *;uint32_t|
+EVRInputError|GetBoneName|VRActionHandle_t;BoneIndex_t;char *;uint32_t|
+EVRInputError|GetSkeletalReferenceTransforms|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalReferencePose;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalTrackingLevel|VRActionHandle_t;EVRSkeletalTrackingLevel *|
+EVRInputError|GetSkeletalBoneData|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalMotionRange;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalSummaryData|VRActionHandle_t;VRSkeletalSummaryData_t *|
+EVRInputError|GetSkeletalBoneDataCompressed|VRActionHandle_t;EVRSkeletalMotionRange;void *;uint32_t;uint32_t *|
+EVRInputError|DecompressSkeletalBoneData|const void *;uint32_t;EVRSkeletalTransformSpace;VRBoneTransform_t *;uint32_t|
+EVRInputError|TriggerHapticVibrationAction|VRActionHandle_t;float;float;float;float;VRInputValueHandle_t|
+EVRInputError|GetActionOrigins|VRActionSetHandle_t;VRActionHandle_t;VRInputValueHandle_t *;uint32_t|
+EVRInputError|GetOriginLocalizedName|VRInputValueHandle_t;char *;uint32_t;int32_t|
+EVRInputError|GetOriginTrackedDeviceInfo|VRInputValueHandle_t;InputOriginInfo_t *;uint32_t|
+EVRInputError|ShowActionOrigins|VRActionSetHandle_t;VRActionHandle_t|
+EVRInputError|ShowBindingsForActionSet|VRActiveActionSet_t *;uint32_t;uint32_t;VRInputValueHandle_t|
+@IVRInput_006 IVRInput v1.4.18
+EVRInputError|SetActionManifestPath|const char *|
+EVRInputError|GetActionSetHandle|const char *;VRActionSetHandle_t *|
+EVRInputError|GetActionHandle|const char *;VRActionHandle_t *|
+EVRInputError|GetInputSourceHandle|const char *;VRInputValueHandle_t *|
+EVRInputError|UpdateActionState|VRActiveActionSet_t *;uint32_t;uint32_t|
+EVRInputError|GetDigitalActionData|VRActionHandle_t;InputDigitalActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetAnalogActionData|VRActionHandle_t;InputAnalogActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionDataRelativeToNow|VRActionHandle_t;ETrackingUniverseOrigin;float;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionDataForNextFrame|VRActionHandle_t;ETrackingUniverseOrigin;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetSkeletalActionData|VRActionHandle_t;InputSkeletalActionData_t *;uint32_t|
+EVRInputError|GetBoneCount|VRActionHandle_t;uint32_t *|
+EVRInputError|GetBoneHierarchy|VRActionHandle_t;BoneIndex_t *;uint32_t|
+EVRInputError|GetBoneName|VRActionHandle_t;BoneIndex_t;char *;uint32_t|
+EVRInputError|GetSkeletalReferenceTransforms|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalReferencePose;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalTrackingLevel|VRActionHandle_t;EVRSkeletalTrackingLevel *|
+EVRInputError|GetSkeletalBoneData|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalMotionRange;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalSummaryData|VRActionHandle_t;EVRSummaryType;VRSkeletalSummaryData_t *|
+EVRInputError|GetSkeletalBoneDataCompressed|VRActionHandle_t;EVRSkeletalMotionRange;void *;uint32_t;uint32_t *|
+EVRInputError|DecompressSkeletalBoneData|const void *;uint32_t;EVRSkeletalTransformSpace;VRBoneTransform_t *;uint32_t|
+EVRInputError|TriggerHapticVibrationAction|VRActionHandle_t;float;float;float;float;VRInputValueHandle_t|
+EVRInputError|GetActionOrigins|VRActionSetHandle_t;VRActionHandle_t;VRInputValueHandle_t *;uint32_t|
+EVRInputError|GetOriginLocalizedName|VRInputValueHandle_t;char *;uint32_t;int32_t|
+EVRInputError|GetOriginTrackedDeviceInfo|VRInputValueHandle_t;InputOriginInfo_t *;uint32_t|
+EVRInputError|ShowActionOrigins|VRActionSetHandle_t;VRActionHandle_t|
+EVRInputError|ShowBindingsForActionSet|VRActiveActionSet_t *;uint32_t;uint32_t;VRInputValueHandle_t|
+bool|IsUsingLegacyInput||
+@IVRInput_007 IVRInput v1.5.17
+EVRInputError|SetActionManifestPath|const char *|
+EVRInputError|GetActionSetHandle|const char *;VRActionSetHandle_t *|
+EVRInputError|GetActionHandle|const char *;VRActionHandle_t *|
+EVRInputError|GetInputSourceHandle|const char *;VRInputValueHandle_t *|
+EVRInputError|UpdateActionState|VRActiveActionSet_t *;uint32_t;uint32_t|
+EVRInputError|GetDigitalActionData|VRActionHandle_t;InputDigitalActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetAnalogActionData|VRActionHandle_t;InputAnalogActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionDataRelativeToNow|VRActionHandle_t;ETrackingUniverseOrigin;float;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionDataForNextFrame|VRActionHandle_t;ETrackingUniverseOrigin;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetSkeletalActionData|VRActionHandle_t;InputSkeletalActionData_t *;uint32_t|
+EVRInputError|GetBoneCount|VRActionHandle_t;uint32_t *|
+EVRInputError|GetBoneHierarchy|VRActionHandle_t;BoneIndex_t *;uint32_t|
+EVRInputError|GetBoneName|VRActionHandle_t;BoneIndex_t;char *;uint32_t|
+EVRInputError|GetSkeletalReferenceTransforms|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalReferencePose;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalTrackingLevel|VRActionHandle_t;EVRSkeletalTrackingLevel *|
+EVRInputError|GetSkeletalBoneData|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalMotionRange;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalSummaryData|VRActionHandle_t;EVRSummaryType;VRSkeletalSummaryData_t *|
+EVRInputError|GetSkeletalBoneDataCompressed|VRActionHandle_t;EVRSkeletalMotionRange;void *;uint32_t;uint32_t *|
+EVRInputError|DecompressSkeletalBoneData|const void *;uint32_t;EVRSkeletalTransformSpace;VRBoneTransform_t *;uint32_t|
+EVRInputError|TriggerHapticVibrationAction|VRActionHandle_t;float;float;float;float;VRInputValueHandle_t|
+EVRInputError|GetActionOrigins|VRActionSetHandle_t;VRActionHandle_t;VRInputValueHandle_t *;uint32_t|
+EVRInputError|GetOriginLocalizedName|VRInputValueHandle_t;char *;uint32_t;int32_t|
+EVRInputError|GetOriginTrackedDeviceInfo|VRInputValueHandle_t;InputOriginInfo_t *;uint32_t|
+EVRInputError|GetActionBindingInfo|VRActionHandle_t;InputBindingInfo_t *;uint32_t;uint32_t;uint32_t *|
+EVRInputError|ShowActionOrigins|VRActionSetHandle_t;VRActionHandle_t|
+EVRInputError|ShowBindingsForActionSet|VRActiveActionSet_t *;uint32_t;uint32_t;VRInputValueHandle_t|
+bool|IsUsingLegacyInput||
+@IVRInput_010 IVRInput v1.10.30
+EVRInputError|SetActionManifestPath|const char *|
+EVRInputError|GetActionSetHandle|const char *;VRActionSetHandle_t *|
+EVRInputError|GetActionHandle|const char *;VRActionHandle_t *|
+EVRInputError|GetInputSourceHandle|const char *;VRInputValueHandle_t *|
+EVRInputError|UpdateActionState|VRActiveActionSet_t *;uint32_t;uint32_t|
+EVRInputError|GetDigitalActionData|VRActionHandle_t;InputDigitalActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetAnalogActionData|VRActionHandle_t;InputAnalogActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionDataRelativeToNow|VRActionHandle_t;ETrackingUniverseOrigin;float;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionDataForNextFrame|VRActionHandle_t;ETrackingUniverseOrigin;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetSkeletalActionData|VRActionHandle_t;InputSkeletalActionData_t *;uint32_t|
+EVRInputError|GetDominantHand|ETrackedControllerRole *|
+EVRInputError|SetDominantHand|ETrackedControllerRole|
+EVRInputError|GetBoneCount|VRActionHandle_t;uint32_t *|
+EVRInputError|GetBoneHierarchy|VRActionHandle_t;BoneIndex_t *;uint32_t|
+EVRInputError|GetBoneName|VRActionHandle_t;BoneIndex_t;char *;uint32_t|
+EVRInputError|GetSkeletalReferenceTransforms|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalReferencePose;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalTrackingLevel|VRActionHandle_t;EVRSkeletalTrackingLevel *|
+EVRInputError|GetSkeletalBoneData|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalMotionRange;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalSummaryData|VRActionHandle_t;EVRSummaryType;VRSkeletalSummaryData_t *|
+EVRInputError|GetSkeletalBoneDataCompressed|VRActionHandle_t;EVRSkeletalMotionRange;void *;uint32_t;uint32_t *|
+EVRInputError|DecompressSkeletalBoneData|const void *;uint32_t;EVRSkeletalTransformSpace;VRBoneTransform_t *;uint32_t|
+EVRInputError|TriggerHapticVibrationAction|VRActionHandle_t;float;float;float;float;VRInputValueHandle_t|
+EVRInputError|GetActionOrigins|VRActionSetHandle_t;VRActionHandle_t;VRInputValueHandle_t *;uint32_t|
+EVRInputError|GetOriginLocalizedName|VRInputValueHandle_t;char *;uint32_t;int32_t|
+EVRInputError|GetOriginTrackedDeviceInfo|VRInputValueHandle_t;InputOriginInfo_t *;uint32_t|
+EVRInputError|GetActionBindingInfo|VRActionHandle_t;InputBindingInfo_t *;uint32_t;uint32_t;uint32_t *|
+EVRInputError|ShowActionOrigins|VRActionSetHandle_t;VRActionHandle_t|
+EVRInputError|ShowBindingsForActionSet|VRActiveActionSet_t *;uint32_t;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetComponentStateForBinding|const char *;const char *;const InputBindingInfo_t *;uint32_t;uint32_t;RenderModel_ComponentState_t *|
+bool|IsUsingLegacyInput||
+EVRInputError|OpenBindingUI|const char *;VRActionSetHandle_t;VRInputValueHandle_t;bool|
+EVRInputError|GetBindingVariant|VRInputValueHandle_t;char *;uint32_t|
+@IVRInput_011 IVRInput v2.15.6
+EVRInputError|SetActionManifestPath|const char *|
+EVRInputError|GetActionSetHandle|const char *;VRActionSetHandle_t *|
+EVRInputError|GetActionHandle|const char *;VRActionHandle_t *|
+EVRInputError|GetInputSourceHandle|const char *;VRInputValueHandle_t *|
+EVRInputError|UpdateActionState|VRActiveActionSet_t *;uint32_t;uint32_t|
+EVRInputError|GetDigitalActionData|VRActionHandle_t;InputDigitalActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetAnalogActionData|VRActionHandle_t;InputAnalogActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionDataRelativeToNow|VRActionHandle_t;ETrackingUniverseOrigin;float;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetPoseActionDataForNextFrame|VRActionHandle_t;ETrackingUniverseOrigin;InputPoseActionData_t *;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetSkeletalActionData|VRActionHandle_t;InputSkeletalActionData_t *;uint32_t|
+EVRInputError|GetDominantHand|ETrackedControllerRole *|
+EVRInputError|SetDominantHand|ETrackedControllerRole|
+EVRInputError|GetEyeTrackingDataRelativeToNow|VRActionHandle_t;ETrackingUniverseOrigin;float;VREyeTrackingData_t *;uint32_t|
+EVRInputError|GetEyeTrackingDataForNextFrame|VRActionHandle_t;ETrackingUniverseOrigin;VREyeTrackingData_t *;uint32_t|
+EVRInputError|GetBoneCount|VRActionHandle_t;uint32_t *|
+EVRInputError|GetBoneHierarchy|VRActionHandle_t;BoneIndex_t *;uint32_t|
+EVRInputError|GetBoneName|VRActionHandle_t;BoneIndex_t;char *;uint32_t|
+EVRInputError|GetSkeletalReferenceTransforms|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalReferencePose;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalTrackingLevel|VRActionHandle_t;EVRSkeletalTrackingLevel *|
+EVRInputError|GetSkeletalBoneData|VRActionHandle_t;EVRSkeletalTransformSpace;EVRSkeletalMotionRange;VRBoneTransform_t *;uint32_t|
+EVRInputError|GetSkeletalSummaryData|VRActionHandle_t;EVRSummaryType;VRSkeletalSummaryData_t *|
+EVRInputError|GetSkeletalBoneDataCompressed|VRActionHandle_t;EVRSkeletalMotionRange;void *;uint32_t;uint32_t *|
+EVRInputError|DecompressSkeletalBoneData|const void *;uint32_t;EVRSkeletalTransformSpace;VRBoneTransform_t *;uint32_t|
+EVRInputError|TriggerHapticVibrationAction|VRActionHandle_t;float;float;float;float;VRInputValueHandle_t|
+EVRInputError|GetActionOrigins|VRActionSetHandle_t;VRActionHandle_t;VRInputValueHandle_t *;uint32_t|
+EVRInputError|GetOriginLocalizedName|VRInputValueHandle_t;char *;uint32_t;int32_t|
+EVRInputError|GetOriginTrackedDeviceInfo|VRInputValueHandle_t;InputOriginInfo_t *;uint32_t|
+EVRInputError|GetActionBindingInfo|VRActionHandle_t;InputBindingInfo_t *;uint32_t;uint32_t;uint32_t *|
+EVRInputError|ShowActionOrigins|VRActionSetHandle_t;VRActionHandle_t|
+EVRInputError|ShowBindingsForActionSet|VRActiveActionSet_t *;uint32_t;uint32_t;VRInputValueHandle_t|
+EVRInputError|GetComponentStateForBinding|const char *;const char *;const InputBindingInfo_t *;uint32_t;uint32_t;RenderModel_ComponentState_t *|
+bool|IsUsingLegacyInput||
+EVRInputError|OpenBindingUI|const char *;VRActionSetHandle_t;VRInputValueHandle_t;bool|
+EVRInputError|GetBindingVariant|VRInputValueHandle_t;char *;uint32_t|
+@IVROverlay_016 IVROverlay v1.0.10
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+EVROverlayError|SetHighQualityOverlay|VROverlayHandle_t|
+VROverlayHandle_t|GetHighQualityOverlay||
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayAutoCurveDistanceRangeInMeters|VROverlayHandle_t;float;float|
+EVROverlayError|GetOverlayAutoCurveDistanceRangeInMeters|VROverlayHandle_t;float *;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+uint32_t|GetOverlayRenderModel|VROverlayHandle_t;char *;uint32_t;HmdColor_t *;EVROverlayError *|
+EVROverlayError|SetOverlayRenderModel|VROverlayHandle_t;const char *;const HmdColor_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|GetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t;const HmdMatrix34_t *|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|HandleControllerOverlayInteractionAsMouse|VROverlayHandle_t;TrackedDeviceIndex_t|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+VROverlayHandle_t|GetGamepadFocusOverlay||
+EVROverlayError|SetGamepadFocusOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayNeighbor|EOverlayDirection;VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|MoveGamepadFocusToNeighbor|EOverlayDirection;VROverlayHandle_t|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_018 IVROverlay v1.0.17
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+EVROverlayError|SetHighQualityOverlay|VROverlayHandle_t|
+VROverlayHandle_t|GetHighQualityOverlay||
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayAutoCurveDistanceRangeInMeters|VROverlayHandle_t;float;float|
+EVROverlayError|GetOverlayAutoCurveDistanceRangeInMeters|VROverlayHandle_t;float *;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+uint32_t|GetOverlayRenderModel|VROverlayHandle_t;char *;uint32_t;HmdColor_t *;EVROverlayError *|
+EVROverlayError|SetOverlayRenderModel|VROverlayHandle_t;const char *;const HmdColor_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|GetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t;const HmdMatrix34_t *|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+VROverlayHandle_t|GetGamepadFocusOverlay||
+EVROverlayError|SetGamepadFocusOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayNeighbor|EOverlayDirection;VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|MoveGamepadFocusToNeighbor|EOverlayDirection;VROverlayHandle_t|
+EVROverlayError|SetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;const HmdVector2_t &;float|
+EVROverlayError|GetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;HmdVector2_t *;float *|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_019 IVROverlay v1.1.3b
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+EVROverlayError|SetHighQualityOverlay|VROverlayHandle_t|
+VROverlayHandle_t|GetHighQualityOverlay||
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayAutoCurveDistanceRangeInMeters|VROverlayHandle_t;float;float|
+EVROverlayError|GetOverlayAutoCurveDistanceRangeInMeters|VROverlayHandle_t;float *;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+uint32_t|GetOverlayRenderModel|VROverlayHandle_t;char *;uint32_t;HmdColor_t *;EVROverlayError *|
+EVROverlayError|SetOverlayRenderModel|VROverlayHandle_t;const char *;const HmdColor_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|GetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t;const HmdMatrix34_t *|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+VROverlayHandle_t|GetGamepadFocusOverlay||
+EVROverlayError|SetGamepadFocusOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayNeighbor|EOverlayDirection;VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|MoveGamepadFocusToNeighbor|EOverlayDirection;VROverlayHandle_t|
+EVROverlayError|SetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;const HmdVector2_t *;float|
+EVROverlayError|GetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;HmdVector2_t *;float *|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_020 IVROverlay v1.7.15
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayAutoCurveDistanceRangeInMeters|VROverlayHandle_t;float;float|
+EVROverlayError|GetOverlayAutoCurveDistanceRangeInMeters|VROverlayHandle_t;float *;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+uint32_t|GetOverlayRenderModel|VROverlayHandle_t;char *;uint32_t;HmdColor_t *;EVROverlayError *|
+EVROverlayError|SetOverlayRenderModel|VROverlayHandle_t;const char *;const HmdColor_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|GetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t;const HmdMatrix34_t *|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+VROverlayHandle_t|GetGamepadFocusOverlay||
+EVROverlayError|SetGamepadFocusOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayNeighbor|EOverlayDirection;VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|MoveGamepadFocusToNeighbor|EOverlayDirection;VROverlayHandle_t|
+EVROverlayError|SetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;const HmdVector2_t *;float|
+EVROverlayError|GetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;HmdVector2_t *;float *|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_021 IVROverlay v1.8.19
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayCurvature|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayCurvature|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+uint32_t|GetOverlayRenderModel|VROverlayHandle_t;char *;uint32_t;HmdColor_t *;EVROverlayError *|
+EVROverlayError|SetOverlayRenderModel|VROverlayHandle_t;const char *;const HmdColor_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|GetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t;const HmdMatrix34_t *|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;const HmdVector2_t *;float|
+EVROverlayError|GetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;HmdVector2_t *;float *|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_022 IVROverlay v1.9.16
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayCurvature|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayCurvature|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+uint32_t|GetOverlayRenderModel|VROverlayHandle_t;char *;uint32_t;HmdColor_t *;EVROverlayError *|
+EVROverlayError|SetOverlayRenderModel|VROverlayHandle_t;const char *;const HmdColor_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|GetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t;const HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformCursor|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|GetOverlayTransformCursor|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;const HmdVector2_t *;float|
+EVROverlayError|GetOverlayDualAnalogTransform|VROverlayHandle_t;EDualAnalogWhich;HmdVector2_t *;float *|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|TriggerLaserMouseHapticVibration|VROverlayHandle_t;float;float;float|
+EVROverlayError|SetOverlayCursor|VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|SetOverlayCursorPositionOverride|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|ClearOverlayCursorPositionOverride|VROverlayHandle_t|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;const char *;uint32_t;const char *;bool;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_024 IVROverlay v1.10.30
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayCurvature|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayCurvature|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|GetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t;const HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformCursor|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|GetOverlayTransformCursor|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|TriggerLaserMouseHapticVibration|VROverlayHandle_t;float;float;float|
+EVROverlayError|SetOverlayCursor|VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|SetOverlayCursorPositionOverride|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|ClearOverlayCursorPositionOverride|VROverlayHandle_t|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_025 IVROverlay v1.16.8
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayCurvature|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayCurvature|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|GetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t;const HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformCursor|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|GetOverlayTransformCursor|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayTransformProjection|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *;const VROverlayProjection_t *;EVREye|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|TriggerLaserMouseHapticVibration|VROverlayHandle_t;float;float;float|
+EVROverlayError|SetOverlayCursor|VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|SetOverlayCursorPositionOverride|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|ClearOverlayCursorPositionOverride|VROverlayHandle_t|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_026 IVROverlay v1.23.7
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayCurvature|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayCurvature|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayPreCurvePitch|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayPreCurvePitch|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|GetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformOverlayRelative|VROverlayHandle_t;VROverlayHandle_t;const HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformCursor|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|GetOverlayTransformCursor|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayTransformProjection|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *;const VROverlayProjection_t *;EVREye|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+EVROverlayError|WaitFrameSync|uint32_t|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|TriggerLaserMouseHapticVibration|VROverlayHandle_t;float;float;float|
+EVROverlayError|SetOverlayCursor|VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|SetOverlayCursorPositionOverride|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|ClearOverlayCursorPositionOverride|VROverlayHandle_t|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_027 IVROverlay v1.26.7
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayCurvature|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayCurvature|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayPreCurvePitch|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayPreCurvePitch|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|SetOverlayTransformCursor|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|GetOverlayTransformCursor|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayTransformProjection|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *;const VROverlayProjection_t *;EVREye|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+EVROverlayError|WaitFrameSync|uint32_t|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|TriggerLaserMouseHapticVibration|VROverlayHandle_t;float;float;float|
+EVROverlayError|SetOverlayCursor|VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|SetOverlayCursorPositionOverride|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|ClearOverlayCursorPositionOverride|VROverlayHandle_t|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlay_028 IVROverlay v2.12.1
+EVROverlayError|FindOverlay|const char *;VROverlayHandle_t *|
+EVROverlayError|CreateOverlay|const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|CreateSubviewOverlay|VROverlayHandle_t;const char *;const char *;VROverlayHandle_t *|
+EVROverlayError|DestroyOverlay|VROverlayHandle_t|
+uint32_t|GetOverlayKey|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+uint32_t|GetOverlayName|VROverlayHandle_t;char *;uint32_t;EVROverlayError *|
+EVROverlayError|SetOverlayName|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayImageData|VROverlayHandle_t;void *;uint32_t;uint32_t *;uint32_t *|
+const char *|GetOverlayErrorNameFromEnum|EVROverlayError|
+EVROverlayError|SetOverlayRenderingPid|VROverlayHandle_t;uint32_t|
+uint32_t|GetOverlayRenderingPid|VROverlayHandle_t|
+EVROverlayError|SetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool|
+EVROverlayError|GetOverlayFlag|VROverlayHandle_t;VROverlayFlags;bool *|
+EVROverlayError|GetOverlayFlags|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayColor|VROverlayHandle_t;float;float;float|
+EVROverlayError|GetOverlayColor|VROverlayHandle_t;float *;float *;float *|
+EVROverlayError|SetOverlayAlpha|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayAlpha|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTexelAspect|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayTexelAspect|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlaySortOrder|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetOverlaySortOrder|VROverlayHandle_t;uint32_t *|
+EVROverlayError|SetOverlayWidthInMeters|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayWidthInMeters|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayCurvature|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayCurvature|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayPreCurvePitch|VROverlayHandle_t;float|
+EVROverlayError|GetOverlayPreCurvePitch|VROverlayHandle_t;float *|
+EVROverlayError|SetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace|
+EVROverlayError|GetOverlayTextureColorSpace|VROverlayHandle_t;EColorSpace *|
+EVROverlayError|SetOverlayTextureBounds|VROverlayHandle_t;const VRTextureBounds_t *|
+EVROverlayError|GetOverlayTextureBounds|VROverlayHandle_t;VRTextureBounds_t *|
+EVROverlayError|GetOverlayTransformType|VROverlayHandle_t;VROverlayTransformType *|
+EVROverlayError|SetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformAbsolute|VROverlayHandle_t;ETrackingUniverseOrigin *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t;const HmdMatrix34_t *|
+EVROverlayError|GetOverlayTransformTrackedDeviceRelative|VROverlayHandle_t;TrackedDeviceIndex_t *;HmdMatrix34_t *|
+EVROverlayError|SetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t;const char *|
+EVROverlayError|GetOverlayTransformTrackedDeviceComponent|VROverlayHandle_t;TrackedDeviceIndex_t *;char *;uint32_t|
+EVROverlayError|SetOverlayTransformCursor|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|GetOverlayTransformCursor|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayTransformProjection|VROverlayHandle_t;ETrackingUniverseOrigin;const HmdMatrix34_t *;const VROverlayProjection_t *;EVREye|
+EVROverlayError|SetSubviewPosition|VROverlayHandle_t;float;float|
+EVROverlayError|ShowOverlay|VROverlayHandle_t|
+EVROverlayError|HideOverlay|VROverlayHandle_t|
+bool|IsOverlayVisible|VROverlayHandle_t|
+EVROverlayError|GetTransformForOverlayCoordinates|VROverlayHandle_t;ETrackingUniverseOrigin;HmdVector2_t;HmdMatrix34_t *|
+EVROverlayError|WaitFrameSync|uint32_t|
+bool|PollNextOverlayEvent|VROverlayHandle_t;VREvent_t *;uint32_t|
+EVROverlayError|GetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod *|
+EVROverlayError|SetOverlayInputMethod|VROverlayHandle_t;VROverlayInputMethod|
+EVROverlayError|GetOverlayMouseScale|VROverlayHandle_t;HmdVector2_t *|
+EVROverlayError|SetOverlayMouseScale|VROverlayHandle_t;const HmdVector2_t *|
+bool|ComputeOverlayIntersection|VROverlayHandle_t;const VROverlayIntersectionParams_t *;VROverlayIntersectionResults_t *|
+bool|IsHoverTargetOverlay|VROverlayHandle_t|
+EVROverlayError|SetOverlayIntersectionMask|VROverlayHandle_t;VROverlayIntersectionMaskPrimitive_t *;uint32_t;uint32_t|
+EVROverlayError|TriggerLaserMouseHapticVibration|VROverlayHandle_t;float;float;float|
+EVROverlayError|SetOverlayCursor|VROverlayHandle_t;VROverlayHandle_t|
+EVROverlayError|SetOverlayCursorPositionOverride|VROverlayHandle_t;const HmdVector2_t *|
+EVROverlayError|ClearOverlayCursorPositionOverride|VROverlayHandle_t|
+EVROverlayError|SetOverlayTexture|VROverlayHandle_t;const Texture_t *|
+EVROverlayError|ClearOverlayTexture|VROverlayHandle_t|
+EVROverlayError|SetOverlayRaw|VROverlayHandle_t;void *;uint32_t;uint32_t;uint32_t|
+EVROverlayError|SetOverlayFromFile|VROverlayHandle_t;const char *|
+EVROverlayError|GetOverlayTexture|VROverlayHandle_t;void * *;void *;uint32_t *;uint32_t *;uint32_t *;ETextureType *;EColorSpace *;VRTextureBounds_t *|
+EVROverlayError|ReleaseNativeOverlayHandle|VROverlayHandle_t;void *|
+EVROverlayError|GetOverlayTextureSize|VROverlayHandle_t;uint32_t *;uint32_t *|
+EVROverlayError|CreateDashboardOverlay|const char *;const char *;VROverlayHandle_t *;VROverlayHandle_t *|
+bool|IsDashboardVisible||
+bool|IsActiveDashboardOverlay|VROverlayHandle_t|
+EVROverlayError|SetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t|
+EVROverlayError|GetDashboardOverlaySceneProcess|VROverlayHandle_t;uint32_t *|
+void|ShowDashboard|const char *|
+TrackedDeviceIndex_t|GetPrimaryDashboardDevice||
+EVROverlayError|ShowKeyboard|EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+EVROverlayError|ShowKeyboardForOverlay|VROverlayHandle_t;EGamepadTextInputMode;EGamepadTextInputLineMode;uint32_t;const char *;uint32_t;const char *;uint64_t|
+uint32_t|GetKeyboardText|char *;uint32_t|
+void|HideKeyboard||
+void|SetKeyboardTransformAbsolute|ETrackingUniverseOrigin;const HmdMatrix34_t *|
+void|SetKeyboardPositionForOverlay|VROverlayHandle_t;HmdRect2_t|
+VRMessageOverlayResponse|ShowMessageOverlay|const char *;const char *;const char *;const char *;const char *;const char *|
+void|CloseMessageOverlay||
+@IVROverlayView_003 IVROverlayView v1.10.30
+EVROverlayError|AcquireOverlayView|VROverlayHandle_t;VRNativeDevice_t *;VROverlayView_t *;uint32_t|
+EVROverlayError|ReleaseOverlayView|VROverlayView_t *|
+void|PostOverlayEvent|VROverlayHandle_t;const VREvent_t *|
+bool|IsViewingPermitted|VROverlayHandle_t|
+@IVRRenderModels_005 IVRRenderModels v1.0.10
+EVRRenderModelError|LoadRenderModel_Async|const char *;RenderModel_t * *|
+void|FreeRenderModel|RenderModel_t *|
+EVRRenderModelError|LoadTexture_Async|TextureID_t;RenderModel_TextureMap_t * *|
+void|FreeTexture|RenderModel_TextureMap_t *|
+EVRRenderModelError|LoadTextureD3D11_Async|TextureID_t;void *;void * *|
+EVRRenderModelError|LoadIntoTextureD3D11_Async|TextureID_t;void *|
+void|FreeTextureD3D11|void *|
+uint32_t|GetRenderModelName|uint32_t;char *;uint32_t|
+uint32_t|GetRenderModelCount||
+uint32_t|GetComponentCount|const char *|
+uint32_t|GetComponentName|const char *;uint32_t;char *;uint32_t|
+uint64_t|GetComponentButtonMask|const char *;const char *|
+uint32_t|GetComponentRenderModelName|const char *;const char *;char *;uint32_t|
+bool|GetComponentState|const char *;const char *;const VRControllerState_t *;const RenderModel_ControllerMode_State_t *;RenderModel_ComponentState_t *|
+bool|RenderModelHasComponent|const char *;const char *|
+uint32_t|GetRenderModelThumbnailURL|const char *;char *;uint32_t;EVRRenderModelError *|
+uint32_t|GetRenderModelOriginalPath|const char *;char *;uint32_t;EVRRenderModelError *|
+const char *|GetRenderModelErrorNameFromEnum|EVRRenderModelError|
+@IVRRenderModels_006 IVRRenderModels v1.0.17
+EVRRenderModelError|LoadRenderModel_Async|const char *;RenderModel_t * *|
+void|FreeRenderModel|RenderModel_t *|
+EVRRenderModelError|LoadTexture_Async|TextureID_t;RenderModel_TextureMap_t * *|
+void|FreeTexture|RenderModel_TextureMap_t *|
+EVRRenderModelError|LoadTextureD3D11_Async|TextureID_t;void *;void * *|
+EVRRenderModelError|LoadIntoTextureD3D11_Async|TextureID_t;void *|
+void|FreeTextureD3D11|void *|
+uint32_t|GetRenderModelName|uint32_t;char *;uint32_t|
+uint32_t|GetRenderModelCount||
+uint32_t|GetComponentCount|const char *|
+uint32_t|GetComponentName|const char *;uint32_t;char *;uint32_t|
+uint64_t|GetComponentButtonMask|const char *;const char *|
+uint32_t|GetComponentRenderModelName|const char *;const char *;char *;uint32_t|
+bool|GetComponentStateForDevicePath|const char *;const char *;VRInputValueHandle_t;const RenderModel_ControllerMode_State_t *;RenderModel_ComponentState_t *|
+bool|GetComponentState|const char *;const char *;const VRControllerState_t *;const RenderModel_ControllerMode_State_t *;RenderModel_ComponentState_t *|
+bool|RenderModelHasComponent|const char *;const char *|
+uint32_t|GetRenderModelThumbnailURL|const char *;char *;uint32_t;EVRRenderModelError *|
+uint32_t|GetRenderModelOriginalPath|const char *;char *;uint32_t;EVRRenderModelError *|
+const char *|GetRenderModelErrorNameFromEnum|EVRRenderModelError|
+@IVRScreenshots_001 IVRScreenshots v1.0.10
+EVRScreenshotError|RequestScreenshot|ScreenshotHandle_t *;EVRScreenshotType;const char *;const char *|
+EVRScreenshotError|HookScreenshot|const EVRScreenshotType *;int|
+EVRScreenshotType|GetScreenshotPropertyType|ScreenshotHandle_t;EVRScreenshotError *|
+uint32_t|GetScreenshotPropertyFilename|ScreenshotHandle_t;EVRScreenshotPropertyFilenames;char *;uint32_t;EVRScreenshotError *|
+EVRScreenshotError|UpdateScreenshotProgress|ScreenshotHandle_t;float|
+EVRScreenshotError|TakeStereoScreenshot|ScreenshotHandle_t *;const char *;const char *|
+EVRScreenshotError|SubmitScreenshot|ScreenshotHandle_t;EVRScreenshotType;const char *;const char *|
+@IVRSettings_002 IVRSettings v1.0.10
+const char *|GetSettingsErrorNameFromEnum|EVRSettingsError|
+bool|Sync|bool;EVRSettingsError *|
+void|SetBool|const char *;const char *;bool;EVRSettingsError *|
+void|SetInt32|const char *;const char *;int32_t;EVRSettingsError *|
+void|SetFloat|const char *;const char *;float;EVRSettingsError *|
+void|SetString|const char *;const char *;const char *;EVRSettingsError *|
+bool|GetBool|const char *;const char *;EVRSettingsError *|
+int32_t|GetInt32|const char *;const char *;EVRSettingsError *|
+float|GetFloat|const char *;const char *;EVRSettingsError *|
+void|GetString|const char *;const char *;char *;uint32_t;EVRSettingsError *|
+void|RemoveSection|const char *;EVRSettingsError *|
+void|RemoveKeyInSection|const char *;const char *;EVRSettingsError *|
+@IVRSettings_003 IVRSettings v1.9.16
+const char *|GetSettingsErrorNameFromEnum|EVRSettingsError|
+void|SetBool|const char *;const char *;bool;EVRSettingsError *|
+void|SetInt32|const char *;const char *;int32_t;EVRSettingsError *|
+void|SetFloat|const char *;const char *;float;EVRSettingsError *|
+void|SetString|const char *;const char *;const char *;EVRSettingsError *|
+bool|GetBool|const char *;const char *;EVRSettingsError *|
+int32_t|GetInt32|const char *;const char *;EVRSettingsError *|
+float|GetFloat|const char *;const char *;EVRSettingsError *|
+void|GetString|const char *;const char *;char *;uint32_t;EVRSettingsError *|
+void|RemoveSection|const char *;EVRSettingsError *|
+void|RemoveKeyInSection|const char *;const char *;EVRSettingsError *|
+@IVRSystem_017 IVRSystem v1.0.10
+void|GetRecommendedRenderTargetSize|uint32_t *;uint32_t *|
+HmdMatrix44_t|GetProjectionMatrix|EVREye;float;float|
+void|GetProjectionRaw|EVREye;float *;float *;float *;float *|
+bool|ComputeDistortion|EVREye;float;float;DistortionCoordinates_t *|
+HmdMatrix34_t|GetEyeToHeadTransform|EVREye|
+bool|GetTimeSinceLastVsync|float *;uint64_t *|
+int32_t|GetD3D9AdapterIndex||
+void|GetDXGIOutputInfo|int32_t *|
+void|GetOutputDevice|uint64_t *;ETextureType;VkInstance_T *|
+bool|IsDisplayOnDesktop||
+bool|SetDisplayVisibility|bool|
+void|GetDeviceToAbsoluteTrackingPose|ETrackingUniverseOrigin;float;TrackedDevicePose_t *;uint32_t|
+void|ResetSeatedZeroPose||
+HmdMatrix34_t|GetSeatedZeroPoseToStandingAbsoluteTrackingPose||
+HmdMatrix34_t|GetRawZeroPoseToStandingAbsoluteTrackingPose||
+uint32_t|GetSortedTrackedDeviceIndicesOfClass|ETrackedDeviceClass;TrackedDeviceIndex_t *;uint32_t;TrackedDeviceIndex_t|
+EDeviceActivityLevel|GetTrackedDeviceActivityLevel|TrackedDeviceIndex_t|
+void|ApplyTransform|TrackedDevicePose_t *;const TrackedDevicePose_t *;const HmdMatrix34_t *|
+TrackedDeviceIndex_t|GetTrackedDeviceIndexForControllerRole|ETrackedControllerRole|
+ETrackedControllerRole|GetControllerRoleForTrackedDeviceIndex|TrackedDeviceIndex_t|
+ETrackedDeviceClass|GetTrackedDeviceClass|TrackedDeviceIndex_t|
+bool|IsTrackedDeviceConnected|TrackedDeviceIndex_t|
+bool|GetBoolTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+float|GetFloatTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+int32_t|GetInt32TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint64_t|GetUint64TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+HmdMatrix34_t|GetMatrix34TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint32_t|GetStringTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;char *;uint32_t;ETrackedPropertyError *|
+const char *|GetPropErrorNameFromEnum|ETrackedPropertyError|
+bool|PollNextEvent|VREvent_t *;uint32_t|
+bool|PollNextEventWithPose|ETrackingUniverseOrigin;VREvent_t *;uint32_t;TrackedDevicePose_t *|
+const char *|GetEventTypeNameFromEnum|EVREventType|
+HiddenAreaMesh_t|GetHiddenAreaMesh|EVREye;EHiddenAreaMeshType|
+bool|GetControllerState|TrackedDeviceIndex_t;VRControllerState_t *;uint32_t|
+bool|GetControllerStateWithPose|ETrackingUniverseOrigin;TrackedDeviceIndex_t;VRControllerState_t *;uint32_t;TrackedDevicePose_t *|
+void|TriggerHapticPulse|TrackedDeviceIndex_t;uint32_t;unsigned short|
+const char *|GetButtonIdNameFromEnum|EVRButtonId|
+const char *|GetControllerAxisTypeNameFromEnum|EVRControllerAxisType|
+bool|CaptureInputFocus||
+void|ReleaseInputFocus||
+bool|IsInputFocusCapturedByAnotherProcess||
+uint32_t|DriverDebugRequest|TrackedDeviceIndex_t;const char *;char *;uint32_t|
+EVRFirmwareError|PerformFirmwareUpdate|TrackedDeviceIndex_t|
+void|AcknowledgeQuit_Exiting||
+void|AcknowledgeQuit_UserPrompt||
+@IVRSystem_019 IVRSystem v1.0.17
+void|GetRecommendedRenderTargetSize|uint32_t *;uint32_t *|
+HmdMatrix44_t|GetProjectionMatrix|EVREye;float;float|
+void|GetProjectionRaw|EVREye;float *;float *;float *;float *|
+bool|ComputeDistortion|EVREye;float;float;DistortionCoordinates_t *|
+HmdMatrix34_t|GetEyeToHeadTransform|EVREye|
+bool|GetTimeSinceLastVsync|float *;uint64_t *|
+int32_t|GetD3D9AdapterIndex||
+void|GetDXGIOutputInfo|int32_t *|
+void|GetOutputDevice|uint64_t *;ETextureType;VkInstance_T *|
+bool|IsDisplayOnDesktop||
+bool|SetDisplayVisibility|bool|
+void|GetDeviceToAbsoluteTrackingPose|ETrackingUniverseOrigin;float;TrackedDevicePose_t *;uint32_t|
+void|ResetSeatedZeroPose||
+HmdMatrix34_t|GetSeatedZeroPoseToStandingAbsoluteTrackingPose||
+HmdMatrix34_t|GetRawZeroPoseToStandingAbsoluteTrackingPose||
+uint32_t|GetSortedTrackedDeviceIndicesOfClass|ETrackedDeviceClass;TrackedDeviceIndex_t *;uint32_t;TrackedDeviceIndex_t|
+EDeviceActivityLevel|GetTrackedDeviceActivityLevel|TrackedDeviceIndex_t|
+void|ApplyTransform|TrackedDevicePose_t *;const TrackedDevicePose_t *;const HmdMatrix34_t *|
+TrackedDeviceIndex_t|GetTrackedDeviceIndexForControllerRole|ETrackedControllerRole|
+ETrackedControllerRole|GetControllerRoleForTrackedDeviceIndex|TrackedDeviceIndex_t|
+ETrackedDeviceClass|GetTrackedDeviceClass|TrackedDeviceIndex_t|
+bool|IsTrackedDeviceConnected|TrackedDeviceIndex_t|
+bool|GetBoolTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+float|GetFloatTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+int32_t|GetInt32TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint64_t|GetUint64TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+HmdMatrix34_t|GetMatrix34TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint32_t|GetArrayTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;PropertyTypeTag_t;void *;uint32_t;ETrackedPropertyError *|
+uint32_t|GetStringTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;char *;uint32_t;ETrackedPropertyError *|
+const char *|GetPropErrorNameFromEnum|ETrackedPropertyError|
+bool|PollNextEvent|VREvent_t *;uint32_t|
+bool|PollNextEventWithPose|ETrackingUniverseOrigin;VREvent_t *;uint32_t;TrackedDevicePose_t *|
+const char *|GetEventTypeNameFromEnum|EVREventType|
+HiddenAreaMesh_t|GetHiddenAreaMesh|EVREye;EHiddenAreaMeshType|
+bool|GetControllerState|TrackedDeviceIndex_t;VRControllerState_t *;uint32_t|
+bool|GetControllerStateWithPose|ETrackingUniverseOrigin;TrackedDeviceIndex_t;VRControllerState_t *;uint32_t;TrackedDevicePose_t *|
+void|TriggerHapticPulse|TrackedDeviceIndex_t;uint32_t;unsigned short|
+const char *|GetButtonIdNameFromEnum|EVRButtonId|
+const char *|GetControllerAxisTypeNameFromEnum|EVRControllerAxisType|
+bool|IsInputAvailable||
+bool|IsSteamVRDrawingControllers||
+bool|ShouldApplicationPause||
+bool|ShouldApplicationReduceRenderingWork||
+uint32_t|DriverDebugRequest|TrackedDeviceIndex_t;const char *;char *;uint32_t|
+EVRFirmwareError|PerformFirmwareUpdate|TrackedDeviceIndex_t|
+void|AcknowledgeQuit_Exiting||
+void|AcknowledgeQuit_UserPrompt||
+@IVRSystem_020 IVRSystem v1.5.17
+void|GetRecommendedRenderTargetSize|uint32_t *;uint32_t *|
+HmdMatrix44_t|GetProjectionMatrix|EVREye;float;float|
+void|GetProjectionRaw|EVREye;float *;float *;float *;float *|
+bool|ComputeDistortion|EVREye;float;float;DistortionCoordinates_t *|
+HmdMatrix34_t|GetEyeToHeadTransform|EVREye|
+bool|GetTimeSinceLastVsync|float *;uint64_t *|
+int32_t|GetD3D9AdapterIndex||
+void|GetDXGIOutputInfo|int32_t *|
+void|GetOutputDevice|uint64_t *;ETextureType;VkInstance_T *|
+bool|IsDisplayOnDesktop||
+bool|SetDisplayVisibility|bool|
+void|GetDeviceToAbsoluteTrackingPose|ETrackingUniverseOrigin;float;TrackedDevicePose_t *;uint32_t|
+void|ResetSeatedZeroPose||
+HmdMatrix34_t|GetSeatedZeroPoseToStandingAbsoluteTrackingPose||
+HmdMatrix34_t|GetRawZeroPoseToStandingAbsoluteTrackingPose||
+uint32_t|GetSortedTrackedDeviceIndicesOfClass|ETrackedDeviceClass;TrackedDeviceIndex_t *;uint32_t;TrackedDeviceIndex_t|
+EDeviceActivityLevel|GetTrackedDeviceActivityLevel|TrackedDeviceIndex_t|
+void|ApplyTransform|TrackedDevicePose_t *;const TrackedDevicePose_t *;const HmdMatrix34_t *|
+TrackedDeviceIndex_t|GetTrackedDeviceIndexForControllerRole|ETrackedControllerRole|
+ETrackedControllerRole|GetControllerRoleForTrackedDeviceIndex|TrackedDeviceIndex_t|
+ETrackedDeviceClass|GetTrackedDeviceClass|TrackedDeviceIndex_t|
+bool|IsTrackedDeviceConnected|TrackedDeviceIndex_t|
+bool|GetBoolTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+float|GetFloatTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+int32_t|GetInt32TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint64_t|GetUint64TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+HmdMatrix34_t|GetMatrix34TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint32_t|GetArrayTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;PropertyTypeTag_t;void *;uint32_t;ETrackedPropertyError *|
+uint32_t|GetStringTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;char *;uint32_t;ETrackedPropertyError *|
+const char *|GetPropErrorNameFromEnum|ETrackedPropertyError|
+bool|PollNextEvent|VREvent_t *;uint32_t|
+bool|PollNextEventWithPose|ETrackingUniverseOrigin;VREvent_t *;uint32_t;TrackedDevicePose_t *|
+const char *|GetEventTypeNameFromEnum|EVREventType|
+HiddenAreaMesh_t|GetHiddenAreaMesh|EVREye;EHiddenAreaMeshType|
+bool|GetControllerState|TrackedDeviceIndex_t;VRControllerState_t *;uint32_t|
+bool|GetControllerStateWithPose|ETrackingUniverseOrigin;TrackedDeviceIndex_t;VRControllerState_t *;uint32_t;TrackedDevicePose_t *|
+void|TriggerHapticPulse|TrackedDeviceIndex_t;uint32_t;unsigned short|
+const char *|GetButtonIdNameFromEnum|EVRButtonId|
+const char *|GetControllerAxisTypeNameFromEnum|EVRControllerAxisType|
+bool|IsInputAvailable||
+bool|IsSteamVRDrawingControllers||
+bool|ShouldApplicationPause||
+bool|ShouldApplicationReduceRenderingWork||
+EVRFirmwareError|PerformFirmwareUpdate|TrackedDeviceIndex_t|
+void|AcknowledgeQuit_Exiting||
+void|AcknowledgeQuit_UserPrompt||
+@IVRSystem_021 IVRSystem v1.8.19
+void|GetRecommendedRenderTargetSize|uint32_t *;uint32_t *|
+HmdMatrix44_t|GetProjectionMatrix|EVREye;float;float|
+void|GetProjectionRaw|EVREye;float *;float *;float *;float *|
+bool|ComputeDistortion|EVREye;float;float;DistortionCoordinates_t *|
+HmdMatrix34_t|GetEyeToHeadTransform|EVREye|
+bool|GetTimeSinceLastVsync|float *;uint64_t *|
+int32_t|GetD3D9AdapterIndex||
+void|GetDXGIOutputInfo|int32_t *|
+void|GetOutputDevice|uint64_t *;ETextureType;VkInstance_T *|
+bool|IsDisplayOnDesktop||
+bool|SetDisplayVisibility|bool|
+void|GetDeviceToAbsoluteTrackingPose|ETrackingUniverseOrigin;float;TrackedDevicePose_t *;uint32_t|
+void|ResetSeatedZeroPose||
+HmdMatrix34_t|GetSeatedZeroPoseToStandingAbsoluteTrackingPose||
+HmdMatrix34_t|GetRawZeroPoseToStandingAbsoluteTrackingPose||
+uint32_t|GetSortedTrackedDeviceIndicesOfClass|ETrackedDeviceClass;TrackedDeviceIndex_t *;uint32_t;TrackedDeviceIndex_t|
+EDeviceActivityLevel|GetTrackedDeviceActivityLevel|TrackedDeviceIndex_t|
+void|ApplyTransform|TrackedDevicePose_t *;const TrackedDevicePose_t *;const HmdMatrix34_t *|
+TrackedDeviceIndex_t|GetTrackedDeviceIndexForControllerRole|ETrackedControllerRole|
+ETrackedControllerRole|GetControllerRoleForTrackedDeviceIndex|TrackedDeviceIndex_t|
+ETrackedDeviceClass|GetTrackedDeviceClass|TrackedDeviceIndex_t|
+bool|IsTrackedDeviceConnected|TrackedDeviceIndex_t|
+bool|GetBoolTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+float|GetFloatTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+int32_t|GetInt32TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint64_t|GetUint64TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+HmdMatrix34_t|GetMatrix34TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint32_t|GetArrayTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;PropertyTypeTag_t;void *;uint32_t;ETrackedPropertyError *|
+uint32_t|GetStringTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;char *;uint32_t;ETrackedPropertyError *|
+const char *|GetPropErrorNameFromEnum|ETrackedPropertyError|
+bool|PollNextEvent|VREvent_t *;uint32_t|
+bool|PollNextEventWithPose|ETrackingUniverseOrigin;VREvent_t *;uint32_t;TrackedDevicePose_t *|
+const char *|GetEventTypeNameFromEnum|EVREventType|
+HiddenAreaMesh_t|GetHiddenAreaMesh|EVREye;EHiddenAreaMeshType|
+bool|GetControllerState|TrackedDeviceIndex_t;VRControllerState_t *;uint32_t|
+bool|GetControllerStateWithPose|ETrackingUniverseOrigin;TrackedDeviceIndex_t;VRControllerState_t *;uint32_t;TrackedDevicePose_t *|
+void|TriggerHapticPulse|TrackedDeviceIndex_t;uint32_t;unsigned short|
+const char *|GetButtonIdNameFromEnum|EVRButtonId|
+const char *|GetControllerAxisTypeNameFromEnum|EVRControllerAxisType|
+bool|IsInputAvailable||
+bool|IsSteamVRDrawingControllers||
+bool|ShouldApplicationPause||
+bool|ShouldApplicationReduceRenderingWork||
+EVRFirmwareError|PerformFirmwareUpdate|TrackedDeviceIndex_t|
+void|AcknowledgeQuit_Exiting||
+uint32_t|GetAppContainerFilePaths|char *;uint32_t|
+const char *|GetRuntimeVersion||
+@IVRSystem_022 IVRSystem v1.14.15
+void|GetRecommendedRenderTargetSize|uint32_t *;uint32_t *|
+HmdMatrix44_t|GetProjectionMatrix|EVREye;float;float|
+void|GetProjectionRaw|EVREye;float *;float *;float *;float *|
+bool|ComputeDistortion|EVREye;float;float;DistortionCoordinates_t *|
+HmdMatrix34_t|GetEyeToHeadTransform|EVREye|
+bool|GetTimeSinceLastVsync|float *;uint64_t *|
+int32_t|GetD3D9AdapterIndex||
+void|GetDXGIOutputInfo|int32_t *|
+void|GetOutputDevice|uint64_t *;ETextureType;VkInstance_T *|
+bool|IsDisplayOnDesktop||
+bool|SetDisplayVisibility|bool|
+void|GetDeviceToAbsoluteTrackingPose|ETrackingUniverseOrigin;float;TrackedDevicePose_t *;uint32_t|
+HmdMatrix34_t|GetSeatedZeroPoseToStandingAbsoluteTrackingPose||
+HmdMatrix34_t|GetRawZeroPoseToStandingAbsoluteTrackingPose||
+uint32_t|GetSortedTrackedDeviceIndicesOfClass|ETrackedDeviceClass;TrackedDeviceIndex_t *;uint32_t;TrackedDeviceIndex_t|
+EDeviceActivityLevel|GetTrackedDeviceActivityLevel|TrackedDeviceIndex_t|
+void|ApplyTransform|TrackedDevicePose_t *;const TrackedDevicePose_t *;const HmdMatrix34_t *|
+TrackedDeviceIndex_t|GetTrackedDeviceIndexForControllerRole|ETrackedControllerRole|
+ETrackedControllerRole|GetControllerRoleForTrackedDeviceIndex|TrackedDeviceIndex_t|
+ETrackedDeviceClass|GetTrackedDeviceClass|TrackedDeviceIndex_t|
+bool|IsTrackedDeviceConnected|TrackedDeviceIndex_t|
+bool|GetBoolTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+float|GetFloatTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+int32_t|GetInt32TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint64_t|GetUint64TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+HmdMatrix34_t|GetMatrix34TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint32_t|GetArrayTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;PropertyTypeTag_t;void *;uint32_t;ETrackedPropertyError *|
+uint32_t|GetStringTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;char *;uint32_t;ETrackedPropertyError *|
+const char *|GetPropErrorNameFromEnum|ETrackedPropertyError|
+bool|PollNextEvent|VREvent_t *;uint32_t|
+bool|PollNextEventWithPose|ETrackingUniverseOrigin;VREvent_t *;uint32_t;TrackedDevicePose_t *|
+const char *|GetEventTypeNameFromEnum|EVREventType|
+HiddenAreaMesh_t|GetHiddenAreaMesh|EVREye;EHiddenAreaMeshType|
+bool|GetControllerState|TrackedDeviceIndex_t;VRControllerState_t *;uint32_t|
+bool|GetControllerStateWithPose|ETrackingUniverseOrigin;TrackedDeviceIndex_t;VRControllerState_t *;uint32_t;TrackedDevicePose_t *|
+void|TriggerHapticPulse|TrackedDeviceIndex_t;uint32_t;unsigned short|
+const char *|GetButtonIdNameFromEnum|EVRButtonId|
+const char *|GetControllerAxisTypeNameFromEnum|EVRControllerAxisType|
+bool|IsInputAvailable||
+bool|IsSteamVRDrawingControllers||
+bool|ShouldApplicationPause||
+bool|ShouldApplicationReduceRenderingWork||
+EVRFirmwareError|PerformFirmwareUpdate|TrackedDeviceIndex_t|
+void|AcknowledgeQuit_Exiting||
+uint32_t|GetAppContainerFilePaths|char *;uint32_t|
+const char *|GetRuntimeVersion||
+@IVRSystem_023 IVRSystem v2.12.1
+void|GetRecommendedRenderTargetSize|uint32_t *;uint32_t *|
+HmdMatrix44_t|GetProjectionMatrix|EVREye;float;float|
+void|GetProjectionRaw|EVREye;float *;float *;float *;float *|
+bool|ComputeDistortion|EVREye;float;float;DistortionCoordinates_t *|
+HmdMatrix34_t|GetEyeToHeadTransform|EVREye|
+bool|GetTimeSinceLastVsync|float *;uint64_t *|
+int32_t|GetD3D9AdapterIndex||
+void|GetDXGIOutputInfo|int32_t *|
+void|GetOutputDevice|uint64_t *;ETextureType;VkInstance_T *|
+bool|IsDisplayOnDesktop||
+bool|SetDisplayVisibility|bool|
+void|GetDeviceToAbsoluteTrackingPose|ETrackingUniverseOrigin;float;TrackedDevicePose_t *;uint32_t|
+HmdMatrix34_t|GetSeatedZeroPoseToStandingAbsoluteTrackingPose||
+HmdMatrix34_t|GetRawZeroPoseToStandingAbsoluteTrackingPose||
+uint32_t|GetSortedTrackedDeviceIndicesOfClass|ETrackedDeviceClass;TrackedDeviceIndex_t *;uint32_t;TrackedDeviceIndex_t|
+EDeviceActivityLevel|GetTrackedDeviceActivityLevel|TrackedDeviceIndex_t|
+void|ApplyTransform|TrackedDevicePose_t *;const TrackedDevicePose_t *;const HmdMatrix34_t *|
+TrackedDeviceIndex_t|GetTrackedDeviceIndexForControllerRole|ETrackedControllerRole|
+ETrackedControllerRole|GetControllerRoleForTrackedDeviceIndex|TrackedDeviceIndex_t|
+ETrackedDeviceClass|GetTrackedDeviceClass|TrackedDeviceIndex_t|
+bool|IsTrackedDeviceConnected|TrackedDeviceIndex_t|
+bool|GetBoolTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+float|GetFloatTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+int32_t|GetInt32TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint64_t|GetUint64TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+HmdMatrix34_t|GetMatrix34TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint32_t|GetArrayTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;PropertyTypeTag_t;void *;uint32_t;ETrackedPropertyError *|
+uint32_t|GetStringTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;char *;uint32_t;ETrackedPropertyError *|
+const char *|GetPropErrorNameFromEnum|ETrackedPropertyError|
+bool|PollNextEvent|VREvent_t *;uint32_t|
+bool|PollNextEventWithPose|ETrackingUniverseOrigin;VREvent_t *;uint32_t;TrackedDevicePose_t *|
+bool|PollNextEventWithPoseAndOverlays|ETrackingUniverseOrigin;VREvent_t *;uint32_t;TrackedDevicePose_t *;VROverlayHandle_t *|
+const char *|GetEventTypeNameFromEnum|EVREventType|
+HiddenAreaMesh_t|GetHiddenAreaMesh|EVREye;EHiddenAreaMeshType|
+bool|GetControllerState|TrackedDeviceIndex_t;VRControllerState_t *;uint32_t|
+bool|GetControllerStateWithPose|ETrackingUniverseOrigin;TrackedDeviceIndex_t;VRControllerState_t *;uint32_t;TrackedDevicePose_t *|
+void|TriggerHapticPulse|TrackedDeviceIndex_t;uint32_t;unsigned short|
+const char *|GetButtonIdNameFromEnum|EVRButtonId|
+const char *|GetControllerAxisTypeNameFromEnum|EVRControllerAxisType|
+bool|IsInputAvailable||
+bool|IsSteamVRDrawingControllers||
+bool|ShouldApplicationPause||
+bool|ShouldApplicationReduceRenderingWork||
+EVRFirmwareError|PerformFirmwareUpdate|TrackedDeviceIndex_t|
+void|AcknowledgeQuit_Exiting||
+uint32_t|GetAppContainerFilePaths|char *;uint32_t|
+const char *|GetRuntimeVersion||
+@IVRSystem_026 IVRSystem v2.15.6
+void|GetRecommendedRenderTargetSize|uint32_t *;uint32_t *|
+HmdMatrix44_t|GetProjectionMatrix|EVREye;float;float|
+void|GetProjectionRaw|EVREye;float *;float *;float *;float *|
+bool|ComputeDistortion|EVREye;float;float;DistortionCoordinates_t *|
+bool|ComputeDistortionSet|EVREye;EVRDistortionChannel;bool;uint32_t;const DistortionCoordinate_t *;DistortionCoordinate_t *|
+HmdMatrix34_t|GetEyeToHeadTransform|EVREye|
+bool|GetTimeSinceLastVsync|float *;uint64_t *|
+int32_t|GetD3D9AdapterIndex||
+void|GetDXGIOutputInfo|int32_t *|
+void|GetOutputDevice|uint64_t *;ETextureType;VkInstance_T *|
+bool|IsDisplayOnDesktop||
+bool|SetDisplayVisibility|bool|
+void|GetDeviceToAbsoluteTrackingPose|ETrackingUniverseOrigin;float;TrackedDevicePose_t *;uint32_t|
+HmdMatrix34_t|GetSeatedZeroPoseToStandingAbsoluteTrackingPose||
+HmdMatrix34_t|GetRawZeroPoseToStandingAbsoluteTrackingPose||
+uint32_t|GetSortedTrackedDeviceIndicesOfClass|ETrackedDeviceClass;TrackedDeviceIndex_t *;uint32_t;TrackedDeviceIndex_t|
+EDeviceActivityLevel|GetTrackedDeviceActivityLevel|TrackedDeviceIndex_t|
+void|ApplyTransform|TrackedDevicePose_t *;const TrackedDevicePose_t *;const HmdMatrix34_t *|
+TrackedDeviceIndex_t|GetTrackedDeviceIndexForControllerRole|ETrackedControllerRole|
+ETrackedControllerRole|GetControllerRoleForTrackedDeviceIndex|TrackedDeviceIndex_t|
+ETrackedDeviceClass|GetTrackedDeviceClass|TrackedDeviceIndex_t|
+bool|IsTrackedDeviceConnected|TrackedDeviceIndex_t|
+bool|GetBoolTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+float|GetFloatTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+int32_t|GetInt32TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint64_t|GetUint64TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+HmdMatrix34_t|GetMatrix34TrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;ETrackedPropertyError *|
+uint32_t|GetArrayTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;PropertyTypeTag_t;void *;uint32_t;ETrackedPropertyError *|
+uint32_t|GetStringTrackedDeviceProperty|TrackedDeviceIndex_t;ETrackedDeviceProperty;char *;uint32_t;ETrackedPropertyError *|
+const char *|GetPropErrorNameFromEnum|ETrackedPropertyError|
+bool|PollNextEvent|VREvent_t *;uint32_t|
+bool|PollNextEventWithPose|ETrackingUniverseOrigin;VREvent_t *;uint32_t;TrackedDevicePose_t *|
+bool|PollNextEventWithPoseAndOverlays|ETrackingUniverseOrigin;VREvent_t *;uint32_t;TrackedDevicePose_t *;VROverlayHandle_t *|
+const char *|GetEventTypeNameFromEnum|EVREventType|
+HiddenAreaMesh_t|GetHiddenAreaMesh|EVREye;EHiddenAreaMeshType|
+bool|GetEyeTrackedFoveationCenter|HmdVector2_t *;HmdVector2_t *|
+bool|GetEyeTrackedFoveationCenterForProjection|const HmdMatrix44_t *;HmdVector2_t *|
+bool|GetControllerState|TrackedDeviceIndex_t;VRControllerState_t *;uint32_t|
+bool|GetControllerStateWithPose|ETrackingUniverseOrigin;TrackedDeviceIndex_t;VRControllerState_t *;uint32_t;TrackedDevicePose_t *|
+void|TriggerHapticPulse|TrackedDeviceIndex_t;uint32_t;unsigned short|
+const char *|GetButtonIdNameFromEnum|EVRButtonId|
+const char *|GetControllerAxisTypeNameFromEnum|EVRControllerAxisType|
+bool|IsInputAvailable||
+bool|IsSteamVRDrawingControllers||
+bool|ShouldApplicationPause||
+bool|ShouldApplicationReduceRenderingWork||
+EVRFirmwareError|PerformFirmwareUpdate|TrackedDeviceIndex_t|
+void|AcknowledgeQuit_Exiting||
+uint32_t|GetAppContainerFilePaths|char *;uint32_t|
+const char *|GetRuntimeVersion||
+EVRInitError|SetSDKVersion|uint32_t;uint32_t;uint32_t|

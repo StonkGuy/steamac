@@ -1,4 +1,5 @@
-# steamac: the guest's gamepad. The launcher reads the Mac's controller and
+# steamac: the guest's gamepad (player 1's; fx-pad@.service has the further
+# players'). The launcher reads the Mac's controller and
 # drives this service over the virtio-console port fx.pad; the service owns the
 # pad as a uinput device (identity and capabilities of the real controller's
 # kernel driver, created and removed as controllers come and go) and sends the

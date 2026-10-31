@@ -5,7 +5,47 @@
 //! whose AppState "name" key is the display name. Both files are Valve KeyValues
 //! text; only quoted tokens matter here, so a tiny tokenizer is enough.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+
+use crate::port::Port;
+
+/// Shared by focus and scope tracking: report a game's name at most once per
+/// boot, including across agent/session restarts. Missing manifests are retried.
+pub struct Names {
+    steam_root: PathBuf,
+    marker: PathBuf,
+    named: HashSet<u32>,
+}
+
+impl Names {
+    pub fn new(steam_root: PathBuf, marker: PathBuf) -> Names {
+        let named = std::fs::read_to_string(&marker).ok().map(|text| {
+            let mut lines = text.lines();
+            if lines.next().map(str::trim) == Some(crate::boot_id().as_str()) {
+                lines.filter_map(|line| line.trim().parse().ok()).collect()
+            } else {
+                HashSet::new()
+            }
+        }).unwrap_or_default();
+        Names { steam_root, marker, named }
+    }
+
+    pub fn report(&mut self, appid: u32, port: &mut Port) {
+        if self.named.contains(&appid) {
+            return;
+        }
+        if let Some(name) = lookup(&self.steam_root, appid) {
+            port.send(&format!("game {appid} {name}"));
+            self.named.insert(appid);
+            let mut marker = crate::boot_id();
+            for id in &self.named {
+                marker.push_str(&format!("\n{id}"));
+            }
+            let _ = std::fs::write(&self.marker, marker);
+        }
+    }
+}
 
 /// Quoted tokens of a KeyValues text, with \" \\ \n \t unescaped.
 fn tokens(text: &str) -> Vec<String> {
@@ -39,7 +79,15 @@ fn first_value(text: &str, key: &str) -> Option<String> {
     t.windows(2).find(|w| w[0].eq_ignore_ascii_case(key)).map(|w| w[1].clone())
 }
 
-fn library_dirs(steam_root: &PathBuf) -> Vec<PathBuf> {
+/// Steam's default library; shared by manifest and Proton prefix lookups.
+pub(crate) fn steam_root() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/steamos".into());
+    std::env::var("FX_PROGRESS_STEAM_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(format!("{home}/.local/share/Steam")))
+}
+
+pub(crate) fn library_dirs(steam_root: &PathBuf) -> Vec<PathBuf> {
     let mut dirs = vec![steam_root.clone()];
     if let Ok(vdf) = std::fs::read_to_string(steam_root.join("steamapps/libraryfolders.vdf")) {
         let t = tokens(&vdf);
@@ -57,12 +105,53 @@ fn library_dirs(steam_root: &PathBuf) -> Vec<PathBuf> {
 
 /// Display name of `appid` from the first library that has its manifest,
 /// sanitised to one line of printable text; None if not installed/unknown.
-pub fn lookup(appid: u32) -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/steamos".into());
-    let root = std::env::var("FX_PROGRESS_STEAM_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(format!("{home}/.local/share/Steam")));
-    for dir in library_dirs(&root) {
+/// Known VR titles (installed copies are listed even without a .vrmanifest).
+const KNOWN_VR: &[u32] = &[438100 /* VRChat */];
+/// VR companions/tools, not games: never offered as a game to launch.
+const NOT_GAMES: &[u32] = &[2370570 /* Standable */, 250820 /* SteamVR */, 228980 /* Steamworks Common Redistributables */];
+
+/// Installed, fully-downloaded VR apps across all library folders: known VR
+/// ids, plus any app whose install dir has a top-level `*.vrmanifest`
+/// (the OpenVR app manifest VR titles ship). Sorted, deduplicated.
+pub fn vr_apps_in(root: &PathBuf) -> Vec<u32> {
+    let mut out = Vec::new();
+    for dir in library_dirs(root) {
+        let apps = dir.join("steamapps");
+        let Ok(rd) = std::fs::read_dir(&apps) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(id) = name.strip_prefix("appmanifest_").and_then(|n| n.strip_suffix(".acf")).and_then(|n| n.parse::<u32>().ok()) else { continue };
+            if NOT_GAMES.contains(&id) || out.contains(&id) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+            // StateFlags 4 = fully installed.
+            if first_value(&text, "StateFlags").and_then(|v| v.parse::<u32>().ok()).map_or(true, |f| f & 4 == 0) {
+                continue;
+            }
+            let vr = KNOWN_VR.contains(&id)
+                || first_value(&text, "installdir").is_some_and(|d| {
+                    std::fs::read_dir(apps.join("common").join(d)).map_or(false, |rd| {
+                        rd.flatten().any(|f| f.file_name().to_string_lossy().ends_with(".vrmanifest"))
+                    })
+                });
+            if vr {
+                out.push(id);
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// `vr-apps <id> ...` reply line for the host (`vr-apps` alone when none).
+pub fn vr_apps_line() -> String {
+    let ids = vr_apps_in(&steam_root());
+    std::iter::once("vr-apps".to_string()).chain(ids.iter().map(|i| i.to_string())).collect::<Vec<_>>().join(" ")
+}
+
+fn lookup(root: &PathBuf, appid: u32) -> Option<String> {
+    for dir in library_dirs(root) {
         let acf = dir.join(format!("steamapps/appmanifest_{appid}.acf"));
         let Ok(text) = std::fs::read_to_string(&acf) else { continue };
         if let Some(name) = first_value(&text, "name") {
@@ -97,5 +186,29 @@ mod tests {
         let t = tokens(vdf);
         let paths: Vec<_> = t.windows(2).filter(|w| w[0] == "path").map(|w| w[1].clone()).collect();
         assert_eq!(paths, vec!["/home/steamos/.local/share/Steam", "/run/media/sd"]);
+    }
+
+    #[test]
+    fn vr_apps_fixture() {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/vrlib");
+        let tmp = std::env::temp_dir().join(format!("fx-vrlib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Library 0 = root; libraryfolders.vdf points at library 1 (path rewritten to tmp).
+        let copy = |from: &str, to: PathBuf| {
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(base.join(from), to).unwrap();
+        };
+        let root = tmp.join("root");
+        let lib1 = tmp.join("lib1");
+        let vdf = std::fs::read_to_string(base.join("libraryfolders.vdf")).unwrap().replace("@LIB1@", lib1.to_str().unwrap());
+        std::fs::create_dir_all(root.join("steamapps")).unwrap();
+        std::fs::write(root.join("steamapps/libraryfolders.vdf"), vdf).unwrap();
+        for f in ["appmanifest_438100.acf", "appmanifest_2370570.acf", "appmanifest_570.acf", "appmanifest_999.acf"] {
+            copy(f, root.join("steamapps").join(f));
+        }
+        copy("appmanifest_1000.acf", lib1.join("steamapps/appmanifest_1000.acf"));
+        copy("bench.vrmanifest", lib1.join("steamapps/common/Bench VR/bench.vrmanifest"));
+        assert_eq!(vr_apps_in(&root), vec![1000, 438100]);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

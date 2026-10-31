@@ -1,0 +1,27 @@
+#version 460
+// dd2_atomic64_fetch.comp through a buffer device address instead of a descriptor: physical
+// pointer access has no bounds-check `if` around the atomic, so the returned value is the plain
+// predeclared tN of nir_to_msl (a declaration inside the `if` shadowed it for the descriptor form
+// and only failed to compile here: "redefinition of 'tN'"). One invocation, exact results.
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_EXT_buffer_reference : require
+
+layout(local_size_x = 1) in;
+
+layout(buffer_reference, std430) buffer Cells {
+	uint64_t umax_val;
+	uint64_t umax_old;
+	uint64_t umin_val;
+	uint64_t umin_old;
+};
+
+layout(push_constant) uniform pc_t {
+	Cells cells;
+};
+
+void main()
+{
+	cells.umax_old = atomicMax(cells.umax_val, 0xfeedfacecafebeefUL);
+	cells.umin_old = atomicMin(cells.umin_val, 0x123456789abcdef0UL);
+}

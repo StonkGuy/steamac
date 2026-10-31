@@ -28,6 +28,31 @@ final class StallMonitor {
     static let tick: TimeInterval = 0.25
     static let perfPeriod: TimeInterval = 5
 
+    struct Diagnostic {
+        let idle: TimeInterval
+        let heartbeatAge: TimeInterval
+        let history: String
+    }
+
+    private struct Reading {
+        let at: CFTimeInterval
+        let counters: Counters?
+        let heartbeatAge: TimeInterval?
+        let uptimeMs: Int
+        let load: Double
+        let cpu: Double
+        let pollGap: TimeInterval
+        let game: Bool
+        let gate: Bool
+    }
+    // Independent of Settings > Performance statistics: reports otherwise had only the first
+    // 2 s of GPU idleness and could not distinguish agent loss, host scheduling and GPU stalls.
+    private var readings: [Reading] = []
+    private var nextReading = 0
+    private var lastReading: CFTimeInterval = 0
+    private var lastPoll: CFTimeInterval = 0
+    private var guestUptimeMs = 0
+
     let view: StallIndicatorView
     /// nil = no counters (VM not running, no GPU): never shows.
     private let sample: () -> Counters?
@@ -48,6 +73,7 @@ final class StallMonitor {
     private var cpuSamples: [(CFTimeInterval, Double)] = []
     private var shownSince: (idleStart: CFTimeInterval, cpu: Double)?
     private var notRespondingReported = false
+    private var longStallLogged = false
     // perf stats window
     private var perfStart: CFTimeInterval = 0
     private var perfCounters: Counters?
@@ -63,13 +89,14 @@ final class StallMonitor {
     var paused = false { didSet { if paused != oldValue { gateChanged() } } }
     /// The indicator is up (or about to fade in).
     var indicatorShown: Bool { shownSince != nil }
-    /// Once per indicator stretch, when its wording turns to "SteamOS is not responding…"
-    /// (argument: GPU idle seconds so far).
-    var onNotResponding: ((TimeInterval) -> Void)?
+    /// Once per indicator stretch, when its wording turns to "SteamOS is not responding…".
+    /// Recent counter/heartbeat samples accompany the report even when perf stats are off.
+    var onNotResponding: ((Diagnostic) -> Void)?
 
     init(view: StallIndicatorView, sample: @escaping () -> Counters?) {
         self.view = view
         self.sample = sample
+        readings.reserveCapacity(32)
     }
 
     func start() {
@@ -109,6 +136,7 @@ final class StallMonitor {
         gateOpenedAt = now
         if lastAlive > 0 { lastAlive = now }
         counters = nil
+        lastPoll = now
         start()
     }
 
@@ -116,6 +144,7 @@ final class StallMonitor {
     func alive(uptimeMs: Int, load: Double) {
         lastAlive = CACurrentMediaTime()
         guestLoad = load
+        guestUptimeMs = uptimeMs
     }
 
     /// The agent ended with the gamescope session (bare `focus desktop`: Switch to Desktop, Return
@@ -143,6 +172,7 @@ final class StallMonitor {
         let now = CACurrentMediaTime()
         let c = sample()
         let active: Bool
+        noteReading(now: now, counters: c)
         if let c, let prev = counters { active = c != prev } else { active = false }
         if let c { counters = c }
         perfNote(now: now, counters: c, active: active)
@@ -181,7 +211,14 @@ final class StallMonitor {
         if !notRespondingReported && dead {
             notRespondingReported = true
             log("stall: guest not responding (no heartbeat for \(Int(heartbeatAge ?? 0)) s, gpu idle \(Int(now - lastActivity)) s)")
-            onNotResponding?(now - lastActivity)
+            onNotResponding?(Diagnostic(idle: now - lastActivity, heartbeatAge: heartbeatAge ?? 0,
+                                       history: diagnosticHistory(now: now)))
+        }
+        if !longStallLogged && now - max(lastActivity, gateOpenedAt) >= 10 {
+            longStallLogged = true
+            for line in diagnosticHistory(now: now).split(separator: "\n") {
+                log("stall: history \(line)")
+            }
         }
     }
 
@@ -189,6 +226,7 @@ final class StallMonitor {
         guard let since = shownSince else { return }
         shownSince = nil
         notRespondingReported = false
+        longStallLogged = false
         let duration = now - since.idleStart
         let cpu = duration > 0 ? (StallMonitor.cpuSeconds() - since.cpu) / duration : 0
         log("stall: gpu idle \(String(format: "%.1f", duration)) s (\(status(now, cpu: cpu)))"
@@ -252,6 +290,37 @@ final class StallMonitor {
         return dt > 0 ? max(0, (StallMonitor.cpuSeconds() - since.cpu) / dt) : 0
     }
 
+    // MARK: stall evidence
+
+    private func noteReading(now: CFTimeInterval, counters: Counters?) {
+        let gap = lastPoll > 0 ? now - lastPoll : 0
+        lastPoll = now
+        guard now - lastReading >= 1 else { return }
+        lastReading = now
+        let reading = Reading(at: now, counters: counters, heartbeatAge: heartbeatAge,
+                              uptimeMs: guestUptimeMs, load: guestLoad, cpu: Self.cpuSeconds(),
+                              pollGap: gap, game: gameFocused, gate: gateOpen)
+        if readings.count < 32 {
+            readings.append(reading)
+        } else {
+            readings[nextReading] = reading
+        }
+        nextReading = (nextReading + 1) % 32
+    }
+
+    private func diagnosticHistory(now: CFTimeInterval) -> String {
+        var lines = ["seconds-ago ctrl-total ring-total heartbeat-age guest-uptime-ms load cpu-total poll-gap game gate"]
+        for offset in 0..<readings.count {
+            let r = readings[(readings.count == 32 ? nextReading + offset : offset) % 32]
+            let counters = r.counters.map { "\($0.ctrl) \($0.ring)" } ?? "unavailable unavailable"
+            let heartbeat = r.heartbeatAge.map { String(format: "%.2f", $0) } ?? "none"
+            lines.append(String(format: "%.2f", now - r.at) + " \(counters) \(heartbeat) \(r.uptimeMs)"
+                         + String(format: " %.2f %.2f %.2f", r.load, r.cpu, r.pollGap)
+                         + " \(r.game) \(r.gate)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: perf stats
 
     private func perfNote(now: CFTimeInterval, counters c: Counters?, active: Bool) {
@@ -291,6 +360,10 @@ final class StallIndicatorView: NSView {
     private var detail = ""
     private(set) var shown = false
     private var fading = false
+    /// Shown or hidden (after the fade-out), and the "Report…" link placed or removed on a card
+    /// already shown: the window hides the Mac cursor over the picture and shows it over the
+    /// link, so it re-decides then.
+    var onVisibilityChange: (() -> Void)?
 
     var currentTitle: String { title }
     var currentDetail: String { detail }
@@ -307,10 +380,13 @@ final class StallIndicatorView: NSView {
     var showsReportLink = false {
         didSet {
             guard showsReportLink != oldValue else { return }
+            reportLinkChanged = true
             needsLayout = true
             window?.invalidateCursorRects(for: self)
         }
     }
+    /// layout() places the link, then onVisibilityChange re-decides the cursor over it.
+    private var reportLinkChanged = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -376,6 +452,7 @@ final class StallIndicatorView: NSView {
             ctx.duration = 0.25
             animator().alphaValue = 1
         }
+        onVisibilityChange?()
     }
 
     /// Fade out (0.2 s), then hide and drop every animation.
@@ -392,6 +469,7 @@ final class StallIndicatorView: NSView {
             guard !self.shown else { return }
             self.isHidden = true
             for l in [self.layer!, self.card, self.track, self.arc, self.titleLayer, self.detailLayer, self.linkLayer] { l.removeAllAnimations() }
+            self.onVisibilityChange?()
         })
     }
 
@@ -498,6 +576,10 @@ final class StallIndicatorView: NSView {
         linkLayer.isHidden = link == nil
         CATransaction.commit()
         window?.invalidateCursorRects(for: self)
+        if reportLinkChanged {
+            reportLinkChanged = false
+            onVisibilityChange?()
+        }
     }
 
     /// Render the indicator (model values) over `background` at `scale` pixels per point.

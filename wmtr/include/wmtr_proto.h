@@ -23,6 +23,8 @@
 #define WMTR_SLOT_BYTES (64u << 10)      /* reply slot payload */
 #define WMTR_ARENA_BLOB_BYTES (64u << 20)/* arena blob size */
 #define WMTR_MAX_BLOBS 1024
+/* winemetal unix calls: DXMT's table (src/wmtr_calls.inc, 0..145) plus WMTVRSubmit (146) */
+#define WMTR_NCALLS 147
 
 /* a pointer field in params/extra rewritten on the wire */
 #define WMTR_REF_EXTRA 0x5752000000000000ull /* | offset into this request's extra bytes */
@@ -57,6 +59,8 @@ enum {
   WMTR_CTL_HELLO = 1,    /* params: struct wmtr_hello */
   WMTR_CTL_BLOB_ADD = 2, /* params: struct wmtr_blob_add; host maps a new arena blob */
   WMTR_CTL_PING = 3,     /* sync no-op (latency measurement) */
+  WMTR_CTL_VR_QUERY = 4, /* sync: one guest VR message (guest/vr/include/steamac_vr_guest.h) in the params, the
+                            executor's VR exporter overwrites it with the reply; params_size >= both */
 };
 struct wmtr_hello { uint32_t version, slots; uint64_t ring_bytes, slot_bytes; };
 struct wmtr_blob_add { uint32_t blob; uint32_t reserved; uint64_t size; };

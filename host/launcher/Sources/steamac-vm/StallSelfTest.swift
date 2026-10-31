@@ -81,6 +81,8 @@ enum StallSelfTest {
         let view = wc.stallView
         // The card's "Report…" link (only with the not-responding wording).
         view.onReport = { log("stall selftest: Report… link activated") }
+        var stallDiagnostic: StallMonitor.Diagnostic?
+        monitor.onNotResponding = { stallDiagnostic = $0 }
         let working = String(localized: "Loading…")
         let sampleCPU = "CPUVALUE"
         let sampleSeconds = 987   // < 1000: no digit grouping in the localized template
@@ -130,6 +132,10 @@ enum StallSelfTest {
             Step(name: "08-game-idle-again", action: { mode.store(0, ordering: .relaxed) }, wait: 2.5) {
                 expectShown(title: working, detail: workingDetail)
             },
+            Step(name: "08a-long-idle-live-heartbeat", action: {}, wait: 8.5) {
+                expectShown(title: working, detail: workingDetail)
+                    ?? (stallDiagnostic == nil ? nil : "live heartbeat incorrectly reported as unresponsive")
+            },
             Step(name: "09-focus-steam-hides", action: { guest("focus steam\n") }, wait: 0.5) {
                 view.isIdle ? expectHidden("focus back to Steam") : "indicator view not hidden + idle after focus steam"
             },
@@ -143,6 +149,11 @@ enum StallSelfTest {
                             detail: String(localized: "waiting (\(sampleSeconds) s)"))
                     ?? (view.cardFrame.contains(view.reportLinkFrame) && !view.reportLinkFrame.isEmpty
                         ? nil : "Report… link missing on the not-responding card: \(view.reportLinkFrame) in \(view.cardFrame)")
+                    ?? (stallDiagnostic.map {
+                        $0.idle >= StallMonitor.idleThreshold && $0.heartbeatAge > StallMonitor.heartbeatTimeout
+                            && $0.history.contains("ctrl-total ring-total heartbeat-age guest-uptime-ms")
+                            && $0.history.split(separator: "\n").count > 5
+                    } == true ? nil : "missing counter/heartbeat history in the stall report")
             },
             Step(name: "12-heartbeat-back", action: { heartbeats.store(true, ordering: .relaxed) }, wait: 1.8) {
                 view.isIdle ? expectHidden("heartbeat back in the Steam UI") : "indicator view not hidden + idle after heartbeat"

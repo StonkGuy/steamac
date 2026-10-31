@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: hanzpo <hanznathanpo@gmail.com>
 Date: Sat, 3 Oct 2026 03:38:27 -0400
-Subject: [PATCH 22/24] perf(airconv): keep small dynamically indexed temp
+Subject: [PATCH 22/27] perf(airconv): keep small dynamically indexed temp
  arrays in registers
 
 A single dynamically indexed access to an indexable temp (x#[r#.x]) kept the
