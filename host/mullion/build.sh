@@ -12,7 +12,8 @@
 #   llvm     the LLVM 15 install DXMT's airconv uses (host/dxmt/build.sh llvm; same release as Mullion's CI)
 #   native   Mullion's native meson build (airconv) -> work/build/mullion-native
 #   host     wmtr with MULLION=1: libwmtr_host.dylib (executor + Mullion's winemetal_unix.c + airconv) and its
-#            tests (make test), installed into work/out/mullion-host/lib. Mullion's unix side uses Metal 4, and
+#            tests (make test), installed into work/out/mullion-host/lib; also wmtr-server and the x86-64 macOS client
+#            (wmtr/build/mullion) for the e2e step. Mullion's unix side uses Metal 4, and
 #            wmtr_host.m checks the Metal 4 mapping-operation sizes the guest uses: needs the macOS 26 SDK (Xcode 26).
 #   pe       Mullion's Windows dlls (d3d12, d3d12core, d3d11, dxgi, d3d10core, winemetal) cross-built with
 #            llvm-mingw against the Wine 8.16 build Mullion's CI uses (Wine builtins), without its macOS unixlib
@@ -23,6 +24,8 @@
 #   smoke    the guest smoke test: wmtr/tests/d3d12_memory.cpp (Direct3D 12 upload/default/readback copies, placed
 #            buffers, a texture, a UAV clear, a compute shader; x86-64 Windows, the pe step's llvm-mingw) and its runner
 #            wmtr/guest/mullion-smoke.sh -> work/out/mullion-smoke
+#   e2e      the smoke test through wmtr on this Mac (wmtr/tests/mullion_e2e.sh): the pinned macOS Wine with the pe
+#            step's dlls and the host step's wmtr client and server (needs host, pe, smoke first; Rosetta)
 #
 # Needs what host/dxmt/build.sh needs (Apple silicon macOS, Xcode with its Metal toolchain, Rosetta for the pinned
 # winebuild, Homebrew meson ninja cmake pkgconf zstd, Docker for `client`), with Xcode 26 for `host`.
@@ -107,7 +110,7 @@ step_native() {
 step_host() {
     log "wmtr host library (Mullion flavour)"
     local mk=(MULLION=1 DXMT="$src" DXMT_BUILD="$native" LLVM="$llvm" PREFIX="$root/work/out/mullion-host")
-    make -C "$root/wmtr" "${mk[@]}" host install
+    make -C "$root/wmtr" "${mk[@]}" host install server client-macos
     make -C "$root/wmtr" "${mk[@]}" test
 }
 
@@ -169,6 +172,16 @@ step_smoke() {
     (cd "$o" && shasum -a 256 d3d12_memory.exe mullion-smoke.sh)
 }
 
+step_e2e() {
+    log "d3d12_memory through wmtr (macOS Wine, Mullion's dlls, the wmtr client and server)"
+    arch -x86_64 /usr/bin/true 2>/dev/null || die "Rosetta is needed for the x86-64 Wine: softwareupdate --install-rosetta"
+    need_toolchains
+    local b=$root/wmtr/build/mullion
+    WINE="$toolchains/wine" PE="$pe" CLIENT="$b/x86_64-macos/winemetal.so" SERVER="$b/wmtr-server" \
+        EXE="$root/work/out/mullion-smoke/d3d12_memory.exe" OUT="$root/work/build/mullion-e2e" \
+        "$root/wmtr/tests/mullion_e2e.sh"
+}
+
 if [ "${1:-}" = clean ]; then
     rm -rf "$src" "$native" "$pebuild" "$root/wmtr/build/mullion"
     exit 0
@@ -183,8 +196,8 @@ case " ${steps[*]} " in *" llvm "*|*" native "*|*" host "*|*" pe "*)
 esac
 for s in "${steps[@]}"; do
     case $s in
-        fetch|llvm|native|host|pe|client|payload|smoke) "step_$s" ;;
-        *) die "unknown step: $s (fetch llvm native host pe client payload smoke | clean)" ;;
+        fetch|llvm|native|host|pe|client|payload|smoke|e2e) "step_$s" ;;
+        *) die "unknown step: $s (fetch llvm native host pe client payload smoke e2e | clean)" ;;
     esac
 done
 log "done"
