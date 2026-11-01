@@ -837,6 +837,36 @@ int main(void) {
       CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
       if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
     }
+    /* A world unload can release more buffers than the host->guest free ring holds.
+     * The client drains that ring only after its next synchronous call returns: a
+     * deallocator must not block the executor waiting for that same client. */
+    {
+      enum { N = WMTR_FREE_RING + 129 };
+      obj_handle_t *buffers = calloc(N, sizeof *buffers);
+      for (int i = 0; i < N; i++) {
+        struct WMTBufferInfo info = {WMTR_PAGE, WMTResourceStorageModeShared, {NULL}, 0};
+        struct unixcall_mtldevice_newbuffer b = {(obj_handle_t)dev, {&info}, 0};
+        CHECK(remote(18, &b) == 0 && b.ret, "overflow buffer %d", i);
+        buffers[i] = b.ret;
+      }
+      struct wmtr_ring *ring = blob_base[0];
+      uint64_t before = __atomic_load_n(&ring->free_head, __ATOMIC_ACQUIRE);
+      fprintf(stderr, "checking buffer free-ring overflow (%d buffers)\n", N);
+      /* A regression must fail in bounded time, rather than hang the test runner. */
+      alarm(5);
+      for (int i = 0; i < N; i++) if (buffers[i]) remote(1, &buffers[i]);
+      CHECK(remote(26, &fb) == 0, "sync call behind the release burst");
+      alarm(0);
+      for (int i = 0; i < 1000 && __atomic_load_n(&ring->free_head, __ATOMIC_ACQUIRE) < before + N; i++) {
+        remote(26, &fb); /* consume returned ranges and let the host publish the rest */
+        usleep(1000);
+      }
+      CHECK(__atomic_load_n(&ring->free_head, __ATOMIC_ACQUIRE) == before + N,
+            "release burst did not return every range exactly once");
+      remote(26, &fb);
+      printf("free-ring overflow: %d buffer ranges returned, executor responsive\n", N);
+      free(buffers);
+    }
     test_vr(dev);
     test_vr_fd();
     /* 8. client-assigned handles: a frame's pool + encoder creations do not wait for the host (one sync call
@@ -1013,6 +1043,11 @@ int main(void) {
         CHECK(wmtr_host_shared_names() == 2, "%u shared names registered, want 2", wmtr_host_shared_names());
         mach_port_mod_refs(mach_task_self(), foreign, MACH_PORT_RIGHT_RECEIVE, -1);
       }
+      /* Metal can keep the NoCopy deallocator alive after its context is retired. */
+      struct WMTBufferInfo late_info = {WMTR_PAGE, WMTResourceStorageModeShared, {NULL}, 0};
+      struct unixcall_mtldevice_newbuffer late_nb = {(obj_handle_t)dev, {&late_info}, 0};
+      CHECK(remote(18, &late_nb) == 0 && late_nb.ret, "late buffer creation");
+      id<MTLBuffer> late_buffer = (id<MTLBuffer>)late_nb.ret;
       /* a call that faults (bad handle) fails, the process lives, and the client is refused from then on */
       struct unixcall_generic_obj_uint64_ret fz = {0};
       NTSTATUS fs = remote(5, &fz);
@@ -1048,10 +1083,13 @@ int main(void) {
       uint64_t destroyed_wakes = __atomic_load_n(&wake_count, __ATOMIC_RELAXED);
       struct wmtr_ring *destroyed_ring = blob_base[0];
       uint64_t destroyed_events = __atomic_load_n(&destroyed_ring->event_head, __ATOMIC_ACQUIRE);
+      uint64_t destroyed_frees = __atomic_load_n(&destroyed_ring->free_head, __ATOMIC_ACQUIRE);
       [late_event fire];
+      [late_buffer release];
       CHECK(__atomic_load_n(&wake_count, __ATOMIC_RELAXED) == destroyed_wakes &&
-            __atomic_load_n(&destroyed_ring->event_head, __ATOMIC_ACQUIRE) == destroyed_events,
-            "event callback touched ring or woke embedder after destroy");
+            __atomic_load_n(&destroyed_ring->event_head, __ATOMIC_ACQUIRE) == destroyed_events &&
+            __atomic_load_n(&destroyed_ring->free_head, __ATOMIC_ACQUIRE) == destroyed_frees,
+            "Metal callback touched ring or woke embedder after destroy");
       [late_event release];
       printf("wake after destroy: blocked\n");
       /* the client is gone: so are the names it registered */

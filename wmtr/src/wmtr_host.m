@@ -53,6 +53,11 @@ static const uint32_t call_params_size[WMTR_NCALLS] = {
  * the struct the implementation reads there may run past its end */
 #define WMTR_COPY_SLACK 4096u
 
+struct pending_free {
+  struct wmtr_free_entry entry;
+  struct pending_free *next;
+};
+
 /* Metal owns copied notification/deallocator blocks beyond a context's lifetime. They retain this
  * small gate, not the executor. Destroy clears host under the same lock used for the entire callback,
  * including wake, so neither the ring nor the embedder can be touched after destroy returns. */
@@ -60,14 +65,29 @@ static const uint32_t call_params_size[WMTR_NCALLS] = {
 @public
   pthread_mutex_t lock;
   struct wmtr_host *host;
+  struct pending_free *free_first, *free_last;
+  int frees_pending; /* atomic fast path; the list itself is protected by lock */
 }
 @end
+
+static void
+discard_pending_frees(WMTRCallbackState *state) {
+  while (state->free_first) {
+    struct pending_free *p = state->free_first;
+    state->free_first = p->next;
+    free(p);
+  }
+  state->free_last = NULL;
+  __atomic_store_n(&state->frees_pending, 0, __ATOMIC_RELEASE);
+}
+
 @implementation WMTRCallbackState
 - (instancetype)init {
   if ((self = [super init])) pthread_mutex_init(&lock, NULL);
   return self;
 }
 - (void)dealloc {
+  discard_pending_frees(self);
   pthread_mutex_destroy(&lock);
   [super dealloc];
 }
@@ -784,21 +804,54 @@ keep_autoreleased(uint32_t slot, uint16_t call, uint8_t *params) {
  * overridden calls */
 static void
 push_free(WMTRCallbackState *state, uint32_t blob, uint32_t off, uint64_t size) {
-  for (;;) {
-    pthread_mutex_lock(&state->lock);
-    struct wmtr_host *h = state->host;
-    if (!h) { pthread_mutex_unlock(&state->lock); return; }
+  pthread_mutex_lock(&state->lock);
+  struct wmtr_host *h = state->host;
+  if (!h) { pthread_mutex_unlock(&state->lock); return; }
+  struct wmtr_ring *R = h->ring;
+  uint64_t head = R->free_head;
+  struct wmtr_free_entry entry = {blob, off, (uint32_t)size, 0};
+  if (!state->free_first && head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) < WMTR_FREE_RING) {
+    R->free_ring[head % WMTR_FREE_RING] = entry;
+    __atomic_store_n(&R->free_head, head + 1, __ATOMIC_RELEASE);
+  } else {
+    /* A Metal deallocator can run on the executor itself. Waiting here for the guest
+     * to drain a full ring deadlocks a release burst followed by a synchronous call:
+     * that caller only drains returned ranges after the executor answers it. Keep
+     * every overflow entry on the host instead, without blocking Metal or dropping it. */
+    struct pending_free *p = malloc(sizeof *p);
+    if (!p) abort();
+    *p = (struct pending_free){entry, NULL};
+    if (state->free_last) state->free_last->next = p;
+    else state->free_first = p;
+    state->free_last = p;
+    __atomic_store_n(&state->frees_pending, 1, __ATOMIC_RELEASE);
+    wmtr_host_kick(h); /* under the callback gate: destroy cannot retire h meanwhile */
+  }
+  pthread_mutex_unlock(&state->lock);
+}
+
+/* Called without h->lock. The callback gate serializes every producer of free_ring. */
+static int
+drain_pending_frees(struct wmtr_host *h) {
+  WMTRCallbackState *state = h->callbacks;
+  if (!__atomic_load_n(&state->frees_pending, __ATOMIC_ACQUIRE)) return 0;
+  pthread_mutex_lock(&state->lock);
+  if (state->host == h) {
     struct wmtr_ring *R = h->ring;
     uint64_t head = R->free_head;
-    if (head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) < WMTR_FREE_RING) {
-      R->free_ring[head % WMTR_FREE_RING] = (struct wmtr_free_entry){blob, off, (uint32_t)size, 0};
-      __atomic_store_n(&R->free_head, head + 1, __ATOMIC_RELEASE);
-      pthread_mutex_unlock(&state->lock);
-      return;
+    while (state->free_first && head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) < WMTR_FREE_RING) {
+      struct pending_free *p = state->free_first;
+      R->free_ring[head % WMTR_FREE_RING] = p->entry;
+      __atomic_store_n(&R->free_head, ++head, __ATOMIC_RELEASE);
+      state->free_first = p->next;
+      free(p);
     }
-    pthread_mutex_unlock(&state->lock); /* client drains on its next allocation; destroy may retire it */
-    usleep(100);
+    if (!state->free_first) state->free_last = NULL;
   }
+  int pending = state->free_first != NULL;
+  __atomic_store_n(&state->frees_pending, pending, __ATOMIC_RELEASE);
+  pthread_mutex_unlock(&state->lock);
+  return pending;
 }
 
 static NTSTATUS
@@ -1156,6 +1209,7 @@ executor(void *arg) {
   uint8_t *scratch = calloc(1, scratch_cap + WMTR_COPY_SLACK);
   pthread_setname_np("wmtr-executor");
   for (;;) {
+    int frees_pending = drain_pending_frees(h);
     uint64_t tail = R->tail;
     uint64_t head = __atomic_load_n(&R->head, __ATOMIC_ACQUIRE);
     if (tail == head) {
@@ -1174,6 +1228,13 @@ executor(void *arg) {
       while (!h->quit && !h->kicked && __atomic_load_n(&R->head, __ATOMIC_ACQUIRE) == tail) {
         atomic_fetch_add(&h->n_sleep, 1);
         if (cs_state == 1) atomic_fetch_add_explicit(&cs_sleeps, 1, memory_order_relaxed);
+        if (frees_pending) {
+          /* Advancing free_tail does not kick us. Retry overflow delivery even if the
+           * guest has no new request, without polling idle contexts that have no backlog. */
+          struct timespec retry = {0, 5000000};
+          pthread_cond_timedwait_relative_np(&h->cond, &h->lock, &retry);
+          break;
+        }
         pthread_cond_wait(&h->cond, &h->lock);
       }
       h->kicked = 0;
@@ -1328,6 +1389,7 @@ void
 wmtr_host_destroy(struct wmtr_host *h) {
   pthread_mutex_lock(&h->callbacks->lock);
   h->callbacks->host = NULL;
+  discard_pending_frees(h->callbacks);
   pthread_mutex_unlock(&h->callbacks->lock);
   pthread_mutex_lock(&h->lock);
   h->quit = 1;
