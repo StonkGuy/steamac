@@ -36,4 +36,3 @@ gvproxy/desync) in `Contents/Resources/licenses`, plus the project's `../../LICE
 code of GPL components (the kernel with patches and configuration, busybox from the Debian snapshot,
 dosfstools, e2fsprogs, btrfs-progs, build scripts, `README.txt`); attach it to the GitHub release
 alongside the DMG. For an older release: `scripts/gpl-sources.sh v1.2`.
-

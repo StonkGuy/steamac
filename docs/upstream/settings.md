@@ -10,12 +10,13 @@ over saved values, but only for that launch: the field displays “overridden by
 
 | Tab | Applies now | On next start |
 |---|---|---|
-| General | boot/shutdown overlay; “Still working…” indicator on GPU idle; “When FX Steam Launcher is in the background”: **Mute sound** (on by default: `krun_snd_set_volume(…, mute)` with a gradual ~150 ms fade-out; volume is restored when returning to the window) and **Pause the game** (off by default: the guest agent freezes only the game in focus — `systemctl --user freeze app-steam-app<appid>-*.scope`, cgroup v2; Steam, downloads, and updates continue running; online games may disconnect). While the agent confirms the freeze (`game-frozen`/`game-thawed`), the window is dimmed, with a “Game paused · Click to resume” card and “— paused” in the title; clicking the window resumes the game and is not passed to the guest; crash reports (`--no-crash-reports`, see below); **Check for updates at startup** (on by default, see “Update check”); frame statistics logging (`--perf-stats`) | full screen at startup; **Use the Mac's time zone and clock format** (on by default, see above) |
+| General | boot/shutdown overlay; “Still working…” indicator on GPU idle; “When FX Steam Launcher is in the background”: **Mute sound** (on by default: `krun_snd_set_volume(…, mute)` with a gradual ~150 ms fade-out; volume is restored when returning to the window) and **Pause the game** (off by default: the guest agent freezes only the game in focus — `systemctl --user freeze app-steam-app<appid>-*.scope`, cgroup v2; Steam, downloads, and updates continue running; online games may disconnect). While the agent confirms the freeze (`game-frozen`/`game-thawed`), the window is dimmed, with a “Game paused · Click to resume” card and “— paused” in the title; clicking the window resumes the game and is not passed to the guest; crash reports (`--no-crash-reports`, see below); **Check for updates at startup** (on by default, see “Update check”); frame statistics logging (`--perf-stats`); **Use the Mac's keyboard layouts in Desktop Mode** (on by default, see “Desktop Mode”) | full screen at startup; **Use the Mac's time zone and clock format** (on by default, see above) |
 | Display | guest follows window size; Apple's Metal Performance HUD in the upper-right corner of the window (Ctrl+Cmd+P, View → Show Metal Performance HUD); **MetalFX super resolution** (off by default): Apple's MetalFX spatial upscaler scales the guest picture to the window's pixel size whenever the window has more pixels than the guest (2× on Retina screens, scaled or fullscreen windows) instead of linear / nearest scaling; it runs on the guest frame in the launcher, so it works for every game and the Steam UI | physical size source (auto from display / DPI / mm — `--dpi`, `--display-mm`), refresh rate (`--refresh`), window size (`--display`): standard resolutions from 1280 × 800 (Steam Deck) to 3840 × 2160 (those that do not fit on the display are marked “larger than this screen”; the window is shrunk as before), “Fit to screen” (largest size for the display, recalculated on every launch), or “Custom…” (W × H fields); **Retina resolution** (optional, off by default): the guest display gets the screen's pixel density (window points × the screen's backing scale, taken at boot; the scale is lowered so no side exceeds 4094 px) at the same EDID physical size, so SteamOS scales its UI up to the same size with sharp text — but games draw 4× the pixels and each frame copy is 4× larger; recommended instead: Retina resolution off + MetalFX super resolution (a 2× upscale on Retina screens) |
 | Mouse | auto-capture in games; game list (name from `appmanifest_<appid>.acf`, Default/Auto/Off, remove) | — |
-| Controller | which physical controller (GameController) drives the virtual pad (first connected or selected), whether SteamOS gets a pad and what it appears as (`--no-gamepad`, `--pad`, see “Controller”), whether a DualSense is passed through as itself, swap A/B and X/Y, stick dead zone, live input test | — |
+| Controller | which physical controller (GameController) drives the virtual pad (first connected or selected), whether SteamOS gets a pad and what it appears as (`--no-gamepad`, `--pad`, see “Controller”), whether a DualSense is passed through as itself, whether further controllers are players 2–4, swap A/B and X/Y, stick dead zone, live input test | — |
 | Sound | output device (System default follows macOS, or a specific CoreAudio device), volume/mute, Low/Normal/Safe buffer — via `krun_snd_set_*` (looked up with `dlsym`; with an older libkrun the fields are disabled with an explanation) | sound (`--no-sound`) |
-| Advanced | — | vCPU (`--cpus`), RAM (`--mem`), SSH enable/disable + port (`--ssh-port`, `--no-ssh`) and generated password, network (`--no-net`), disk image (`--disk`), Create New Disk…, Steam client (`--steam-client`, see “Steam client”), Vulkan driver (`--vulkan-driver`, see “Vulkan driver”) |
+| Games | **Share game statistics** (off until you agree, see “Game statistics”); known games and games with recorded sessions: per-game profiles (graphics, Vulkan driver, launch options; see below), sessions, play time, last session's FPS / 1% low / game memory / Vulkan driver, your optional rating (Runs well / Playable with issues / Starts, but unplayable / Does not start) and a per-game **Share** switch | profiles may require restarting Steam or the VM (see below) |
+| Advanced | — | vCPU (`--cpus`), RAM (`--mem`), SSH enable/disable + port (`--ssh-port`, `--no-ssh`) and generated password, network (`--no-net`), disk image (`--disk`), Create New Disk…, Steam client (`--steam-client`, see “Steam client”), Vulkan driver (`--vulkan-driver`, see “Vulkan driver”), Allow DXMT (D3D11 on the Mac's Metal), experimental (`--wmtr-lib`, `--no-wmtr`, see “Vulkan driver”) |
 
 **VM RAM and graphics share the Mac's memory.** Automatic VM RAM is half of physical RAM
 (4–16 GiB). On every boot the launcher also reserves at least 3 GiB, or a quarter of host RAM,
@@ -49,3 +50,45 @@ For tests: `STEAMAC_DEFAULTS_DOMAIN=<domain>` substitutes the settings domain; `
 --selftest-out DIR` opens the window without a VM and writes a PNG of each tab; `--control-fifo` has
 `settings TAB`, `settings-dump PNG`, `set KEY VALUE` (as from the window), `restart`.
 
+### Per-game profiles
+
+**Settings → Games** stores a profile per Steam app id, separately from mouse auto-capture:
+**Graphics** — Default (= Vulkan) / Vulkan / DXMT; **Vulkan driver** — Default (the global driver) /
+KosmicKrisp / MoltenVK (only available drivers are offered); **Launch options** — space-separated
+`NAME=value` words placed before `%command%`, not arbitrary shell commands. The whole string is
+limited to 256 characters. Names use the prefixes `VKD3D_`, `DXVK_`, `PROTON_`, `WINE_`, `MESA_`,
+`RADV_`, `VK_`, `DXMT_`, `MTL_`, `STEAMAC_`, followed by zero or more `[A-Z0-9_]` characters;
+values match `[A-Za-z0-9_.,:;+-]*` (empty is allowed). Assignments are sorted by name; the last
+duplicate name wins. Invalid input stays visible with an error and is not saved or sent.
+
+**Recommended: … — Apply** fetches a profile from the statistics service using this Mac's **My Mac**
+limits (GPU cores, RAM and performance cores no greater than this Mac's). Configurations are ranked
+by `(runs well + 0.5 × playable with issues) / all ratings`, then higher launch success and fewer
+early exits; at least two distinct installs are required (details in “Game statistics”).
+Recommendations are never automatic: only **Apply** changes the profile.
+
+DXMT requires **Settings → Advanced → Allow DXMT (D3D11 on the Mac's Metal)** and a VM boot with
+that permission. While it is off, a DXMT profile is shown as not in effect and offers **Allow DXMT…**
+with the existing security warning; it cannot map a game to Proton 10.0 on a Vulkan-only boot.
+The Vulkan driver is selected **per VM boot**, not per process. When a game starts or gains focus
+with another profile driver, the launcher offers to restart the VM with that driver and relaunch
+the game once Steam is ready. This one-shot override does not change the global driver setting.
+
+Profiles travel over the bidirectional `fx.progress` port (one line per message). Host → guest:
+`profiles <base64 of UTF-8 JSON>` replaces the full set on the first agent heartbeat/ready of a boot
+and after changes; `launch <appid>` starts `steam steam://rungameid/<appid>` as the session user;
+`restart-steam` restarts `steam.service` only after the user agrees. The profile payload is
+`{"v":1,"games":{"570":{"gfx":"dxmt","env":"PROTON_LOG=1"}}}`; default/empty fields are omitted,
+and `driver` stays host-side. The guest atomically persists it in
+`~/.config/steamac/game-profiles.json`. Before graphics/title preparation, the `steam-profiles-wait`
+ExecStartPre waits up to 5 s for this boot's synchronization, then snapshots the latest available
+set (using the persisted file on timeout). Guest → host: `profiles-ok <sha256 of JSON> applied|pending`;
+`pending` means Steam is running with a different applied set and the launcher offers **Restart Steam**
+or **Later**. `game-gfx <appid> dxmt|vulkan` follows `game-proton` and describes the actual Proton
+graphics path, detected from its `.steamac-dxmt` marker rather than the boot permission.
+Unknown verbs remain ignored so old/new host/guest combinations work.
+
+On Steam start, profile launch words override `steam-title-defaults`' built-in entry; with no
+profile `env`, Dragon's Dogma 2 retains its Venus-feature-gated default. Ownership is unchanged:
+a later user edit in Steam wins; replacing or removing steamac-owned words does not accumulate
+old assignments, and removal restores the previous launch options.

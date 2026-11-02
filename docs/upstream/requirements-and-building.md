@@ -13,7 +13,8 @@
 # Building and running
 
 ```sh
-./build.sh          # everything: MoltenVK, virglrenderer, libkrun, launcher, kernel, Mesa, disk
+./build.sh          # Vulkan stack: MoltenVK, virglrenderer, libkrun, launcher, kernel, Mesa, disk
+./build.sh dxmt     # DXMT + wmtr host executor and guest payload; then rebuild layer and launcher (below)
 ./run.sh            # a window with SteamOS
 ```
 
@@ -63,6 +64,41 @@ once per Steam installation (marker `config/steamac-shader-defaults`), so a choi
 settings stays. Launcher 1.4 shipped both settings off (`"DisableShaderCache" "1"`,
 `"EnableShaderBackgroundProcessing" "0"`); on the first Steam start after updating, the script turns
 both back on once, but only if both are still exactly those values.
+
+Steam's idle screensaver (Settings → Display → Screensaver in Game Mode) is off in the VM. After a
+few minutes without input Steam puts its `Screensaver_uid<n>` window in front of a running game,
+gamescope moves focus to it and the next clicks land in Steam until Escape. The launcher's mouse,
+tablet and keyboard reset Steam's timer, but a game left alone on a long loading screen or played in
+VR (headset input never reaches Steam) is idle to Steam; macOS keeps its own screensaver and display
+sleep. Before Steam starts, `/usr/lib/steamac/steam-idle-screensaver` (ExecStartPre of
+`steam.service`) writes `"IdleScreensaverACSeconds" "0"` and `"IdleScreensaverBatterySeconds" "0"`
+(`InstallConfigStore/Software/Valve/Steam/System` in `config.vdf`; 0 = never) where they are
+missing, once per Steam installation (marker `config/steamac-idle-screensaver`), so a screensaver
+timeout chosen later in Steam's settings stays.
+
+Per-title environment that a game needs from the driver it runs on is a default, not code:
+`/usr/lib/steamac/steam-title-defaults` (also an ExecStartPre of `steam.service`) puts the required
+`VAR=value` words in front of a title's Steam launch options (`%command%`). It ships one entry:
+Dragon's Dogma 2 (2054970) asks for D3D feature level 12_1, which vkd3d-proton derives from ROVs and
+conservative rasterization — on Metal neither exists (conservative rasterization has no Metal API;
+ROVs would need Metal's raster order groups mapped to `VK_EXT_fragment_shader_interlock`), and the
+title only checks the level, so it is reported as `VKD3D_FEATURE_LEVEL=12_1 VKD3D_SHADER_MODEL=6_6`,
+together with `VKD3D_DISABLE_EXTENSIONS=` (empty). KosmicKrisp's 64-bit atomics cover unsigned
+min/max only, so `steam.service` keeps `VK_KHR_shader_atomic_int64` and
+`VK_EXT_shader_image_atomic_int64` from every D3D12 title by default
+(`Environment=VKD3D_DISABLE_EXTENSIONS=…` in its drop-in; a title whose shaders use another 64-bit
+atomic would silently lose those pipelines, and vkd3d-proton reports shader model 6.6 from them), and
+a title that fits gets them back in its own launch options. The default is Steam's inherited
+environment, not a `gfx.txt` line: `steam-launch-wrapper` sets every variable of
+`$XDG_RUNTIME_DIR/steam/env/gfx.txt` and then `~/.config/steam/env/gfx.txt` over the game's
+environment, launch options included, so a `VKD3D_DISABLE_EXTENSIONS` written there wins for every
+title. An entry applies only where the Venus device advertises the features it needs (DD2's: the
+64-bit atomics, Apple8/M2 and later) and is taken back, restoring the previous launch options, when
+a later Steam start finds them gone (driver switched to MoltenVK, disk moved to an M1); a failed
+probe changes nothing. An existing value is only prefixed, never replaced, a value without
+`%command%` is left alone, and an edit made in Steam after ours wins (marker
+`~/.config/steamac/title-defaults.json`, which also keeps the previous value).
+Profile `env` words override the built-in entry; without a profile override, DD2 keeps the feature-gated default.
 
 SteamOS takes the Mac's time zone and 12/24-hour clock format (Settings > General
 **Use the Mac's time zone and clock format**, on by default, applies on the next start).
@@ -123,9 +159,16 @@ start over.
 | Ctrl+Option | release the captured mouse |
 | close window | shut down the guest (power button) |
 
-Mouse (`--mouse auto`, by default): the SteamOS cursor follows the Mac cursor precisely. gamescope
+Mouse (`--mouse auto`, by default): the SteamOS cursor follows the Mac cursor precisely, and the Mac
+cursor is hidden over the picture so only gamescope's cursor shows (it reappears over the black bars,
+the clickable progress pill and "Report…" link, menus and other windows, while booting, paused or
+asleep, and outside the window). gamescope
 (gaming mode) does not accept absolute coordinates, so the launcher moves it with relative deltas
-without acceleration. When a game has focus in the guest (the agent sends `focus game <appid>`), the
+without acceleration, in pixels of the surface gamescope shows: the agent sends its size with each
+focus line (`focus steam 1920x1200` when Steam's Settings > Display > Resolution is not the native
+one, so its UI is smaller than the display and scaled up), and the launcher maps the window onto that
+surface as gamescope scales it into the display (`--selftest-pointer`). When a game has focus in the
+guest (the agent sends `focus game <appid> <w>x<h>`), the
 first click captures the mouse (relative movement for mouse-look); Ctrl+Option releases it. On
 returning to Steam, capture is released automatically. **Mouse** menu:
 - **Capture Mouse in This Game** — auto-capture for the current game (saved by appid);
@@ -159,7 +202,7 @@ in the dev launcher, the password is generated only via the button (Docker-built
 password. From the terminal, `steamac-vm --ssh-password <disk>` prints the user, password, and
 status.
 
-## LAN networking and Steam Remote Play
+### LAN networking and Steam Remote Play
 
 Ordinary networking uses gvproxy user-mode NAT (`192.168.127.2` in SteamOS); LAN broadcasts
 do not cross that NAT. **Settings → Advanced → LAN Remote Play** (next start), or
@@ -189,4 +232,3 @@ no host answers; it does not claim pairing or streaming success.
 Protocol references: [Valve's Remote Play network settings](https://help.steampowered.com/en/faqs/view/3E3D-BE6B-787D-A5D2),
 [Steam remote-client protobufs](https://github.com/SteamDatabase/Protobufs/blob/master/steam/steammessages_remoteclient_discovery.proto),
 and [discovery envelope framing](https://github.com/OpenSourceLAN/steam-discover/blob/master/listener.js).
-
