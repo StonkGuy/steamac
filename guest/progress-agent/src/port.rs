@@ -3,16 +3,29 @@
 //! The port is opened `O_NONBLOCK`, so a host that is not reading (or an older
 //! launcher whose port has no reader) can never stall the session: unwritten
 //! bytes stay in a small bounded buffer and are retried on the next tick.
-//! Host -> guest lines (`collect-logs <id>`) are read without blocking too.
+//! Host -> guest lines (including `cursor-track 1|0`) are read without blocking too.
 
 use std::ffi::CString;
 use std::io;
 use std::time::{Duration, Instant};
 
-/// Upper bound for bytes waiting for the host. Progress messages are tiny; if
-/// the host stops reading this long, older messages are dropped (only the
-/// newest state matters to the overlay).
-const MAX_PENDING: usize = 16 * 1024;
+/// Upper bound for bytes waiting for the host. The X cursor bitmap is the
+/// largest message (a base64 line); if the host stops reading this long, older
+/// messages are dropped (only the newest state matters to the overlay).
+const MAX_PENDING: usize = 512 * 1024;
+
+/// Optional overlay handshake. Unknown/malformed commands do not change tracking.
+pub fn cursor_tracking(line: &str) -> Option<bool> {
+    let (command, arg) = line.trim().split_once(' ')?;
+    if command != "cursor-track" {
+        return None;
+    }
+    match arg.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
 
 pub struct Port {
     fd: libc::c_int,
@@ -167,5 +180,21 @@ impl Port {
 impl Drop for Port {
     fn drop(&mut self) {
         unsafe { libc::close(self.fd) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_tracking_requires_an_explicit_boolean_command() {
+        assert_eq!(cursor_tracking("cursor-track 1"), Some(true));
+        assert_eq!(cursor_tracking("cursor-track 0"), Some(false));
+        assert_eq!(cursor_tracking("  cursor-track   1 \r"), Some(true));
+        for line in ["", "cursor-track", "cursor-track 2", "cursor-track true",
+            "cursor-track 1 extra", "cursor-tracking 1", "cursor 1", "future-command 1"] {
+            assert_eq!(cursor_tracking(line), None, "{line:?}");
+        }
     }
 }

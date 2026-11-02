@@ -5,7 +5,10 @@ import Foundation
 /// reboot), so each boot runs in a child process (`STEAMAC_VM_CHILD=1`, same argv) while this
 /// supervisor stays in the foreground: it owns gvproxy (restarted per boot), restores the
 /// terminal, forwards signals, cleans up, and relaunches the VM when the child left a reboot
-/// marker (guest-initiated restart).
+/// marker (guest-initiated restart). Info.plist's LSUIElement keeps the supervisor out of the
+/// Dock: it never runs NSApplication, so its Finder launch would bounce forever beside the VM
+/// process's icon. Whoever shows UI (VM window, first run, crash offer, launch alerts) switches
+/// itself to `.regular`.
 enum Supervisor {
     static let childEnv = "STEAMAC_VM_CHILD"
     static let runDirEnv = "STEAMAC_RUN_DIR"

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import QuartzCore
 
 /// `--selftest-pointer`: the `auto` mouse mode's host pointer -> guest cursor mapping. Part 1 checks
 /// PointerMap geometry: Retina off/on, window == / != scanout size (pending resize, fixed mode),
@@ -7,6 +8,7 @@ import Foundation
 /// non-native Display > Resolution (STEAMAC-2V/2W). Part 2 drives real WindowControllers through
 /// BootProgress focus lines (`focus steam 1920x1200`, `focus game …`, `focus desktop …`) and
 /// scanout resizes, with MetalFX on and off, and checks where a view point lands in the guest.
+/// Part 3 checks cursor visibility policy and the actual wmtr layer/focus transitions (STEAMAC-5Z).
 enum PointerSelfTest {
     static func run() -> Never {
         _ = SteamacApplication.shared
@@ -16,6 +18,11 @@ enum PointerSelfTest {
             let ok = got == want
             if !ok { failures += 1 }
             print("pointer selftest: \(ok ? "PASS" : "FAIL") \(name): \(got.0),\(got.1)\(ok ? "" : " (expected \(want.0),\(want.1))")")
+        }
+        func check(_ name: String, _ ok: Bool) {
+            checks += 1
+            if !ok { failures += 1 }
+            print("pointer selftest: \(ok ? "PASS" : "FAIL") \(name)")
         }
         /// View point given from the top-left (as on screen) in a view `height` points tall.
         func point(_ x: Double, _ yTop: Double, _ height: Double) -> CGPoint { CGPoint(x: x, y: height - yTop) }
@@ -128,6 +135,63 @@ enum PointerSelfTest {
             expect("wc retina off, Steam at display size: 1/4 width", at(300, 375), (300, 375))
             progress.guestLine("focus steam 960x600")
             expect("wc retina off, `focus steam 960x600`: 1/4 width", at(300, 375), (240, 300))
+            wc.window.close()
+        }
+        // Part 3: measure actual scanout occlusion, without guessing guest cursor visibility.
+        // Preserve host hiding policy: no replacement arrow inferred from wmtr being enabled.
+        for (mode, captured, want) in [
+            (MouseMode.auto, false, true), (.auto, true, true),
+            (.tablet, false, false), (.tablet, true, true),
+            (.capture, false, false), (.capture, true, true)
+        ] {
+            check("cursor policy mode=\(mode.rawValue), captured=\(captured)",
+                  WindowController.hostCursorShouldBeHidden(mouseMode: mode, captured: captured) == want)
+        }
+        do {
+            let picture = CAMetalLayer(), game = CAMetalLayer(), ordinary = CALayer()
+            picture.bounds = CGRect(x: 0, y: 0, width: 1200, height: 750)
+            let centre = CGPoint(x: 600, y: 375)
+            func covered(_ point: CGPoint = CGPoint(x: 600, y: 375)) -> Bool {
+                WindowController.guestCursorCovered(at: point, in: picture)
+            }
+            check("wmtr enabled without a game layer does not cover the cursor", !covered())
+            ordinary.frame = picture.bounds
+            ordinary.isOpaque = true
+            picture.addSublayer(ordinary)
+            check("ordinary launcher layer does not select the wmtr cursor policy", !covered())
+            game.frame = CGRect(x: 100, y: 100, width: 1000, height: 550)
+            game.isOpaque = true
+            picture.addSublayer(game)
+            check("opaque wmtr layer covers the guest cursor", covered(centre))
+            check("pointer outside the wmtr layer still uses the scanout cursor", !covered(CGPoint(x: 20, y: 20)))
+            game.isHidden = true
+            check("hidden wmtr layer does not cover the guest cursor", !covered())
+            game.isHidden = false
+            game.opacity = 0
+            check("transparent wmtr layer does not cover the guest cursor", !covered())
+            game.opacity = 1
+            game.isOpaque = false
+            check("nonopaque Metal layer does not replace the scanout cursor", !covered())
+            game.isOpaque = true
+            game.removeFromSuperlayer()
+            check("detaching the wmtr layer restores scanout cursor policy", !covered())
+        }
+        do {
+            let (wc, progress) = controller(points: CGSize(width: 1200, height: 750), scale: 1)
+            let game = CAMetalLayer()
+            game.frame = wc.view.bounds
+            game.isOpaque = true
+            game.isHidden = true   // wmtr attaches hidden while Steam has focus
+            wc.view.metalLayer.addSublayer(game)
+            let location = wc.view.convert(NSPoint(x: 600, y: 375), to: nil)
+            check("Steam with an attached hidden wmtr layer uses scanout cursor", !wc.guestCursorCovered(at: location))
+            progress.guestLine("focus game 218230 1200x750")
+            check("Planetside focus exposes the layer that covers scanout cursor", wc.guestCursorCovered(at: location))
+            progress.guestLine("focus steam")
+            check("returning to Steam restores scanout cursor", !wc.guestCursorCovered(at: location))
+            progress.guestLine("focus game 218230 1200x750")
+            game.removeFromSuperlayer()
+            check("game focus without a wmtr layer still uses scanout cursor", !wc.guestCursorCovered(at: location))
             wc.window.close()
         }
         print("pointer selftest: \(checks) checks, \(failures) failures")

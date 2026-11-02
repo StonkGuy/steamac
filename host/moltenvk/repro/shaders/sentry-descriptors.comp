@@ -1,0 +1,22 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0, std430) buffer Output { uint values[10]; } result;
+layout(set = 1, binding = 1, std430) buffer Missing { uint value; } missing;
+layout(set = 1, binding = 2, r32ui) uniform uimage2D missing_image;
+layout(set = 1, binding = 3) uniform sampler2D missing_sampler;
+void main()
+{
+    result.values[0] = missing.value;
+    missing.value = 9;
+    result.values[1] = atomicAdd(missing.value, 1);
+    result.values[2] = uint(missing.value);
+    result.values[3] = imageLoad(missing_image, ivec2(0)).x;
+    imageStore(missing_image, ivec2(0), uvec4(9));
+    result.values[4] = imageAtomicAdd(missing_image, ivec2(0), 1);
+    result.values[5] = imageLoad(missing_image, ivec2(0)).x;
+    vec4 sampled = textureLod(missing_sampler, vec2(0.5), 0);
+    result.values[6] = floatBitsToUint(sampled.x);
+    result.values[7] = floatBitsToUint(sampled.y);
+    result.values[8] = floatBitsToUint(sampled.z);
+    result.values[9] = floatBitsToUint(sampled.w);
+}

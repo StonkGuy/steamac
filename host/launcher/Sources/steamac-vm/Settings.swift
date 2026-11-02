@@ -21,7 +21,7 @@ final class LauncherSettings: ObservableObject {
     enum Key: String, CaseIterable {
         // General
         case showOverlay, showStallIndicator, openFullscreen, perfStats, sendCrashReports, muteInBackground, pauseInBackground,
-             closeAction, checkForUpdates, followMacTime, shareClipboard, shareConcealedClipboard, shareGameStats
+             closeAction, checkForUpdates, followMacTime, followMacKeyboard, shareClipboard, shareConcealedClipboard, shareGameStats
         // Display
         case dpiSource, fixedDPI, fixedWidthMM, fixedHeightMM, refreshRate, followWindowSize, windowWidth, windowHeight,
              windowSizePreset, retinaResolution, metalHUD, superResolution, renderScale, upscaleLowerResolutions
@@ -384,6 +384,8 @@ final class LauncherSettings: ObservableObject {
     /// The guest's time zone and 12/24-hour format follow the Mac (MacTime kernel parameters)
     /// until each is changed inside SteamOS; next start.
     @Published var followMacTime = true { didSet { save(.followMacTime, followMacTime) } }
+    /// Desktop Mode's keyboard layouts follow the Mac's input sources (KeyboardLayoutSync); now.
+    @Published var followMacKeyboard = true { didSet { save(.followMacKeyboard, followMacKeyboard) } }
     // Display
     @Published var dpiSource = DPISource.auto { didSet { save(.dpiSource, dpiSource.rawValue) } }
     @Published var fixedDPI = 110 { didSet { save(.fixedDPI, fixedDPI) } }
@@ -567,6 +569,7 @@ final class LauncherSettings: ObservableObject {
         bool(.checkForUpdates, &checkForUpdates)
         bool(.shareGameStats, &shareGameStats)
         bool(.followMacTime, &followMacTime)
+        bool(.followMacKeyboard, &followMacKeyboard)
         if let s = d.string(forKey: Key.dpiSource.rawValue).flatMap(DPISource.init(rawValue:)) { dpiSource = s }
         int(.fixedDPI, &fixedDPI)
         int(.fixedWidthMM, &fixedWidthMM)
@@ -672,6 +675,7 @@ final class LauncherSettings: ObservableObject {
         case .checkForUpdates: guard let b else { return false }; checkForUpdates = b
         case .shareGameStats: guard let b else { return false }; shareGameStats = b
         case .followMacTime: guard let b else { return false }; followMacTime = b
+        case .followMacKeyboard: guard let b else { return false }; followMacKeyboard = b
         case .dpiSource: guard let v = DPISource(rawValue: text) else { return false }; dpiSource = v
         case .fixedDPI: guard let i else { return false }; fixedDPI = i
         case .fixedWidthMM: guard let i else { return false }; fixedWidthMM = i
@@ -750,7 +754,7 @@ final class LauncherSettings: ObservableObject {
         muteInBackground = fresh.muteInBackground; pauseInBackground = fresh.pauseInBackground
         shareClipboard = fresh.shareClipboard; shareConcealedClipboard = fresh.shareConcealedClipboard
         closeAction = fresh.closeAction; checkForUpdates = fresh.checkForUpdates; shareGameStats = fresh.shareGameStats
-        followMacTime = fresh.followMacTime
+        followMacTime = fresh.followMacTime; followMacKeyboard = fresh.followMacKeyboard
         dpiSource = fresh.dpiSource; fixedDPI = fresh.fixedDPI; fixedWidthMM = fresh.fixedWidthMM
         fixedHeightMM = fresh.fixedHeightMM; refreshRate = fresh.refreshRate; followWindowSize = fresh.followWindowSize
         windowWidth = fresh.windowWidth; windowHeight = fresh.windowHeight; windowSizePreset = fresh.windowSizePreset

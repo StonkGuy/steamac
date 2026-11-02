@@ -19,6 +19,8 @@
 # guest PCM before speaker mapping (patch 0017 detects and routes output speakers).
 # GPU also has the wmtr context type (patch 0018, capset 30) for a host executor library; it
 # exists only with STEAMAC_WMTR=1 and a loadable STEAMAC_WMTR_LIB, so by default nothing changes.
+# Patch 0019 logs the block id/path and concrete initialization error behind -EINVAL
+# (STEAMAC-15), so inaccessible, locked and malformed disks are distinguishable.
 #
 # Output (work/out/host):
 #   lib/libkrun.1.dylib      install_name @rpath/libkrun.1.dylib, ad-hoc signed

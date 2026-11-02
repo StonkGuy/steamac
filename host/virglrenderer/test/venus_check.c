@@ -2,6 +2,7 @@
 // uses on macOS: Venus renderer init (render server thread, MoltenVK), the Venus capset,
 // a Venus context, and a mappable host blob exported as a shared-memory fd (what libkrun
 // hv_vm_maps into the guest). Exits non-zero on any failure.
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <virgl/virglrenderer.h>
@@ -30,6 +31,12 @@ static void check(const char *what, long got, long want)
 
 int main(void)
 {
+    // A flags override can accidentally request GL with Venus-only callbacks.
+    // Reject this before vrend's context wrapper calls a NULL client function.
+    check("GL without context callbacks",
+          virgl_renderer_init(&failures, VIRGL_RENDERER_VENUS, &cbs), -EINVAL);
+    virgl_renderer_cleanup(&failures);
+
     int flags = VIRGL_RENDERER_VENUS | VIRGL_RENDERER_NO_VIRGL | VIRGL_RENDERER_RENDER_SERVER |
                 VIRGL_RENDERER_ASYNC_FENCE_CB;
     int ret = virgl_renderer_init(NULL, flags, &cbs);

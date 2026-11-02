@@ -1,0 +1,14 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+// STEAMAC-5C: MSL calls the SPIR-V subgroup scope a simdgroup.
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0, std430) buffer Results { uint result[]; };
+shared uint value[32];
+void main()
+{
+    value[gl_LocalInvocationIndex] = gl_LocalInvocationIndex;
+    subgroupBarrier();
+    subgroupMemoryBarrier();
+    subgroupMemoryBarrierShared();
+    result[gl_GlobalInvocationID.x] = value[(gl_LocalInvocationIndex + 1u) & 31u];
+}

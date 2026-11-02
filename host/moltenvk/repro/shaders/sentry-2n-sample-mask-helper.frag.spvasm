@@ -1,0 +1,38 @@
+; STEAMAC-2N: the reported uint[1] bitcast and scalar call to ps_main.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %mask_in %mask_out
+OpExecutionMode %main OriginUpperLeft
+OpName %mask_in "gl_SampleMaskIn"
+OpName %mask_out "gl_SampleMask"
+OpName %ps_main "ps_main"
+OpDecorate %mask_in BuiltIn SampleMask
+OpDecorate %mask_out BuiltIn SampleMask
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%array = OpTypeArray %uint %one
+%input_array = OpTypePointer Input %array
+%output_array = OpTypePointer Output %array
+%input_uint = OpTypePointer Input %uint
+%output_uint = OpTypePointer Output %uint
+%mask_in = OpVariable %input_array Input
+%mask_out = OpVariable %output_array Output
+%ps_main = OpFunction %void None %fn
+%body = OpLabel
+%src = OpAccessChain %input_uint %mask_in %zero
+%value = OpLoad %uint %src
+%bits = OpBitcast %float %value
+%roundtrip = OpBitcast %uint %bits
+%dst = OpAccessChain %output_uint %mask_out %zero
+OpStore %dst %roundtrip
+OpReturn
+OpFunctionEnd
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%call = OpFunctionCall %void %ps_main
+OpReturn
+OpFunctionEnd

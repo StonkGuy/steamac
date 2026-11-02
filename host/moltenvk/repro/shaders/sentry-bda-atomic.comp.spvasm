@@ -1,0 +1,50 @@
+; STEAMAC-6D: a raw scalar physical pointer is already a pointer, not an lvalue.
+OpCapability Shader
+OpCapability Int64
+OpCapability PhysicalStorageBufferAddresses
+OpExtension "SPV_KHR_physical_storage_buffer"
+OpMemoryModel PhysicalStorageBuffer64 GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpName %counter "RobustPhysicalAtomicCounter"
+OpMemberDecorate %Push 0 Offset 0
+OpDecorate %Push Block
+OpDecorate %result_buffer Block
+OpMemberDecorate %result_buffer 0 Offset 0
+OpDecorate %result DescriptorSet 0
+OpDecorate %result Binding 0
+%void = OpTypeVoid
+%uint = OpTypeInt 32 0
+%ulong = OpTypeInt 64 0
+%uvec2 = OpTypeVector %uint 2
+%Push = OpTypeStruct %uvec2
+%result_buffer = OpTypeStruct %uint
+%pcptr = OpTypePointer PushConstant %Push
+%pcvecptr = OpTypePointer PushConstant %uvec2
+%outptr = OpTypePointer StorageBuffer %result_buffer
+%outuintptr = OpTypePointer StorageBuffer %uint
+%physical = OpTypePointer PhysicalStorageBuffer %uint
+%main_type = OpTypeFunction %void
+%counter_type = OpTypeFunction %uint %uvec2 %uint
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%push = OpVariable %pcptr PushConstant
+%result = OpVariable %outptr StorageBuffer
+%counter = OpFunction %uint None %counter_type
+%address = OpFunctionParameter %uvec2
+%increment = OpFunctionParameter %uint
+%entry_counter = OpLabel
+%bits = OpBitcast %ulong %address
+%pointer = OpConvertUToPtr %physical %bits
+%previous = OpAtomicIAdd %uint %pointer %one %zero %increment
+OpReturnValue %previous
+OpFunctionEnd
+%main = OpFunction %void None %main_type
+%entry = OpLabel
+%address_ptr = OpAccessChain %pcvecptr %push %zero
+%address_value = OpLoad %uvec2 %address_ptr
+%previous_value = OpFunctionCall %uint %counter %address_value %one
+%result_ptr = OpAccessChain %outuintptr %result %zero
+OpStore %result_ptr %previous_value
+OpReturn
+OpFunctionEnd

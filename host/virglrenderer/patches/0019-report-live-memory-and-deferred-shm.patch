@@ -1,0 +1,114 @@
+From: steamac <steamac@local>
+Date: Sun, 1 Nov 2026 12:00:00 +0000
+Subject: [PATCH] vkr: expose live allocation and deferred shm snapshots (STEAMAC-S/G)
+
+Aggregate footprint histories cannot attribute excess host memory. Export
+relaxed process-wide VkDeviceMemory byte/count and mapped/deferred shm
+byte snapshots, including server worker threads. Count until actual unmap
+so a stalled queue retaining freed backing becomes visible. These are
+logical, potentially aliasing totals, not resident memory and not additive.
+No allocation or reclamation behavior changes.
+
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -20,6 +20,23 @@
+ #include "vkr_device.h"
+ #include "vkr_physical_device.h"
+ #include "vkr_queue.h"
++
++/* Process-wide attribution, including render-server worker threads. These
++ * relaxed snapshots are not a coherent accounting transaction or RSS: imported
++ * memory can alias another mapping, and driver-private allocations are excluded. */
++static atomic_uint_fast64_t live_memory_bytes;
++static atomic_uint_fast64_t live_memory_count;
++static atomic_uint_fast64_t mapped_shm_bytes;
++static atomic_uint_fast64_t deferred_shm_bytes;
++
++VIRGL_EXPORT void
++virgl_steamac_memory_stats(uint64_t values[4])
++{
++   values[0] = atomic_load_explicit(&live_memory_bytes, memory_order_relaxed);
++   values[1] = atomic_load_explicit(&live_memory_count, memory_order_relaxed);
++   values[2] = atomic_load_explicit(&mapped_shm_bytes, memory_order_relaxed);
++   values[3] = atomic_load_explicit(&deferred_shm_bytes, memory_order_relaxed);
++}
+ 
+ static bool
+ vkr_get_fd_info_from_resource_info(const struct vkr_resource *res,
+@@ -272,6 +289,7 @@
+    }
+ 
+    shm->size = aligned_size;
++   atomic_fetch_add_explicit(&mapped_shm_bytes, shm->size, memory_order_relaxed);
+    *out_shm = shm;
+    return VK_SUCCESS;
+ }
+@@ -332,6 +350,7 @@
+       return NULL;
+    }
+ 
++   atomic_fetch_add_explicit(&mapped_shm_bytes, shm->size, memory_order_relaxed);
+    return shm;
+ }
+ 
+@@ -340,6 +359,9 @@
+ {
+    if (!shm)
+       return;
++   atomic_fetch_sub_explicit(&mapped_shm_bytes, shm->size, memory_order_relaxed);
++   if (shm->deferred)
++      atomic_fetch_sub_explicit(&deferred_shm_bytes, shm->size, memory_order_relaxed);
+ 
+    munmap(shm->ptr, shm->size);
+    close(shm->fd);
+@@ -670,6 +692,8 @@
+    mem->shm = shm;
+    mem->allocation_size = alloc_info->allocationSize;
+    mem->memory_type_index = mem_type_index;
++   atomic_fetch_add_explicit(&live_memory_bytes, mem->allocation_size, memory_order_relaxed);
++   atomic_fetch_add_explicit(&live_memory_count, 1, memory_order_relaxed);
+ }
+ 
+ static void
+@@ -940,12 +964,16 @@
+ void
+ vkr_device_memory_release(struct vkr_device_memory *mem)
+ {
++   atomic_fetch_sub_explicit(&live_memory_bytes, mem->allocation_size, memory_order_relaxed);
++   atomic_fetch_sub_explicit(&live_memory_count, 1, memory_order_relaxed);
+    if (mem->shm) {
+       struct vkr_device *dev = mem->device;
+ 
+       mtx_lock(&dev->shm_release.mutex);
+       const bool immediate = dev->shm_release.immediate;
+       if (!immediate) {
++         mem->shm->deferred = true;
++         atomic_fetch_add_explicit(&deferred_shm_bytes, mem->shm->size, memory_order_relaxed);
+          list_addtail(&mem->shm->head, &dev->shm_release.pending);
+          dev->shm_release.pending_size += mem->shm->size;
+       }
+diff --git a/src/venus/vkr_device_memory.h b/src/venus/vkr_device_memory.h
+--- a/src/venus/vkr_device_memory.h
++++ b/src/venus/vkr_device_memory.h
+@@ -14,6 +14,7 @@
+    int fd;
+    void *ptr;
+    size_t size;
++   bool deferred;
+ 
+    /* in vkr_device::shm_release.pending or vkr_shm_release::shms */
+    struct list_head head;
+diff --git a/src/virglrenderer.h b/src/virglrenderer.h
+--- a/src/virglrenderer.h
++++ b/src/virglrenderer.h
+@@ -580,4 +580,9 @@
+  * cheap to read from any thread. */
+ VIRGL_EXPORT uint64_t virgl_steamac_cmd_count(void);
+ 
++/* steamac: relaxed process-wide snapshots: live VkDeviceMemory bytes/count,
++ * mapped shm bytes, and the subset awaiting GPU completion after vkFreeMemory.
++ * Byte counts are logical allocations/mappings, not unique resident pages. */
++VIRGL_EXPORT void virgl_steamac_memory_stats(uint64_t values[4]);
++
+ #endif

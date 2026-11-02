@@ -1,0 +1,34 @@
+; STEAMAC-6A: duplicate high SpecIds retain distinct defaults but share specialization.
+OpCapability Shader
+OpExtension "SPV_KHR_storage_buffer_storage_class"
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %a SpecId 70000
+OpDecorate %b SpecId 70000
+OpDecorate %c SpecId 4294967295
+OpDecorate %d SpecId 0
+OpDecorate %Result Block
+OpMemberDecorate %Result 0 Offset 0
+OpDecorate %result DescriptorSet 0
+OpDecorate %result Binding 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%uvec4 = OpTypeVector %uint 4
+%Result = OpTypeStruct %uvec4
+%ptr_result = OpTypePointer StorageBuffer %Result
+%ptr_vec = OpTypePointer StorageBuffer %uvec4
+%result = OpVariable %ptr_result StorageBuffer
+%zero = OpConstant %uint 0
+%a = OpSpecConstant %uint 7
+%b = OpSpecConstant %uint 9
+%c = OpSpecConstant %uint 11
+%d = OpSpecConstant %uint 3
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%values = OpCompositeConstruct %uvec4 %a %b %c %d
+%out = OpAccessChain %ptr_vec %result %zero
+OpStore %out %values
+OpReturn
+OpFunctionEnd

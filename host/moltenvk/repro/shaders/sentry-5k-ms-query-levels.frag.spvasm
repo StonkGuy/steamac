@@ -1,0 +1,30 @@
+; Multisampled images have exactly one mip level; null descriptors have none.
+OpCapability Shader
+OpCapability ImageQuery
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %color
+OpExecutionMode %main OriginUpperLeft
+OpName %main "main"
+OpName %tex "t0"
+OpDecorate %tex DescriptorSet 0
+OpDecorate %tex Binding 0
+OpDecorate %color Location 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%uint = OpTypeInt 32 0
+%v4uint = OpTypeVector %uint 4
+%image = OpTypeImage %float 2D 0 0 1 1 Unknown
+%pimage = OpTypePointer UniformConstant %image
+%tex = OpVariable %pimage UniformConstant
+%pout = OpTypePointer Output %v4uint
+%color = OpVariable %pout Output
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%loaded = OpLoad %image %tex
+%levels = OpImageQueryLevels %uint %loaded
+%samples = OpImageQuerySamples %uint %loaded
+%result = OpCompositeConstruct %v4uint %levels %samples %levels %samples
+OpStore %color %result
+OpReturn
+OpFunctionEnd

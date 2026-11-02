@@ -1,0 +1,69 @@
+; Legal 32-bit Vulkan SpecIds must not be truncated to Metal's 16-bit indices.
+; The undecorated OpSpecConstant is not externally specializable.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 1 1 1
+OpName %main "main"
+OpName %shadow "s1_useShadow"
+OpName %low "low"
+OpName %edge "edge"
+OpName %high "high"
+OpName %high_copy "high_copy"
+OpName %fixed "no_spec_id"
+OpName %high_float "high_float"
+OpDecorate %shadow SpecId 4294967295
+OpDecorate %low SpecId 0
+OpDecorate %edge SpecId 65535
+OpDecorate %high SpecId 65536
+OpDecorate %high_copy SpecId 65536
+OpDecorate %words ArrayStride 4
+OpDecorate %high_float SpecId 65536
+OpMemberDecorate %Output 0 Offset 0
+OpDecorate %Output BufferBlock
+OpDecorate %out DescriptorSet 0
+OpDecorate %out Binding 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%two = OpConstant %uint 2
+%three = OpConstant %uint 3
+%four = OpConstant %uint 4
+%five = OpConstant %uint 5
+%words = OpTypeRuntimeArray %uint
+%six = OpConstant %uint 6
+%Output = OpTypeStruct %words
+%pOutput = OpTypePointer Uniform %Output
+%puint = OpTypePointer Uniform %uint
+%out = OpVariable %pOutput Uniform
+%shadow = OpSpecConstantTrue %bool
+%low = OpSpecConstant %uint 10
+%edge = OpSpecConstant %uint 20
+%high = OpSpecConstant %uint 30
+%high_copy = OpSpecConstant %uint 40
+%fixed = OpSpecConstant %uint 50
+%high_float = OpSpecConstant %float 1.5
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%shadow_value = OpSelect %uint %shadow %one %zero
+%p0 = OpAccessChain %puint %out %zero %zero
+OpStore %p0 %shadow_value
+%p1 = OpAccessChain %puint %out %zero %one
+OpStore %p1 %low
+%p2 = OpAccessChain %puint %out %zero %two
+OpStore %p2 %edge
+%p3 = OpAccessChain %puint %out %zero %three
+OpStore %p3 %high
+%p4 = OpAccessChain %puint %out %zero %four
+OpStore %p4 %high_copy
+%p5 = OpAccessChain %puint %out %zero %five
+OpStore %p5 %fixed
+%float_bits = OpBitcast %uint %high_float
+%p6 = OpAccessChain %puint %out %zero %six
+OpStore %p6 %float_bits
+OpReturn
+OpFunctionEnd

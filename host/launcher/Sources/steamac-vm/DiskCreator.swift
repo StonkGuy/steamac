@@ -241,6 +241,10 @@ final class DiskCreator {
         log("create-disk: desync extract -> \(tmp) (stores: \(stores.joined(separator: ", ")); cache \(chunkCache))")
         try reconstruct(desync, caibxPath, tmp, stores: stores, cache: chunkCache, dataBytes: dataBytes)
         try checkCancel()
+        // Check before exFAT's potentially minutes-long destination allocation. A successful
+        // desync must have published the output; retain this identity to diagnose later removal.
+        try DiskCreator.requireRootfs(tmp, size: rootBytes)
+        log("create-disk: reconstructed rootfs: \(DiskCreationFilesystem.fileDiagnostic(tmp))")
 
         // 4. disk
         status("write", "Writing rootfs-A and rootfs-B…")
@@ -254,12 +258,14 @@ final class DiskCreator {
             if !keep { try? fm.removeItem(atPath: partial) }
         }
         // exFAT allocates the whole disk here.
+        log("create-disk: allocating \(diskBytes) bytes: \(DiskCreationFilesystem.fileDiagnostic(partial))")
         var error: Int32 = ftruncate(fd, off_t(diskBytes)) == 0 ? 0 : errno
         if error == ENOSPC && denseFiles && !r.keepCache && dropChunkCache(diskBytes: diskBytes, directory: dir, chunkCache: chunkCache) {
             error = ftruncate(fd, off_t(diskBytes)) == 0 ? 0 : errno
         }
         if error == ENOSPC { throw DiskCreationFilesystem.notEnoughSpace(needed: diskBytes, directory: dir) }
         guard error == 0 else { throw OptionError("ftruncate \(partial): \(String(cString: strerror(error)))") }
+        log("create-disk: allocated destination; rootfs now: \(DiskCreationFilesystem.fileDiagnostic(tmp))")
         try gpt.write(fd: fd)
         let a = gpt.entry("rootfs-A")!, b = gpt.entry("rootfs-B")!
         guard a.sectors * 512 == rootBytes, b.sectors * 512 == rootBytes else { throw OptionError("layout: rootfs slot size") }
@@ -295,6 +301,9 @@ final class DiskCreator {
         }
         log("create-disk: rootfs sha256 OK: \(manifest.rootfsSHA256) == manifest; written to rootfs-A (LBA \(a.firstLBA)) and rootfs-B (LBA \(b.firstLBA))")
         guard fsync(fd) == 0 else { throw OptionError("fsync \(partial): \(String(cString: strerror(errno)))") }
+        // Verify while it is still private. A failed check must not leave a published disk that
+        // another launch can boot, nor discard the reconstruction needed to diagnose a failure.
+        _ = try DiskCreator.verifyGPT(path: partial, expected: gpt)
 
         // 5. payload, then the disk under its final name (never replacing an existing file)
         status("payload", "Writing the first-boot payload…")
@@ -309,6 +318,10 @@ final class DiskCreator {
         guard rename(payloadTmp, payload) == 0 else { throw OptionError("rename \(payloadTmp): \(String(cString: strerror(errno)))") }
         try DiskCreationFilesystem.publish(partial: partial, destination: path)
         keep = true
+        log("create-disk: published \(DiskCreationFilesystem.fileDiagnostic(path))")
+        // Do not hide stale-name or rename problems on an external filesystem by checking only
+        // the open/private file. Preserve reconstruction and cache if publication changed it.
+        let check = try DiskCreator.verifyGPT(path: path, expected: gpt)
         try? fm.removeItem(atPath: tmp)
         if !r.keepCache {
             if cacheRoot == path + ".cache" {
@@ -318,12 +331,50 @@ final class DiskCreator {
                 try? fm.removeItem(atPath: work)
             }
         }
-        let check = try GPT.read(path: path)
-        guard check == gpt else { throw OptionError("\(path): GPT read back differs from what was written") }
         log("create-disk: GPT of \(path):\n" + check.dump())
         log("create-disk: payload \(payload) (\(c.buildID), attached read-only on the first boot with \(Provision.cmdlineFlag))")
         status("payload", "Done", "", 1)
         return Result(path: path, payload: payload, buildID: c.buildID, version: c.version, gpt: gpt)
+    }
+
+    static func requireRootfs(_ path: String, size: UInt64) throws {
+        var st = stat()
+        guard stat(path, &st) == 0 else {
+            let error = errno
+            if error != ENOENT { throw OptionError("\(path): \(String(cString: strerror(error)))") }
+            log("create-disk: missing reconstructed rootfs: \(DiskCreationFilesystem.fileDiagnostic(path)); parent: \(DiskCreationFilesystem.diagnostic(directory: (path as NSString).deletingLastPathComponent))")
+            throw OptionError("\(path): reconstructed SteamOS file is unavailable: \(String(cString: strerror(error))). Check that the drive is connected and no other program is moving or deleting its files, then try again",
+                localized: String(localized: "\(path): reconstructed SteamOS file is unavailable. Check that the drive is connected and no other program is moving or deleting its files, then try again"))
+        }
+        guard st.st_mode & S_IFMT == S_IFREG, st.st_size == off_t(size) else {
+            throw OptionError("\(path): invalid reconstructed rootfs: \(DiskCreationFilesystem.fileDiagnostic(path)); expected \(size) bytes")
+        }
+    }
+
+    static func verifyGPT(path: String, expected: GPT) throws -> GPT {
+        do {
+            let actual = try GPT.read(path: path)
+            guard actual == expected else {
+                log("create-disk: GPT mismatch: \(DiskCreationFilesystem.fileDiagnostic(path)); \(DiskCreationFilesystem.diagnostic(directory: (path as NSString).deletingLastPathComponent))")
+                // dump() omits PARTUUIDs and attributes, both included in equality. Keep each
+                // mismatch in a separate line so Sentry's breadcrumb limit cannot hide it.
+                log("create-disk: GPT headers expected sectors=\(expected.sectors) GUID=\(expected.diskGUID); actual sectors=\(actual.sectors) GUID=\(actual.diskGUID)")
+                for i in 0..<max(expected.entries.count, actual.entries.count) {
+                    let wanted = i < expected.entries.count ? expected.entries[i] : nil
+                    let got = i < actual.entries.count ? actual.entries[i] : nil
+                    if wanted != got {
+                        log("create-disk: GPT entry \(i + 1) expected: \(String(reflecting: wanted))")
+                        log("create-disk: GPT entry \(i + 1) actual: \(String(reflecting: got))")
+                    }
+                }
+                throw OptionError("\(path): GPT read back differs from what was written. Check the drive with Disk Utility First Aid or choose another drive",
+                    localized: String(localized: "\(path): the partition table read back differs from what was written. Check the drive with Disk Utility First Aid or choose another drive"))
+            }
+            return actual
+        } catch {
+            log("create-disk: GPT verification failed: \(error); \(DiskCreationFilesystem.fileDiagnostic(path))")
+            throw error
+        }
     }
 
     // MARK: metadata
@@ -565,7 +616,11 @@ final class DiskCreator {
     /// 16 KiB block written at each offset of `fd` (the zero rest stays sparse).
     func copyRootfs(_ path: String, size: UInt64, into fd: Int32, offsets: [UInt64], sha256 expected: String, sparse: Bool = true) throws {
         let src = open(path, O_RDONLY)
-        guard src >= 0 else { throw OptionError("\(path): \(String(cString: strerror(errno)))") }
+        guard src >= 0 else {
+            let error = errno
+            try DiskCreator.requireRootfs(path, size: size)
+            throw OptionError("\(path): \(String(cString: strerror(error)))")
+        }
         defer { close(src) }
         var st = stat()
         guard fstat(src, &st) == 0, UInt64(st.st_size) == size else { throw OptionError("\(path): size is not \(size)") }

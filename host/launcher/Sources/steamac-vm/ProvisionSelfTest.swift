@@ -343,6 +343,24 @@ enum ProvisionSelfTest {
             try table.write(fd: fd)
             let back = try GPT.read(path: tmp)
             check(back == table, "GPT write/read round trip (CRCs, backup = primary)")
+            check(try DiskCreator.verifyGPT(path: tmp, expected: table) == table,
+                  "private disk GPT verification succeeds")
+            var wrong = table
+            wrong.entries[0].uuid = UUID()
+            do {
+                _ = try DiskCreator.verifyGPT(path: tmp, expected: wrong)
+                check(false, "different valid GPT must fail before publication")
+            } catch {
+                check("\(error)".contains("Check the drive") && CrashReporting.diskCreationReport(error) != nil,
+                      "unexplained valid GPT mismatch remains reportable, with recovery advice")
+            }
+            do {
+                try DiskCreator.requireRootfs(tmp + ".missing", size: 512)
+                check(false, "missing reconstructed rootfs must fail")
+            } catch {
+                check("\(error)".contains("drive is connected") && CrashReporting.diskCreationReport(error) != nil,
+                      "unexplained missing rootfs remains reportable, with recovery advice")
+            }
             check(table.entries.allSatisfy { $0.firstLBA % 2048 == 0 && $0.sectors % 2048 == 0 }, "1 MiB alignment")
             check(table.entries.last!.lastLBA + 1 + 2048 == table.sectors, "1 MiB free behind home")
             check(Set(table.entries.map(\.uuid)).count == 8 && !table.entries.contains { $0.uuid == table.diskGUID },

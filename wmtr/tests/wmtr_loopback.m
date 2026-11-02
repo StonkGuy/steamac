@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sched.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <unistd.h>
 #include <libproc.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -35,6 +38,19 @@ extern int wmtr_vr_call(const void *req, uint32_t req_size, void *rep, uint32_t 
 
 static int failures;
 #define CHECK(c, ...) do { if (!(c)) { failures++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
+/* the free-ring burst below deadlocks before the fix, and a deadlocked test would otherwise hang forever */
+static _Atomic int burst_done;
+static void *
+burst_watchdog(void *arg) {
+  (void)arg;
+  for (int i = 0; i < 200; i++) {
+    usleep(100000);
+    if (atomic_load_explicit(&burst_done, memory_order_relaxed)) return NULL;
+  }
+  fprintf(stderr, "FAIL %s:%d: the executor waited for a client drain with a full free ring (deadlock)\n", __FILE__, __LINE__);
+  _exit(1);
+  return NULL;
+}
 
 /* ---------------- fake implementations (the "host Metal") ---------------- */
 static NTSTATUS f_getcstring(void *a) {
@@ -836,6 +852,39 @@ int main(void) {
       remote(18, &rb);
       CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
       if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
+    }
+    /* 7b. more NoCopy frees than the free ring holds, with no client allocation to drain it (quit/logout:
+          Metal runs the deallocator inside the release call the client waits on). The executor must queue
+          them instead of waiting, and hand every range back as the client drains at its next sync call. */
+    {
+      enum { N = WMTR_FREE_RING + 512 };
+      obj_handle_t bh[N];
+      int nbuf = 0;
+      struct wmtr_ring *R = blob_base[0];
+      for (int i = 0; i < N; i++) {
+        struct WMTBufferInfo bi = {WMTR_PAGE, WMTResourceStorageModeShared, {NULL}, 0};
+        struct unixcall_mtldevice_newbuffer nb = {(obj_handle_t)dev, {&bi}, 0};
+        remote(18, &nb);
+        if (!nb.ret || !bi.memory.ptr) { CHECK(nb.ret, "burst: newBuffer %d", i); break; }
+        bh[nbuf++] = nb.ret;
+      }
+      CHECK(nbuf == N, "burst: %d of %d buffers", nbuf, (int)N);
+      uint64_t h0 = R->free_head;
+      atomic_store_explicit(&burst_done, 0, memory_order_relaxed);
+      pthread_t wd;
+      if (pthread_create(&wd, NULL, burst_watchdog, NULL) == 0) pthread_detach(wd);
+      for (int i = 0; i < nbuf; i++) remote(1, &bh[i]); /* async: no allocation or sync call drains the ring */
+      /* a sync call drains the ring and the host moves queued frees into it before handling its request */
+      for (int i = 0; i < 8 && R->free_head - h0 < (uint64_t)nbuf; i++) {
+        struct unixcall_generic_obj_uint64_ret q = {0};
+        remote(39, &q);
+        usleep(1000);
+      }
+      CHECK(R->free_head - h0 == (uint64_t)nbuf, "burst: %llu of %d frees delivered",
+            (unsigned long long)(R->free_head - h0), nbuf);
+      CHECK(R->free_head - R->free_tail <= WMTR_FREE_RING, "free ring overrun: %llu entries",
+            (unsigned long long)(R->free_head - R->free_tail));
+      atomic_store_explicit(&burst_done, 1, memory_order_relaxed);
     }
     test_vr(dev);
     test_vr_fd();

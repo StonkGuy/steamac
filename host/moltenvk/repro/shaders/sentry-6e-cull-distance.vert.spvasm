@@ -1,0 +1,34 @@
+; Standalone BuiltIn CullDistance, as emitted by DXVK rather than gl_PerVertex.
+OpCapability Shader
+OpCapability CullDistance
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %position %cull
+OpName %cull "gl_CullDistance"
+OpDecorate %position BuiltIn Position
+OpDecorate %cull BuiltIn CullDistance
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%uint = OpTypeInt 32 0
+%v4float = OpTypeVector %float 4
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%two = OpConstant %uint 2
+%fzero = OpConstant %float 0
+%fone = OpConstant %float 1
+%pos = OpConstantComposite %v4float %fzero %fzero %fzero %fone
+%array = OpTypeArray %float %two
+%ptr_position = OpTypePointer Output %v4float
+%ptr_array = OpTypePointer Output %array
+%ptr_float = OpTypePointer Output %float
+%position = OpVariable %ptr_position Output
+%cull = OpVariable %ptr_array Output
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpStore %position %pos
+%c0 = OpAccessChain %ptr_float %cull %zero
+%c1 = OpAccessChain %ptr_float %cull %one
+OpStore %c0 %fone
+OpStore %c1 %fzero
+OpReturn
+OpFunctionEnd

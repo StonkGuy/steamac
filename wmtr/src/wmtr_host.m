@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <malloc/malloc.h>
 
 #define WINEMETAL_API
 #include "winemetal_thunks.h"
@@ -73,6 +74,9 @@ static const uint32_t call_params_size[WMTR_NCALLS] = {
 }
 @end
 
+struct pool_state;
+/* open_encoder: an encoder (calls 30/31/32/129) whose endEncoding (33) has not run yet */
+struct object_entry { uint64_t value; uint32_t refs, pool_refs; uint8_t plain, open_encoder; };
 struct wmtr_host {
   struct wmtr_ring *ring;
   uint8_t *data;
@@ -89,6 +93,12 @@ struct wmtr_host {
   _Atomic uint32_t trace_n;
   dispatch_queue_t compile_q, block_q;
   WMTRCallbackState *callbacks; /* the free and event rings' producers (Metal blocks), retired by destroy */
+  /* frees that found the free ring full (under callbacks->lock): moved into the ring as the client drains
+   * it, so a NoCopy buffer's deallocator never waits for the client. It may run inside the very call the
+   * client is blocked on (quit/logout free thousands of buffers with nothing draining in between). */
+  struct wmtr_free_entry *free_ovf;
+  uint32_t n_free_ovf, cap_free_ovf;
+  _Atomic uint32_t n_free_ovf_hint; /* n_free_ovf, read without the lock before a request */
   /* views the client created and has not released: released on destroy, so a client that exits
    * without ReleaseMetalView (DXMT never calls it at process exit) does not leave its layer behind */
   pthread_mutex_t view_lock;
@@ -97,6 +107,12 @@ struct wmtr_host {
   _Atomic uint64_t n_req, n_sync, n_bytes, n_worker, n_sleep;
   /* client-assigned encoder handles (WMTR_F_CLIENT_HANDLE): entry (handle % WMTR_HANDLE_SLOTS) */
   struct wmtr_handle { _Atomic uint64_t id; _Atomic uint64_t obj; } *handles;
+  pthread_mutex_t object_lock;
+  struct object_entry *objects;
+  struct pool_state *pools;
+#ifdef WMTR_TESTING
+  int strict_objects;
+#endif
   /* how long the executor polls an empty ring before it sleeps, in mach ticks (WMTR_HOST_SPIN_US) */
   _Atomic uint64_t spin_ticks;
   /* VR export (call 146); owned when created from the environment */
@@ -452,6 +468,21 @@ layer_policy_on_present(id<MTLCommandBuffer> cb, id drawable) {
   }];
 }
 
+/* Actual drawable timings, not completed-command-buffer or extrapolated scanout times.
+ * No executor/context capture: Metal may deliver this after the guest exits. */
+static void
+trace_drawable_present(id drawable, double duration) {
+  static int enabled = -1;
+  if (enabled < 0) enabled = getenv("WMTR_PRESENT_TRACE") != NULL;
+  if (!enabled || !drawable) return;
+  double submitted = CACurrentMediaTime();
+  [drawable addPresentedHandler:^(id<MTLDrawable> shown) {
+    double t = shown.presentedTime;
+    LOG(0, "present timing: drawable=%llu submitted=%.9f presented=%.9f latency_ms=%.3f minimum_ms=%.3f\n",
+        (unsigned long long)shown.drawableID, submitted, t, t > 0 ? (t - submitted) * 1000 : -1, duration * 1000);
+  }];
+}
+
 /* test hook: how many of `frames` presents of `layer` re-apply the view's policy */
 __attribute__((visibility("default"))) int
 wmtr_debug_layer_policy_frames(void *layer, int frames) {
@@ -671,6 +702,7 @@ reply(struct wmtr_host *h, const struct wmtr_req_ext *r, const struct wmtr_out *
  * all client threads share host threads, so real pools would interleave. Instead each client thread
  * (reply slot) has a stack of virtual pools; results that DXMT's implementation returns autoreleased
  * are retained into the slot's current virtual pool and released when DXMT releases that pool. */
+static void object_drop(struct wmtr_host *h, uint64_t obj, int pool);
 struct vpool {
   struct vpool *parent;
   uint64_t cid; /* the client's handle for it (WMTR_HANDLE_POOL), 0 if the host's address is the handle */
@@ -679,68 +711,74 @@ struct vpool {
   uint32_t n, cap;
 };
 #define VPOOLS 4096
-static struct vpool vpools[VPOOLS];
-static pthread_mutex_t vpool_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct vpool *vpool_top[WMTR_SLOTS];
+struct pool_state {
+  struct vpool vpools[VPOOLS];
+  pthread_mutex_t lock;
+  struct vpool *top[WMTR_SLOTS];
 #define VPOOL_LOOSE 256
-static id loose[WMTR_SLOTS][VPOOL_LOOSE];
-static uint32_t loose_next[WMTR_SLOTS];
+  id loose[WMTR_SLOTS][VPOOL_LOOSE];
+  uint32_t loose_next[WMTR_SLOTS];
+};
 
 static int
-is_vpool(uint64_t h) {
-  return h >= (uint64_t)(uintptr_t)&vpools[0] && h < (uint64_t)(uintptr_t)&vpools[VPOOLS] &&
-         (h - (uint64_t)(uintptr_t)&vpools[0]) % sizeof(struct vpool) == 0;
+is_vpool(struct wmtr_host *h, uint64_t v) {
+  struct vpool *p = h->pools->vpools;
+  return v >= (uint64_t)(uintptr_t)p && v < (uint64_t)(uintptr_t)(p + VPOOLS) &&
+         (v - (uint64_t)(uintptr_t)p) % sizeof(struct vpool) == 0;
 }
 
 static uint64_t
-vpool_push(uint32_t slot, uint64_t cid) {
-  pthread_mutex_lock(&vpool_lock);
+vpool_push(struct wmtr_host *h, uint32_t slot, uint64_t cid) {
+  struct pool_state *s = h->pools;
+  pthread_mutex_lock(&s->lock);
   struct vpool *p = NULL;
-  for (int i = 0; i < VPOOLS; i++) if (!vpools[i].used) { p = &vpools[i]; break; }
+  for (int i = 0; i < VPOOLS; i++) if (!s->vpools[i].used) { p = &s->vpools[i]; break; }
   if (p) {
     p->used = 1; p->slot = slot; p->n = 0; p->cid = cid;
-    p->parent = slot < WMTR_SLOTS ? vpool_top[slot] : NULL;
-    if (slot < WMTR_SLOTS) vpool_top[slot] = p;
+    p->parent = slot < WMTR_SLOTS ? s->top[slot] : NULL;
+    if (slot < WMTR_SLOTS) s->top[slot] = p;
   }
-  pthread_mutex_unlock(&vpool_lock);
+  pthread_mutex_unlock(&s->lock);
   return (uint64_t)(uintptr_t)p;
 }
 
 static void
-vpool_pop(struct vpool *target) {
-  pthread_mutex_lock(&vpool_lock);
+vpool_pop(struct wmtr_host *h, struct vpool *target) {
+  struct pool_state *s = h->pools;
+  pthread_mutex_lock(&s->lock);
   uint32_t slot = target->slot;
-  struct vpool *p = slot < WMTR_SLOTS ? vpool_top[slot] : target;
+  struct vpool *p = slot < WMTR_SLOTS ? s->top[slot] : target;
   /* release `target` and every pool pushed after it (released out of order = drained with it) */
   while (p) {
     struct vpool *parent = p->parent;
-    for (uint32_t i = 0; i < p->n; i++) [p->objs[i] release];
+    for (uint32_t i = 0; i < p->n; i++) { object_drop(h, (uint64_t)p->objs[i], 1); [p->objs[i] release]; }
     p->n = 0; p->used = 0;
     if (p == target) { p = parent; break; }
     p = parent;
   }
-  if (slot < WMTR_SLOTS) vpool_top[slot] = p;
-  pthread_mutex_unlock(&vpool_lock);
+  if (slot < WMTR_SLOTS) s->top[slot] = p;
+  pthread_mutex_unlock(&s->lock);
 }
 
 /* the open pool of the client handle `cid`, 0 if there is none */
 static uint64_t
-vpool_find(uint64_t cid) {
+vpool_find(struct wmtr_host *h, uint64_t cid) {
   uint32_t slot = (uint32_t)(cid >> 32) & 0x7fff;
   uint64_t r = 0;
   if (slot >= WMTR_SLOTS) return 0;
-  pthread_mutex_lock(&vpool_lock);
-  for (struct vpool *p = vpool_top[slot]; p; p = p->parent)
+  pthread_mutex_lock(&h->pools->lock);
+  for (struct vpool *p = h->pools->top[slot]; p; p = p->parent)
     if (p->cid == cid) { r = (uint64_t)(uintptr_t)p; break; }
-  pthread_mutex_unlock(&vpool_lock);
+  pthread_mutex_unlock(&h->pools->lock);
   return r;
 }
 
 static void
-vpool_keep(uint32_t slot, uint64_t obj) {
+vpool_keep(struct wmtr_host *h, uint32_t slot, uint64_t obj) {
   if (!obj || slot >= WMTR_SLOTS) return;
-  pthread_mutex_lock(&vpool_lock);
-  struct vpool *p = vpool_top[slot];
+  struct pool_state *s = h->pools;
+  pthread_mutex_lock(&s->lock);
+  struct vpool *p = s->top[slot];
   if (p) {
     if (p->n == p->cap) { p->cap = p->cap ? p->cap * 2 : 64; p->objs = realloc(p->objs, p->cap * sizeof(id)); }
     p->objs[p->n++] = [(id)obj retain];
@@ -748,20 +786,31 @@ vpool_keep(uint32_t slot, uint64_t obj) {
     /* no pool open on the client thread: natively the object would live in the thread's outer pool
      * (e.g. an NSError whose description DXMT logs right after a failed PSO); our per-request pool
      * would free it at once. Keep the last VPOOL_LOOSE such results per slot alive instead. */
-    id *ring = loose[slot];
-    uint32_t i = loose_next[slot]++ % VPOOL_LOOSE;
-    if (ring[i]) [ring[i] release];
+    id *ring = s->loose[slot];
+    uint32_t i = s->loose_next[slot]++ % VPOOL_LOOSE;
+    if (ring[i]) { object_drop(h, (uint64_t)ring[i], 1); [ring[i] release]; }
     ring[i] = [(id)obj retain];
   }
-  pthread_mutex_unlock(&vpool_lock);
+  pthread_mutex_unlock(&s->lock);
 }
 
 /* results returned autoreleased by DXMT's winemetal_unix.c; +1 (new/alloc/copy) results and non-object
  * handles are not listed. Out-errors (ret_error) are not either: the pinned DXMT returns them retained
  * (utmapp/dxmt cc080d00), owned by the caller's WMT::Reference<WMT::Error> */
 static void
-keep_autoreleased(uint32_t slot, uint16_t call, uint8_t *params) {
+keep_autoreleased(struct wmtr_host *h, uint32_t slot, uint16_t call, uint8_t *params) {
   switch (call) {
+  case 71: {
+    struct WMTLayerProps *p = ((struct unixcall_generic_obj_ptr_noret *)params)->arg.ptr;
+    if (p) vpool_keep(h, slot, p->device);
+    break;
+  }
+  case 91: {
+    struct unixcall_enumerate *p = (void *)params;
+    if (p->ret_read <= p->buffer_size)
+      for (uint64_t i = 0; i < p->ret_read; i++) vpool_keep(h, slot, ((obj_handle_t *)p->buffer.ptr)[i]);
+    break;
+  }
   case 2: case 7: case 11: case 28: case 30: case 31: case 32: case 53: case 60: case 62: case 66: case 67:
   case 89: case 90: case 129: {
     /* `ret` is the last obj_handle_t of these generic structs; locate it by call */
@@ -773,32 +822,63 @@ keep_autoreleased(uint32_t slot, uint16_t call, uint8_t *params) {
     case 129: ret = ((struct unixcall_mtlcommandbuffer_blitcommandencoderwithsamplebuffers *)params)->ret; break;
     default: ret = ((struct unixcall_generic_obj_obj_ret *)params)->ret; break;
     }
-    vpool_keep(slot, ret);
+    vpool_keep(h, slot, ret);
     break;
   }
   default: break;
   }
 }
 
+#include "wmtr_objects.h"
+
 /* ------------------------------------------------------------------------------------------- *
  * overridden calls */
+/* move queued overflow frees into the free ring while it has room (callbacks->lock held) */
+static void
+flush_free_ovf_locked(struct wmtr_host *h) {
+  struct wmtr_ring *R = h->ring;
+  uint32_t n = h->n_free_ovf, k = 0;
+  uint64_t head = R->free_head;
+  while (k < n && head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) < WMTR_FREE_RING)
+    R->free_ring[head++ % WMTR_FREE_RING] = h->free_ovf[k++];
+  if (!k) return;
+  __atomic_store_n(&R->free_head, head, __ATOMIC_RELEASE);
+  memmove(h->free_ovf, h->free_ovf + k, (size_t)(n - k) * sizeof *h->free_ovf);
+  h->n_free_ovf = n - k;
+  atomic_store_explicit(&h->n_free_ovf_hint, n - k, memory_order_relaxed);
+}
+
+/* called from Metal's deallocator, often inside a call the client is blocked on: never wait. The client
+ * drains the ring only from its own calls (an allocation, or after a sync reply), which during quit or
+ * logout may not happen at all; waiting here would also block the executor, so the client could never
+ * drain either. Queue the free for the next request instead, and only drop it if the list cannot grow. */
 static void
 push_free(WMTRCallbackState *state, uint32_t blob, uint32_t off, uint64_t size) {
-  for (;;) {
-    pthread_mutex_lock(&state->lock);
-    struct wmtr_host *h = state->host;
-    if (!h) { pthread_mutex_unlock(&state->lock); return; }
-    struct wmtr_ring *R = h->ring;
-    uint64_t head = R->free_head;
-    if (head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) < WMTR_FREE_RING) {
-      R->free_ring[head % WMTR_FREE_RING] = (struct wmtr_free_entry){blob, off, (uint32_t)size, 0};
-      __atomic_store_n(&R->free_head, head + 1, __ATOMIC_RELEASE);
-      pthread_mutex_unlock(&state->lock);
-      return;
+  struct wmtr_free_entry e = {blob, off, (uint32_t)size, 0};
+  pthread_mutex_lock(&state->lock);
+  struct wmtr_host *h = state->host;
+  if (!h) { pthread_mutex_unlock(&state->lock); return; }
+  if (h->n_free_ovf) flush_free_ovf_locked(h);
+  struct wmtr_ring *R = h->ring;
+  uint64_t head = R->free_head;
+  if (!h->n_free_ovf && head - __atomic_load_n(&R->free_tail, __ATOMIC_ACQUIRE) < WMTR_FREE_RING) {
+    R->free_ring[head % WMTR_FREE_RING] = e;
+    __atomic_store_n(&R->free_head, head + 1, __ATOMIC_RELEASE);
+  } else {
+    if (h->n_free_ovf == h->cap_free_ovf) {
+      uint32_t cap = h->cap_free_ovf ? 2 * h->cap_free_ovf : WMTR_FREE_RING;
+      struct wmtr_free_entry *q = realloc(h->free_ovf, (size_t)cap * sizeof *q);
+      if (!q) { /* the range stays allocated until the client exits */
+        pthread_mutex_unlock(&state->lock);
+        LOG(0, "free ring full and no memory to queue: dropping a free of %llu bytes\n", (unsigned long long)size);
+        return;
+      }
+      h->free_ovf = q; h->cap_free_ovf = cap;
     }
-    pthread_mutex_unlock(&state->lock); /* client drains on its next allocation; destroy may retire it */
-    usleep(100);
+    h->free_ovf[h->n_free_ovf++] = e;
+    atomic_store_explicit(&h->n_free_ovf_hint, h->n_free_ovf, memory_order_relaxed);
   }
+  pthread_mutex_unlock(&state->lock);
 }
 
 static NTSTATUS
@@ -855,16 +935,32 @@ push_event(WMTRCallbackState *state, uint64_t listener, uint64_t event_handle) {
 static NTSTATUS
 host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr_req_ext *r, const uint32_t *relocs,
           const uint64_t *orig) {
+  /* A stale/reused command-buffer handle used to reach Metal's fatal encoder assertion.
+   * Refuse late encoding, and retain the call/slot/status evidence instead of aborting the VM. */
+  if (object_checks(h) && (call == 30 || call == 31 || call == 32 || call == 129)) {
+    id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)*(uint64_t *)params;
+    MTLCommandBufferStatus status = cb.status;
+    if (status >= MTLCommandBufferStatusCommitted) {
+      LOG(0, "call %u slot %u: encoder requested on committed buffer %llx status %lu; losing context\n",
+          call, r->h.slot, (unsigned long long)(uintptr_t)cb, (unsigned long)status);
+      int off = call == 30 ? offsetof(struct unixcall_generic_obj_obj_ret, ret) :
+                call == 129 ? offsetof(struct unixcall_mtlcommandbuffer_blitcommandencoderwithsamplebuffers, ret) :
+                offsetof(struct unixcall_generic_obj_uint64_obj_ret, ret);
+      memset(params + off, 0, 8);
+      __atomic_store_n(&h->faulted, 1, __ATOMIC_RELEASE);
+      return STATUS_INVALID_PARAMETER;
+    }
+  }
   switch (call) {
   case 0: /* NSObject_retain */
-    if (is_vpool(*(uint64_t *)params)) return STATUS_SUCCESS;
+    if (is_vpool(h, *(uint64_t *)params)) return STATUS_SUCCESS;
     break;
   case 1: /* NSObject_release: a virtual pool drains */
-    if (is_vpool(*(uint64_t *)params)) { vpool_pop((struct vpool *)(uintptr_t)*(uint64_t *)params); return STATUS_SUCCESS; }
+    if (is_vpool(h, *(uint64_t *)params)) { vpool_pop(h, (struct vpool *)(uintptr_t)*(uint64_t *)params); return STATUS_SUCCESS; }
     break;
   case 10: /* NSAutoreleasePool_alloc_init */
     ((struct unixcall_generic_obj_ret *)params)->ret =
-        vpool_push(r->h.slot, r->h.flags & WMTR_F_CLIENT_HANDLE ? ((struct unixcall_generic_obj_ret *)params)->ret : 0);
+        vpool_push(h, r->h.slot, r->h.flags & WMTR_F_CLIENT_HANDLE ? ((struct unixcall_generic_obj_ret *)params)->ret : 0);
     return ((struct unixcall_generic_obj_ret *)params)->ret ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
   case 18: { /* newBuffer: memory field relocation carries the arena reference */
     uint64_t arena_ref = 0;
@@ -927,7 +1023,7 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     mach_port_t in = info->mach_port;
     if (in && !shared_known(in)) return STATUS_INVALID_PARAMETER;
     NTSTATUS st = ((impl_fn)wmtr_impl_funcs[call])(params);
-    keep_autoreleased(r->h.slot, call, params);
+    keep_autoreleased(h, r->h.slot, call, params);
     if (!st && !in && info->mach_port) shared_port_add(h, info->mach_port);
     return st;
   }
@@ -956,7 +1052,7 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
       const char *m = h->ops->map_path(h->ctx, *field, buf, 1024);
       if (m) *field = (char *)m;
       NTSTATUS st = ((impl_fn)wmtr_impl_funcs[call])(params);
-      keep_autoreleased(r->h.slot, call, params);
+      keep_autoreleased(h, r->h.slot, call, params);
       free(buf);
       return st;
     }
@@ -978,9 +1074,11 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)((struct unixcall_generic_obj_obj_noret *)params)->handle;
     if (frames_out()) frame_record_on_completion(cb); /* record when the frame is done */
     layer_policy_on_present(cb, (id)((struct unixcall_generic_obj_obj_noret *)params)->arg);
+    double duration = call == 48 ? ((struct unixcall_generic_obj_obj_double_noret *)params)->arg1 : 0;
+    trace_drawable_present((id)((struct unixcall_generic_obj_obj_noret *)params)->arg, duration);
   }
   NTSTATUS st = f(params);
-  keep_autoreleased(r->h.slot, call, params);
+  keep_autoreleased(h, r->h.slot, call, params);
   return st;
 }
 
@@ -1021,7 +1119,7 @@ handles_in(struct wmtr_host *h, const struct wmtr_req_ext *r, uint8_t *payload, 
   memcpy(&v, payload, 8);
   if ((v & WMTR_REF_MASK) != WMTR_HANDLE_TAG) return 1;
   uint64_t obj = 0;
-  if (v & WMTR_HANDLE_POOL) obj = vpool_find(v);
+  if (v & WMTR_HANDLE_POOL) obj = vpool_find(h, v);
   else {
     struct wmtr_handle *e = &h->handles[v % WMTR_HANDLE_SLOTS];
     if (atomic_load_explicit(&e->id, memory_order_acquire) == v) obj = atomic_load_explicit(&e->obj, memory_order_relaxed);
@@ -1055,6 +1153,11 @@ struct job { struct wmtr_host *h; uint8_t *copy; uint32_t len; };
 
 static void
 execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
+  if (atomic_load_explicit(&h->n_free_ovf_hint, memory_order_relaxed)) {
+    pthread_mutex_lock(&h->callbacks->lock);
+    flush_free_ovf_locked(h);
+    pthread_mutex_unlock(&h->callbacks->lock);
+  }
   const struct wmtr_req_ext *r = (const void *)rec;
   const uint32_t *relocs = (const void *)(rec + sizeof *r);
   const struct wmtr_out *outs = (const void *)(rec + sizeof *r + 4u * r->n_reloc);
@@ -1095,13 +1198,39 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
       } else if (!handles_in(h, r, payload, &w0, &cid)) {
         st = STATUS_INVALID_HANDLE; /* a client handle whose creation failed (logged) */
       } else {
+        struct object_walk walk = {h, payload, r->payload_size, OBJECT_VALIDATE, r->h.call};
+        int leased = 0;
+        if (object_checks(h)) {
+          pthread_mutex_lock(&h->object_lock);
+          int valid = objects_walk(&walk, payload, 0);
+          if (valid) { walk.mode = OBJECT_LEASE; valid = objects_walk(&walk, payload, 0); leased = valid; }
+          pthread_mutex_unlock(&h->object_lock);
+          if (!valid) { st = STATUS_INVALID_HANDLE; goto call_done; }
+        }
         sigjmp_buf jb;
         if (sigsetjmp(jb, 1) == 0) {
           fault_jmp = &jb;
           int cs = callstats_on();
           uint64_t t0 = cs ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
           @autoreleasepool {
-            st = host_call(h, r->h.call, payload, r, relocs, orig);
+            @try {
+              st = host_call(h, r->h.call, payload, r, relocs, orig);
+              if (object_checks(h) && st == STATUS_SUCCESS) {
+                walk.mode = OBJECT_EXPORT;
+                pthread_mutex_lock(&h->object_lock);
+                if (r->h.call == 0 && !is_vpool(h, *(uint64_t *)payload))
+                  object_field(&walk, (void *)payload);
+                else if (r->h.call == 1 || r->h.call == 73) object_drop(h, *(uint64_t *)payload, 0);
+                else if (r->h.call == 33) object_encoder_ended(h, *(uint64_t *)payload);
+                else if (!objects_walk(&walk, payload, 1)) st = STATUS_UNSUCCESSFUL;
+                pthread_mutex_unlock(&h->object_lock);
+              }
+            } @catch (NSException *exception) {
+              LOG(0, "call %u slot %u: %s: %s; losing this context\n", r->h.call, r->h.slot,
+                  exception.name.UTF8String, exception.reason.UTF8String);
+              __atomic_store_n(&h->faulted, 1, __ATOMIC_RELEASE);
+              st = STATUS_INVALID_PARAMETER;
+            }
           }
           if (cs) callstats_add(r->h.call, r->h.flags & WMTR_F_SYNC, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
           fault_jmp = NULL;
@@ -1132,6 +1261,8 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
           }
           st = STATUS_ACCESS_VIOLATION;
         }
+        if (leased) { walk.mode = OBJECT_UNLEASE; objects_walk(&walk, payload, 0); }
+call_done:;
       }
     } else st = STATUS_INVALID_PARAMETER;
   }
@@ -1277,6 +1408,17 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   h->slots = (struct wmtr_slot *)((uint8_t *)ring + WMTR_SLOTS_OFFSET);
   h->ops = ops; h->ctx = ctx;
   h->handles = calloc(WMTR_HANDLE_SLOTS, sizeof *h->handles);
+  h->objects = calloc(WMTR_HANDLE_SLOTS, sizeof *h->objects);
+  h->pools = calloc(1, sizeof *h->pools);
+  pthread_mutex_init(&h->pools->lock, NULL);
+  pthread_mutexattr_t recursive;
+  pthread_mutexattr_init(&recursive);
+  pthread_mutexattr_settype(&recursive, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&h->object_lock, &recursive);
+  pthread_mutexattr_destroy(&recursive);
+#ifdef WMTR_TESTING
+  h->strict_objects = getenv("WMTR_TEST_STRICT_OBJECTS") != NULL;
+#endif
   pthread_mutex_init(&h->lock, NULL); pthread_cond_init(&h->cond, NULL);
   const char *sp = getenv("WMTR_HOST_SPIN_US");
   wmtr_host_set_spin(h, (uint64_t)(sp && *sp ? atoll(sp) : WMTR_HOST_SPIN_US_DEFAULT) * 1000);
@@ -1338,10 +1480,19 @@ wmtr_host_destroy(struct wmtr_host *h) {
   /* let queued compile/blocking jobs finish: they call back into the embedder */
   dispatch_barrier_sync(h->compile_q, ^{});
   dispatch_barrier_sync(h->block_q, ^{});
+  /* overflow frees are of no use to a client that is gone; no deallocator can add one now
+   * (push_free saw host == NULL above and the executor has been joined) */
+  pthread_mutex_lock(&h->callbacks->lock);
+  free(h->free_ovf); h->free_ovf = NULL;
+  h->n_free_ovf = h->cap_free_ovf = 0;
+  atomic_store_explicit(&h->n_free_ovf_hint, 0, memory_order_relaxed);
+  pthread_mutex_unlock(&h->callbacks->lock);
   /* the client is gone: take down the views it never released */
   pthread_mutex_lock(&h->view_lock);
-  for (uint32_t i = 0; i < h->n_views; i++)
+  for (uint32_t i = 0; i < h->n_views; i++) {
+    object_drop(h, h->views[i], 0);
     if (h->ops->release_view) h->ops->release_view(h->ctx, h->views[i]);
+  }
   h->n_views = 0;
   free(h->views); h->views = NULL; h->cap_views = 0;
   pthread_mutex_unlock(&h->view_lock);
@@ -1353,7 +1504,39 @@ wmtr_host_destroy(struct wmtr_host *h) {
     h->owns_vr = 0;
   }
   [h->callbacks release]; /* pending Metal blocks keep only the retired gate alive */
-  h->callbacks = nil;
+  dispatch_release(h->compile_q);
+  dispatch_release(h->block_q);
+  if (object_checks(h)) {
+    pthread_mutex_lock(&h->object_lock);
+    objects_end_open_encoders(h);
+    pthread_mutex_unlock(&h->object_lock);
+  }
+  for (uint32_t slot = 0; slot < WMTR_SLOTS; slot++) {
+    while (h->pools->top[slot]) vpool_pop(h, h->pools->top[slot]);
+    for (uint32_t i = 0; i < VPOOL_LOOSE; i++) {
+      id obj = h->pools->loose[slot][i];
+      if (obj) { object_drop(h, (uint64_t)obj, 1); [obj release]; }
+    }
+  }
+  if (object_checks(h)) for (uint32_t i = 0; i < WMTR_HANDLE_SLOTS; i++) {
+    struct object_entry *e = &h->objects[i];
+    if (!e->value || e->value == UINT64_MAX) continue;
+    if (e->plain) {
+      struct host_listener *listener = (void *)(uintptr_t)e->value;
+      [listener->listener release];
+      free(listener);
+    } else for (uint32_t n = 0; n < e->refs; n++) [(id)e->value release];
+  }
+  for (uint32_t i = 0; i < VPOOLS; i++) free(h->pools->vpools[i].objs);
+  pthread_mutex_destroy(&h->pools->lock);
+  pthread_mutex_destroy(&h->object_lock);
+  free(h->pools);
+  free(h->objects);
+  pthread_mutex_destroy(&h->view_lock);
+  pthread_cond_destroy(&h->cond);
+  pthread_mutex_destroy(&h->lock);
+  free(h->handles);
+  free(h);
 }
 
 uint64_t
@@ -1455,6 +1638,8 @@ wmtr_present_release_view(void *ctx, uint64_t v) {
     if (overlay) {
       for (CALayer *l in [[view.layer sublayers] copy])
         if ([l isKindOfClass:[CAMetalLayer class]] && l != view.layer) [l removeFromSuperlayer];
+      if ([view respondsToSelector:@selector(gameLayersVisible)])
+        [view setValue:[view valueForKey:@"gameLayersVisible"] forKey:@"gameLayersVisible"];
     } else {
       [[view window] close];
     }
