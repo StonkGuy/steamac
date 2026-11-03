@@ -82,6 +82,8 @@ enum VRHost {
         if o.vrForceSRGB { a.append("--force-srgb") }
         if o.vrKeyframeInterval > 0 { a += ["--keyframe-interval", String(format: "%g", o.vrKeyframeInterval)] }
         if o.vrTCPOnly { a.append("--tcp-only") }
+        // Virtual Desktop: its own pairing (no PIN) and spacewarp as set on the headset
+        if o.vrVirtualDesktop { a += ["--adapter", "vd", "--vd-ssw", "headset"] }
         if o.vrGameAppID > 0 { a += ["--app", "\(o.vrGameAppID)=\(gameName(o.vrGameAppID, known: o.vrGameName))"] }
         return a
     }
@@ -275,6 +277,10 @@ enum VRSelfTest {
         check(q == ["--render-scale", "0.60", "--upscaler", "bilinear", "--sharpness", "0.25", "--force-srgb",
                     "--keyframe-interval", "2", "--tcp-only", "--app", "620=Portal 2"],
               "quality/codec/stream arguments: \(q)")
+        enc.vrVirtualDesktop = true
+        let vd = Array(VRHost.hostArgs(enc, controlSocket: "/s").drop { $0 != "--tcp-only" })
+        check(vd == ["--tcp-only", "--adapter", "vd", "--vd-ssw", "headset", "--app", "620=Portal 2"],
+              "Virtual Desktop arguments: \(vd)")
         let presets = LauncherSettings.VRPreset.allCases
         check(presets.allSatisfy { $0.renderScale == 1 } && presets.map(\.bitrateMbps) == [30, 40, 50, 80] && LauncherSettings.VRPreset.high.bitrateMbps == LauncherSettings.vrDefaultBitrateMbps
               && presets.allSatisfy { LauncherSettings.vrRenderScaleRange.contains($0.renderScale)

@@ -10,6 +10,10 @@ Easy Anti-Cheat (verified in game: VRChat; Mini Royale also passes EAC), with a 
 - **DXMT (lean)**: Direct3D 11 through [DXMT](https://github.com/3Shain/dxmt). Its Metal calls run natively on the Mac
   over a dedicated virtio-gpu channel, so there are fewer translation layers.
 
+**Like it? Help it along.** A star on the repository, an issue when something breaks (with your Mac model and the
+log), and pull requests are all welcome. If you keep a fork with a fix or an improvement, please open a pull request
+here too: it gets reviewed, credited to you and shipped to everyone in the next release.
+
 **Found a bug?** Please report it here (an issue, or a pull request with a test) instead of fixing it only in your own
 fork, so everyone gets the fix. This fork sends nothing to libkrun, Mesa, FEX or Proton itself; steamac changes are
 discussed with its maintainer directly. If you have reviewed a change here and think it is good enough for one of those
@@ -140,7 +144,7 @@ whose peak needs more than the VM and the Mac have (see *Limits*).
   reaches `301` (not played further). Other titles are untested and results differ game by game.
 - 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
   memory on both paths with an 8 GiB VM.
-- VR (Meta Quest 3 over WiVRn) is experimental and off by default: see [docs/vr.md](docs/vr.md).
+- VR (Meta Quest 3 over WiVRn or Virtual Desktop) is experimental and off by default: see [docs/vr.md](docs/vr.md).
 - DXMT: Direct3D 11/10. Its Direct3D 12 is limited (feature level 11_1, DXBC only, no DXIL, no ray tracing;
   ExecuteIndirect stalls the GPU); use *Vulkan* for Direct3D 12 games.
 - DXMT: Direct3D 11 stream output with rasterization or from a geometry shader is not implemented upstream; such games
@@ -165,7 +169,7 @@ whose peak needs more than the VM and the Mac have (see *Limits*).
 | [docs/fork.md](docs/fork.md) | what changed in this fork and its status |
 | [docs/eac-how-it-works.md](docs/eac-how-it-works.md) | the EAC chain and why the FEX swap is needed |
 | [docs/eac-performance.md](docs/eac-performance.md) | measurements and limits |
-| [docs/vr.md](docs/vr.md) | VR with a Quest 3 over WiVRn (experimental): setup, pairing, options, limits |
+| [docs/vr.md](docs/vr.md) | VR with a Quest 3 over WiVRn or Virtual Desktop (experimental): setup, pairing, options, limits |
 | [fex-eac/README.md](fex-eac/README.md) | patched FEX setup and launch options |
 | [docs/upstream/README.md](docs/upstream/README.md) | upstream steamac's documentation (Apache-2.0, © FX GAMES FZ LLC) |
 

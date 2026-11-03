@@ -27,6 +27,7 @@ if [[ $REF == HEAD ]]; then
         # Include new source files in local builds, but not ignored wmtr/build output.
         git -C "$ROOT" ls-files -z --cached --others --exclude-standard -- \
             host/dxmt wmtr host/vrhost/include/vrlink.h guest/vr/include/steamac_vr_guest.h \
+            guest/proton-vrclient \
             scripts/steps/30-layer.sh \
             LICENSE NOTICE LICENSES | tar -C "$ROOT" --null -T - -cf - | tar -xf - -C "$ST/repo"
     fi
@@ -43,6 +44,7 @@ else
     if git -C "$ROOT" cat-file -e "$REF:host/dxmt/pin.env" 2>/dev/null; then
         git -C "$ROOT" archive "$REF" host/dxmt wmtr \
             host/vrhost/include/vrlink.h guest/vr/include/steamac_vr_guest.h \
+            $(git -C "$ROOT" cat-file -e "$REF:guest/proton-vrclient" 2>/dev/null && echo guest/proton-vrclient) \
             scripts/steps/30-layer.sh \
             LICENSE NOTICE LICENSES | tar -xf - -C "$ST/repo"
     fi

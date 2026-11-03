@@ -7837,6 +7837,22 @@
         }
       }
     },
+    "Stream to the Virtual Desktop app on the headset instead of WiVRn. Needs Virtual Desktop Streamer for macOS installed in Applications and signed in to the same account as the headset." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Передавать изображение в приложение Virtual Desktop на шлеме вместо WiVRn. Нужен Virtual Desktop Streamer для macOS в папке «Программы», вошедший в тот же аккаунт, что и шлем."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "改为串流到头显上的 Virtual Desktop 应用，而不是 WiVRn。需要在“应用程序”中安装 macOS 版 Virtual Desktop Streamer，并登录与头显相同的账户。"
+          }
+        }
+      }
+    },
     "Suspend" : {
       "comment" : "App menu: freeze the VM in memory",
       "localizations" : {
@@ -8880,6 +8896,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "请使用 NAME=value 格式的词（最多 256 个字符）。名称必须以 VKD3D_、DXVK_、PROTON_、WINE_、MESA_、RADV_、VK_、DXMT_、MTL_ 或 STEAMAC_ 开头；值只能包含英文字母、数字和 _.,:;+-。"
+          }
+        }
+      }
+    },
+    "Use Virtual Desktop" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Использовать Virtual Desktop"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用 Virtual Desktop"
           }
         }
       }

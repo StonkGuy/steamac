@@ -1,7 +1,7 @@
 # VR (experimental)
 
 Play a game in VR on a standalone headset streamed from the Mac. The Mac runs `steamac-vrhost`, a WiVRn-compatible
-server; the headset runs the stock **WiVRn v26.9** client. Inside SteamOS, the game talks to this fork's OpenVR runtime
+server; the headset runs the stock **WiVRn v26.9** client (or Virtual Desktop, below). Inside SteamOS, the game talks to this fork's OpenVR runtime
 through a patched Proton `vrclient_x64`, and its eye images go over the DXMT path to the Mac, where they are encoded
 with VideoToolbox and streamed.
 
@@ -36,6 +36,17 @@ headset opens pairing by itself; the PIN is shown in Settings > VR and in the VM
 the headset. The PIN never crosses the network (WiVRn's SMP check), and the link is encrypted (AES-128). Paired
 headsets reconnect without a PIN. With the option off, new headsets are refused and the panel offers **Pair this
 headset**. **Unpair** removes a headset (entries of the same name are grouped).
+
+### Virtual Desktop instead of WiVRn
+
+Settings > VR > **Use Virtual Desktop** streams to the Virtual Desktop app on the headset instead (vrhost
+`--adapter vd`). It needs Virtual Desktop on the headset and **Virtual Desktop Streamer for macOS** installed in
+Applications (or ~/Applications), signed in to the same account as the headset; quit the Streamer itself while the VM
+streams, since both cannot take the headset. The headset then lists the Mac in Virtual Desktop's computer list. There
+is no PIN: pairing is Virtual Desktop's own (the account). The game shows in its Games tab and starts from there.
+Spacewarp follows the headset's setting. Unofficial and not affiliated with Virtual Desktop; the discovery key is
+read at start from the installed Streamer, kept in memory only and never stored or logged. Verified with a Quest 3
+and VRChat (2026-10-29).
 
 ### Starting a game
 

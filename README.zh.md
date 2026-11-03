@@ -15,6 +15,9 @@ x86-64 Windows 游戏（已在游戏中验证：VRChat；Mini Royale 也能通�
 EAC 客户端是 Proton EasyAntiCheat Runtime 自带的原版。没有任何东西伪造、重放或绕过它的结果。与 FX GAMES、Valve、
 Epic Games、VRChat 及 DXMT 作者均无关联。
 
+**喜欢这个项目？欢迎支持。** 给仓库点个星标、在出问题时提交 issue（附上 Mac 型号和日志）、提交 pull request，都非常欢迎。
+如果你的分支里有修复或改进，也请在这里开一个 pull request：它会被审查、注明你的署名，并在下一个版本中提供给所有人。
+
 **发现了错误？** 请在这里报告（提交 issue，或附带测试的 pull request），而不要只在你自己的分支里修复，这样每个人都能
 得到修复。本分支自身不会向 libkrun、Mesa、FEX 或 Proton 提交任何内容；steamac 的改动直接与其维护者讨论。如果你审阅过
 这里的某个改动并认为它足以进入上述某个项目，欢迎你自行提交：保留它的测试，遵循该项目的流程，并注明来源。FEX 代码改动

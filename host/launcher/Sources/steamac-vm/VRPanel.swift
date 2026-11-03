@@ -523,6 +523,11 @@ struct VRTab: View {
                 }
                 row("Refresh rate", l.refresh ?? String(localized: "Chosen by the headset"),
                     detail: String(localized: "Set in the WiVRn app on the headset (as are its resolution scale and microphone); the host encodes at that rate."))
+                Toggle(isOn: $settings.vrVirtualDesktop) {
+                    Label2(title: "Use Virtual Desktop",
+                           detail: String(localized: "Stream to the Virtual Desktop app on the headset instead of WiVRn. Needs Virtual Desktop Streamer for macOS installed in Applications and signed in to the same account as the headset."),
+                           now: false, key: .vrVirtualDesktop)
+                }
                 Toggle(isOn: $settings.vrTCPOnly) {
                     Label2(title: "TCP only",
                            detail: String(localized: "Sends the video over TCP instead of UDP, for networks that drop UDP. Adds latency when packets are lost."),
