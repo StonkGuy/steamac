@@ -29,6 +29,28 @@ T prop_result(vr::ETrackedPropertyError *err, vr::ETrackedPropertyError e, T v) 
   return v;
 }
 
+// String properties of a tracked-device table device: the source's own values, else what SteamVR reports for a
+// Vive Tracker 3.0 in that role (titles such as VRChat key FBT on the class; role-aware ones on the controller type).
+uint32_t tracker_string(const svr_trk_device &d, vr::ETrackedDeviceProperty p, char *buf, uint32_t size,
+                        vr::ETrackedPropertyError *e) {
+  auto pick = [](const char *own, const std::string &def) { return own[0] ? std::string(own) : def; };
+  std::string role = tracker_role_name(d.role);
+  std::string type = role.empty() ? "vive_tracker" : "vive_tracker_" + role;
+  switch (p) {
+    case vr::Prop_SerialNumber_String: return copy_string(d.serial, buf, size, e);
+    case vr::Prop_TrackingSystemName_String: return copy_string(pick(d.tracking_system, "steamac"), buf, size, e);
+    case vr::Prop_ModelNumber_String: return copy_string(pick(d.model, "steamac tracker"), buf, size, e);
+    case vr::Prop_ManufacturerName_String: return copy_string(pick(d.manufacturer, "steamac"), buf, size, e);
+    case vr::Prop_RenderModelName_String: return copy_string(pick(d.render_model, "{htc}vr_tracker_vive_3_0"), buf, size, e);
+    case vr::Prop_ControllerType_String: return copy_string(pick(d.controller_type, type), buf, size, e);
+    case vr::Prop_InputProfilePath_String:
+      return copy_string(pick(d.input_profile, "{htc}/input/vive_tracker_profile.json"), buf, size, e);
+    case vr::Prop_RegisteredDeviceType_String:
+      return copy_string(pick(d.tracking_system, "steamac") + "/" + d.serial, buf, size, e);
+    default: return prop_result(e, vr::TrackedProp_UnknownProperty, 0u);
+  }
+}
+
 class System : public StubIVRSystem {
  public:
   void GetRecommendedRenderTargetSize(uint32_t *w, uint32_t *h) override {
@@ -98,7 +120,7 @@ class System : public StubIVRSystem {
   uint32_t GetSortedTrackedDeviceIndicesOfClass(ETrackedDeviceClass cls, vr::TrackedDeviceIndex_t *out, uint32_t size,
                                                 vr::TrackedDeviceIndex_t) override {
     uint32_t n = 0;
-    for (vr::TrackedDeviceIndex_t i = 0; i < kDeviceCount; i++) {
+    for (vr::TrackedDeviceIndex_t i = 0; i < kMaxDevices; i++) {
       if (GetTrackedDeviceClass(i) != cls || !IsTrackedDeviceConnected(i)) continue;
       if (out && n < size) out[n] = i;
       n++;
@@ -130,6 +152,13 @@ class System : public StubIVRSystem {
                                                                      : TrackedControllerRole_Invalid;
   }
   ETrackedDeviceClass GetTrackedDeviceClass(vr::TrackedDeviceIndex_t i) override {
+    if (i >= kTrackerBase) {
+      // a table device keeps its class while present (SteamVR keeps an index's class for the session)
+      svr_trk_device d;
+      if (!Runtime::get().tracker(i, &d)) return TrackedDeviceClass_Invalid;
+      Runtime::get().pose_stats().tracker_class++;  // shows in the 5 s pose line whether the title looks at trackers
+      return (ETrackedDeviceClass)d.device_class;
+    }
     return i == kHmd ? TrackedDeviceClass_HMD : (i == kLeft || i == kRight) ? TrackedDeviceClass_Controller
                                                                             : TrackedDeviceClass_Invalid;
   }
@@ -143,6 +172,18 @@ class System : public StubIVRSystem {
 
   bool GetBoolTrackedDeviceProperty(vr::TrackedDeviceIndex_t i, ETrackedDeviceProperty p,
                                     ETrackedPropertyError *e) override {
+    if (i >= kTrackerBase && Runtime::get().tracker(i, nullptr)) {
+      switch (p) {
+        case Prop_DeviceProvidesBatteryStatus_Bool: return prop_result(e, TrackedProp_Success, false);
+        case Prop_DeviceIsWireless_Bool: return prop_result(e, TrackedProp_Success, true);
+        case Prop_DeviceIsCharging_Bool: return prop_result(e, TrackedProp_Success, false);
+        case Prop_HasDisplayComponent_Bool: return prop_result(e, TrackedProp_Success, false);
+        case Prop_HasControllerComponent_Bool: return prop_result(e, TrackedProp_Success, false);
+        case Prop_HasCameraComponent_Bool: return prop_result(e, TrackedProp_Success, false);
+        case Prop_Identifiable_Bool: return prop_result(e, TrackedProp_Success, false);
+        default: return prop_result(e, TrackedProp_UnknownProperty, false);
+      }
+    }
     if (i >= kDeviceCount) return prop_result(e, TrackedProp_InvalidDevice, false);
     switch (p) {
       case Prop_DeviceProvidesBatteryStatus_Bool: return prop_result(e, TrackedProp_Success, false);
@@ -157,6 +198,9 @@ class System : public StubIVRSystem {
 
   float GetFloatTrackedDeviceProperty(vr::TrackedDeviceIndex_t i, ETrackedDeviceProperty p,
                                       ETrackedPropertyError *e) override {
+    if (i >= kTrackerBase && Runtime::get().tracker(i, nullptr))
+      return p == Prop_DeviceBatteryPercentage_Float ? prop_result(e, TrackedProp_Success, 1.0f)
+                                                     : prop_result(e, TrackedProp_UnknownProperty, 0.0f);
     if (i >= kDeviceCount) return prop_result(e, TrackedProp_InvalidDevice, 0.0f);
     switch (p) {
       case Prop_DisplayFrequency_Float:
@@ -179,6 +223,14 @@ class System : public StubIVRSystem {
 
   int32_t GetInt32TrackedDeviceProperty(vr::TrackedDeviceIndex_t i, ETrackedDeviceProperty p,
                                         ETrackedPropertyError *e) override {
+    if (i >= kTrackerBase && Runtime::get().tracker(i, nullptr)) {
+      switch (p) {
+        case Prop_DeviceClass_Int32: return prop_result(e, TrackedProp_Success, (int32_t)GetTrackedDeviceClass(i));
+        // trackers stay out of the left/right hand assignment, as SteamVR's Vive Trackers do
+        case Prop_ControllerRoleHint_Int32: return prop_result(e, TrackedProp_Success, (int32_t)TrackedControllerRole_OptOut);
+        default: return prop_result(e, TrackedProp_UnknownProperty, 0);
+      }
+    }
     if (i >= kDeviceCount) return prop_result(e, TrackedProp_InvalidDevice, 0);
     switch (p) {
       case Prop_DeviceClass_Int32: return prop_result(e, TrackedProp_Success, (int32_t)GetTrackedDeviceClass(i));
@@ -200,6 +252,11 @@ class System : public StubIVRSystem {
 
   uint64_t GetUint64TrackedDeviceProperty(vr::TrackedDeviceIndex_t i, ETrackedDeviceProperty p,
                                           ETrackedPropertyError *e) override {
+    if (i >= kTrackerBase && Runtime::get().tracker(i, nullptr)) {
+      if (p == Prop_CurrentUniverseId_Uint64) return prop_result(e, TrackedProp_Success, (uint64_t)1);
+      if (p == Prop_SupportedButtons_Uint64) return prop_result(e, TrackedProp_Success, (uint64_t)0);
+      return prop_result(e, TrackedProp_UnknownProperty, (uint64_t)0);
+    }
     if (i >= kDeviceCount) return prop_result(e, TrackedProp_InvalidDevice, (uint64_t)0);
     switch (p) {
       case Prop_CurrentUniverseId_Uint64: return prop_result(e, TrackedProp_Success, (uint64_t)1);
@@ -228,6 +285,12 @@ class System : public StubIVRSystem {
 
   uint32_t GetStringTrackedDeviceProperty(vr::TrackedDeviceIndex_t i, ETrackedDeviceProperty p, char *buf,
                                           uint32_t size, ETrackedPropertyError *e) override {
+    if (i >= kTrackerBase) {
+      svr_trk_device d;
+      if (!Runtime::get().tracker(i, &d)) return prop_result(e, TrackedProp_InvalidDevice, 0u);
+      Runtime::get().pose_stats().tracker_props++;
+      return tracker_string(d, p, buf, size, e);
+    }
     if (i >= kDeviceCount) return prop_result(e, TrackedProp_InvalidDevice, 0u);
     if (i == kHmd) {
       svr_hello_rep hi = Runtime::get().hello();

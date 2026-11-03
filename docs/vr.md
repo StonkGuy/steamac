@@ -106,6 +106,8 @@ only.
 - WiVRn v26.9 clients only.
 - Controller render models are not provided (VRChat draws its own hands; only SteamVR-style overlays would show them).
 - One game verified (VRChat). Other OpenVR games are untested.
+- Full-body trackers and other extra tracked devices (SteamVR tracker drivers, body estimators such as Standable,
+  your own sources): [`vr-trackers.md`](vr-trackers.md).
 
 ## How the host works
 

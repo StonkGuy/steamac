@@ -6,6 +6,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <stdio.h>
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
@@ -41,6 +43,7 @@ vr::EVRInitError Runtime::init(vr::EVRApplicationType type) {
   std::lock_guard<std::mutex> g(m_);
   if (transport_) return vr::VRInitError_None;
   transport_ = Transport::open_default();
+  if (!transport_ && type != vr::VRApplication_Scene && init_secondary_locked()) return vr::VRInitError_None;
   if (!transport_) {
     SVR_ERR("no host link (DXMT/wmtr not loaded in this process and STEAMAC_VR_SOCKET not set)");
     return vr::VRInitError_Init_HmdNotFound;
@@ -72,10 +75,49 @@ vr::EVRInitError Runtime::init(vr::EVRApplicationType type) {
   return vr::VRInitError_None;
 }
 
+// A process without a host link (a companion app such as a full-body estimator, an overlay, a driver host) shares the
+// scene app's view of the headset through the tracked-device table's mirror, if a scene app is running (its mirror
+// sequence moves within 250 ms).
+bool Runtime::init_secondary_locked() {
+  if (!trk_.open(nullptr, false)) return false;
+  svr_trk_mirror m{};
+  bool live = false;
+  for (int i = 0; i < 25 && !live; i++) {
+    uint32_t s0 = trk_.read_mirror(&m);
+    sleep_until(now_ns() + 10000000);
+    live = s0 && trk_.read_mirror(&m) != s0;
+  }
+  if (!live) {
+    trk_.close();
+    return false;
+  }
+  for (int i = 0; i < 25 && !trk_view_.mirror_live(trk_, now_ns(), &m); i++) sleep_until(now_ns() + 10000000);
+  secondary_ = true;
+  hello_ = svr_hello_rep{};
+  hello_.h = {SVR_HELLO, sizeof(hello_)};
+  hello_.version = SVR_VERSION;
+  hello_.connected = m.connected;
+  hello_.eye_width = m.eye_width, hello_.eye_height = m.eye_height;
+  hello_.refresh_hz = m.refresh_hz, hello_.ipd_m = m.ipd_m;
+  memcpy(hello_.fov, m.fov, sizeof(hello_.fov));
+  hello_.profile = m.profile;
+  snprintf(hello_.name, sizeof(hello_.name), "steamac HMD");
+  hello_view_ = true;
+  SVR_INFO("init without a host link: poses from the scene app's mirror in %s", TrackerTable::default_path().c_str());
+  connected_[0] = true;
+  vr::VREvent_t ev{};
+  ev.eventType = vr::VREvent_TrackedDeviceActivated;
+  events_.push_back(ev);
+  return true;
+}
+
 void Runtime::shutdown() {
   std::lock_guard<std::mutex> g(m_);
   if (pending_valid_) flush_submit_locked();
   transport_.reset();
+  trk_.close();
+  trk_view_ = TrackerView{};
+  secondary_ = false;
   events_.clear();
   memset(connected_, 0, sizeof(connected_));
 }
@@ -92,6 +134,7 @@ float Runtime::refresh_hz() const {
 
 // caller holds no lock
 bool Runtime::fetch(svr_frame_rep *out) {
+  if (secondary_) return fetch_mirror(out);
   svr_frame_req req{};
   req.h = {SVR_FRAME, sizeof(req)};
   bool need_view;
@@ -126,6 +169,38 @@ bool Runtime::fetch(svr_frame_rep *out) {
   }
   std::lock_guard<std::mutex> g(m_);
   clock_offset_ = now - rep.host_now;
+  update_latest_locked(rep);
+  refresh_trackers_locked(now, &rep);
+  if (out) *out = rep;
+  return true;
+}
+
+// the scene app's snapshot from the mirror, as if it came from the host (guest clock: offset 0)
+bool Runtime::fetch_mirror(svr_frame_rep *out) {
+  int64_t now = now_ns();
+  std::lock_guard<std::mutex> g(m_);
+  svr_trk_mirror m{};
+  bool live = trk_view_.mirror_live(trk_, now, &m);
+  svr_frame_rep rep{};
+  rep.h = {SVR_FRAME, sizeof(rep)};
+  rep.frame_id = ++secondary_frame_;
+  rep.host_now = rep.wake_up = rep.predicted_display = now;
+  rep.pose_time = trk_view_.mirror_seen;
+  rep.refresh_hz = m.refresh_hz;
+  rep.connected = live && m.connected;
+  rep.profile = m.profile;
+  rep.ipd_m = m.ipd_m;
+  memcpy(rep.fov, m.fov, sizeof(rep.fov));
+  memcpy(rep.pose, m.pose, sizeof(rep.pose));
+  memcpy(rep.input, m.input, sizeof(rep.input));
+  clock_offset_ = 0;
+  update_latest_locked(rep);
+  refresh_trackers_locked(now, nullptr);
+  if (out) *out = rep;
+  return true;
+}
+
+void Runtime::update_latest_locked(const svr_frame_rep &rep) {
   latest_ = rep;
   hello_.connected = rep.connected;
   // device connection changes become OpenVR events. The HMD stays connected while the runtime is up, as SteamVR
@@ -142,8 +217,42 @@ bool Runtime::fetch(svr_frame_rep *out) {
       events_.push_back(ev);
     }
   }
-  if (out) *out = rep;
-  return true;
+}
+
+// Opens the tracked-device table on first use (a scene app creates it so sources can join at any time; retried at
+// most once a second while it cannot be opened), publishes the mirror (scene app: `rep`), and turns tracker
+// connection changes into OpenVR events. Cost per call: one seqlocked copy per slot.
+void Runtime::refresh_trackers_locked(int64_t now, const svr_frame_rep *rep) {
+  if (!trk_.is_open()) {
+    if (now < trk_retry_) return;
+    trk_retry_ = now + 1000000000LL;
+    if (!trk_.open(nullptr, rep != nullptr)) return;
+    SVR_INFO("tracked-device table %s open", TrackerTable::default_path().c_str());
+  }
+  if (rep) {
+    svr_trk_mirror m{};
+    m.connected = rep->connected;
+    m.profile = rep->profile ? rep->profile : hello_.profile;
+    m.refresh_hz = rep->refresh_hz;
+    m.ipd_m = rep->ipd_m;
+    memcpy(m.fov, rep->fov, sizeof(m.fov));
+    m.eye_width = hello_.eye_width, m.eye_height = hello_.eye_height;
+    memcpy(m.pose, rep->pose, sizeof(m.pose));
+    memcpy(m.input, rep->input, sizeof(m.input));
+    trk_.write_mirror(m);
+  }
+  uint32_t changed = trk_view_.refresh(trk_, now);
+  for (uint32_t i = 0; changed; i++, changed >>= 1) {
+    if (!(changed & 1)) continue;
+    const TrackerView::Dev &v = trk_view_.dev[i];
+    connected_[kTrackerBase + i] = v.connected;
+    vr::VREvent_t ev{};
+    ev.eventType = v.connected ? vr::VREvent_TrackedDeviceActivated : vr::VREvent_TrackedDeviceDeactivated;
+    ev.trackedDeviceIndex = kTrackerBase + i;
+    events_.push_back(ev);
+    SVR_INFO("tracker %u %s: serial %s class %u role %s", kTrackerBase + i, v.connected ? "connected" : "disconnected",
+             v.d.serial, v.d.device_class, tracker_role_setting(v.d.role));
+  }
 }
 
 bool Runtime::poll() { return fetch(nullptr); }
@@ -154,6 +263,7 @@ bool Runtime::wait_frame() {
     if (pending_valid_) flush_submit_locked();
   }
   svr_frame_rep rep;
+  if (secondary_) sleep_until(now_ns() + (int64_t)(1e9f / refresh_hz()));  // no host frame clock: pace at refresh
   if (!fetch(&rep)) return false;
   int64_t wake = host_to_guest(rep.wake_up);
   if (wake > now_ns()) {
@@ -208,10 +318,12 @@ void Runtime::note_render_head(const vr::TrackedDevicePose_t &p) {
   PoseStats &s = pose_stats_;
   SVR_INFO("poses 5s: WaitGetPoses %u (failed %u), GetLastPoses %u, GetLastPoseForTrackedDeviceIndex %u, "
            "GetDeviceToAbsoluteTrackingPose %u (seated %u), pose actions %u (inactive %u), IsTrackedDeviceConnected %u "
-           "(HMD false %u); render head invalid %u, forward x %.2f..%.2f y %.2f..%.2f, height %.2f..%.2f m",
+           "(HMD false %u); tracker class queries %u, property queries %u; render head invalid %u, forward x %.2f..%.2f "
+           "y %.2f..%.2f, height %.2f..%.2f m",
            s.wait.exchange(0), s.wait_fail.exchange(0), s.last_poses.exchange(0), s.last_pose_index.exchange(0),
            s.abs_pose.exchange(0), s.abs_seated.exchange(0), s.pose_action.exchange(0), s.pose_action_inactive.exchange(0),
-           s.connected_query.exchange(0), s.connected_false_hmd.exchange(0), stats_head_invalid_, stats_head_min_[0],
+           s.connected_query.exchange(0), s.connected_false_hmd.exchange(0), s.tracker_class.exchange(0),
+           s.tracker_props.exchange(0), stats_head_invalid_, stats_head_min_[0],
            stats_head_max_[0], stats_head_min_[1], stats_head_max_[1], stats_head_min_[2], stats_head_max_[2]);
   stats_head_invalid_ = 0;
   for (int i = 0; i < 3; i++) stats_head_min_[i] = 1e9f, stats_head_max_[i] = -1e9f;
@@ -244,16 +356,39 @@ static int device_to_svr(vr::TrackedDeviceIndex_t i) {
 
 bool Runtime::device_connected(vr::TrackedDeviceIndex_t i) const {
   std::lock_guard<std::mutex> g(m_);
-  return i < kDeviceCount && connected_[i];
+  return i < kMaxDevices && connected_[i];
+}
+
+bool Runtime::tracker(vr::TrackedDeviceIndex_t i, svr_trk_device *out) const {
+  if (i < kTrackerBase || i >= kMaxDevices) return false;
+  std::lock_guard<std::mutex> g(m_);
+  const TrackerView::Dev &v = trk_view_.dev[i - kTrackerBase];
+  if (!v.present) return false;
+  if (out) *out = v.d;
+  return true;
+}
+
+vr::TrackedDevicePose_t Runtime::device_pose_at(vr::TrackedDeviceIndex_t i, int64_t guest_t) const {
+  if (i >= kTrackerBase && i < kMaxDevices) {
+    std::lock_guard<std::mutex> g(m_);
+    const TrackerView::Dev &v = trk_view_.dev[i - kTrackerBase];
+    if (!v.present) return to_openvr(svr_pose{}, false);
+    // the pose is taken as current when this process first saw it; extrapolate at most 100 ms from there
+    float dt = (float)(guest_t - v.seen) * 1e-9f;
+    dt = dt < -0.1f ? -0.1f : dt > 0.1f ? 0.1f : dt;
+    return to_openvr(extrapolate(v.d.pose, dt), connected_[i]);
+  }
+  int d = device_to_svr(i);
+  if (d < 0) return to_openvr(svr_pose{}, false);
+  return to_openvr(pose_at(d, guest_t), device_connected(i));
 }
 
 vr::TrackedDevicePose_t Runtime::device_pose(vr::TrackedDeviceIndex_t i, float seconds_from_now) const {
-  int d = device_to_svr(i);
-  if (d < 0) return to_openvr(svr_pose{}, false);
-  return to_openvr(pose_at(d, now_ns() + (int64_t)(seconds_from_now * 1e9f)), device_connected(i));
+  return device_pose_at(i, now_ns() + (int64_t)(seconds_from_now * 1e9f));
 }
 
 vr::TrackedDevicePose_t Runtime::device_frame_pose(vr::TrackedDeviceIndex_t i) const {
+  if (i >= kTrackerBase) return device_pose_at(i, frame_display_guest());
   int d = device_to_svr(i);
   if (d < 0) return to_openvr(svr_pose{}, false);
   return to_openvr(frame_pose(d), device_connected(i));

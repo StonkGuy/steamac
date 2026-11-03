@@ -1,0 +1,20 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# steamac-vr-companion: Steam launch option of a tracker product's application (docs/vr-trackers.md), set by
+# steam-vr-companion as "<this> %command%". Steam's command ends with the application's .exe (and its arguments);
+# this runs svr-driverhost.exe there instead, in the same Proton session, which loads the product's SteamVR driver
+# and then starts the application (--then). Driver and application share one wineserver, so their pipes connect,
+# and the driver's devices reach the game through the steamac tracked-device table.
+# Without svr-driverhost.exe beside this script the command runs unchanged.
+here=$(cd "$(dirname "$0")" && pwd)
+host=$here/svr-driverhost.exe
+args=("$@")
+exe=-1
+for i in "${!args[@]}"; do
+    case ${args[$i],,} in *.exe) exe=$i ;; esac
+done
+if [[ ! -f $host || $exe -lt 0 ]]; then
+    exec "$@"
+fi
+echo "steamac-vr-companion: ${args[$exe]} with its SteamVR driver (svr-driverhost)" >&2
+exec "${args[@]:0:$exe}" "$host" --then "${args[@]:$exe}"

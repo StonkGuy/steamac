@@ -58,6 +58,10 @@ if [[ -f $VR/runtime/bin/linux64/vrclient.so && -f $VR/x86_64-windows/vrclient_x
     for f in x86_64-windows/vrclient_x64.dll x86_64-unix/vrclient_x64.so runtime/bin/linux64/vrclient.so; do
         install -D -m 0644 "$VR/$f" "$ST/usr/lib/steamac/vr/$f"
     done
+    # tracked devices (docs/vr-trackers.md), optional: svr-driverhost (Linux and Windows builds) and svr-tracker-feed
+    for f in tools/svr-driverhost tools/svr-tracker-feed tools/svr-driverhost.exe; do
+        [[ -f $VR/$f ]] && install -D -m 0755 "$VR/$f" "$ST/usr/lib/steamac/vr/$f"
+    done
     vr_info=$(cd "$VR" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
     echo "[layer] included VR from $VR ($vr_info)"
 else
