@@ -252,11 +252,17 @@ jobs:
         run: guest/vr/build-sniper.sh build-sniper
       - name: Proton vrclient_x64 (Proton's build system)
         run: guest/proton-vrclient/build.sh /mnt/vr/proton-vrclient /mnt/vr/out
+      - name: Tracker driver host for Windows drivers (MinGW)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q g++-mingw-w64-x86-64-posix
+          make -C guest/vr OUT=/mnt/vr/win-build MINGW=x86_64-w64-mingw32- driverhost-win
       - name: Pack
         run: |
           mkdir -p work/out/vr/runtime/bin/linux64
           cp -a /mnt/vr/out/x86_64-windows /mnt/vr/out/x86_64-unix work/out/vr/
           install -m 0644 guest/vr/build-sniper/runtime/bin/linux64/vrclient.so work/out/vr/runtime/bin/linux64/vrclient.so
+          install -D -m 0755 -t work/out/vr/tools guest/vr/build-sniper/svr-driverhost guest/vr/build-sniper/svr-tracker-feed \
+            /mnt/vr/win-build/win/svr-driverhost.exe
           find work/out/vr -type f -exec sha256sum {} +
           tar -cf vr.tar work/out/vr
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
