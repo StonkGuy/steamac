@@ -45,6 +45,7 @@ static std::string g_control_socket;              // --control-socket
 static std::atomic<double> g_pipeline_p50_ms{0}; // last link report, for the control socket
 static std::atomic<double> g_compose_gpu_p50_ms{0}, g_submit_copied_p50_ms{0}, g_game_fps{0};
 static CompositorOptions g_quality;                // --upscaler / --sharpness / --force-srgb
+static uint32_t g_frames_in_flight = 0;            // --frames-in-flight
 
 static void usage()
 {
@@ -64,6 +65,10 @@ static void usage()
 	        "  --upscaler metalfx|bilinear  upscaler for --render-scale below 1 (default metalfx)\n"
 	        "  --sharpness F       sharpening in the compositor, 0-1 (default 0)\n"
 	        "  --force-srgb        decode 8-bit eye images as sRGB even when the format is not marked sRGB\n"
+	        "  --frames-in-flight N|auto  hold the game's next frame until all but N-1 issued frames are copied (default\n"
+	        "                      0: off; 2 keeps CPU/GPU overlap, 1 is the lowest latency); auto: a GPU-bound game's\n"
+	        "                      CPU work is timed to end as the GPU finishes the frame before (latency of 1, frame\n"
+	        "                      rate of 0)\n"
 	        "  --keyframe-interval S  an IDR at least every S seconds (default: only when the headset asks)\n"
 	        "  --prioritize-speed  VideoToolbox: encoding speed over quality\n"
 	        "  --no-encryption     WiVRn's 'encryption disabled' mode (trusted LAN only)\n"
@@ -296,7 +301,8 @@ static void write_pin(const std::string & pin)
 }
 
 // The launcher's status/pairing socket, when asked for (never fatal: the host serves without it).
-static std::unique_ptr<ControlServer> make_control(WivrnSession & session, std::function<std::string()> stream_json = nullptr)
+static std::unique_ptr<ControlServer> make_control(WivrnSession & session, std::function<std::string()> stream_json = nullptr,
+                                                   std::function<bool(uint32_t)> set_frames_in_flight = nullptr)
 {
 	if (g_control_socket.empty())
 		return nullptr;
@@ -307,6 +313,7 @@ static std::unique_ptr<ControlServer> make_control(WivrnSession & session, std::
 		                                               .pipeline_latency_ms = [] { return g_pipeline_p50_ms.load(); },
 		                                               .pin_changed = write_pin,
 		                                               .stream_json = std::move(stream_json),
+		                                               .set_frames_in_flight = std::move(set_frames_in_flight),
 		                                       });
 	}
 	catch (std::exception & e)
@@ -433,7 +440,7 @@ static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_soc
 			return 0;
 	}
 	WivrnSession session(cfg);
-	VrPipeline pipeline(session, link_fd, mach_name, g_quality);
+	VrPipeline pipeline(session, link_fd, mach_name, g_quality, g_frames_in_flight);
 	vra_region * audio_region = nullptr;
 	std::unique_ptr<AudioBridge> audio;
 	if (audio_fd >= 0)
@@ -454,6 +461,9 @@ static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_soc
 		         g_game_fps.load(), ps.received.load(), ps.no_headset.load(), g_compose_gpu_p50_ms.load(),
 		         g_submit_copied_p50_ms.load(), pipeline.upscaler());
 		return std::string(b);
+	}, [&pipeline](uint32_t n) {
+		pipeline.set_frames_in_flight(n);
+		return true;
 	});
 	printf("steamac-vrhost: VR link fd %d, mach name %s, listening on port %d, protocol %016" PRIx64 " (WiVRn v26.9)%s\n",
 	       link_fd, mach_name.c_str(), session.port(), WivrnSession::protocol_version(),
@@ -482,6 +492,12 @@ static int serve_link(WivrnConfig cfg, int link_fd, const std::string & link_soc
 			       q(l.submit_to_copied, .5), q(l.submit_to_copied, .99), q(l.copied_to_received, .5),
 			       q(l.copied_to_received, .99), q(l.received_to_sent, .5), q(l.received_to_sent, .99), q(l.total, .5),
 			       q(l.total, .99), q(l.compose_gpu, .5), s.last_encode_ns / 1e6, s.last_feedback_decode_ns / 1e6);
+			if (pipeline.release_adaptive())
+			{
+				auto e = pipeline.release_estimate();
+				printf("frame release auto: CPU %.1f ms, GPU %.1f ms, %s\n", e.cpu / 1e6, e.gpu / 1e6,
+				       e.holding ? "GPU-bound: held" : "not held");
+			}
 			fflush(stdout);
 			last_report = now_ns();
 		}
@@ -645,6 +661,11 @@ int main(int argc, char ** argv)
 			g_quality.sharpness = std::clamp(std::stof(next()), 0.0f, 1.0f);
 		else if (a == "--force-srgb")
 			g_quality.force_srgb = true;
+		else if (a == "--frames-in-flight")
+		{
+			std::string v = next();
+			g_frames_in_flight = v == "auto" ? FramesInFlight::adaptive : uint32_t(std::clamp(std::stoi(v), 0, 8));
+		}
 		else if (a == "--keyframe-interval")
 			cfg.keyframe_interval_s = std::stof(next());
 		else if (a == "--pair-on-request")

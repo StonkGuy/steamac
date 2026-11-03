@@ -210,11 +210,13 @@ int main(int argc, char **argv) {
   std::string runtime = argv[1], data = argv[2];
   int frames = 150;
   bool index = false, title = false, standby = false;
+  int divisor = 1;  // the host pacer releases every Nth frame (vr-fakehost --pacer N)
   for (int i = 3; i < argc; i++) {
     if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--profile") && i + 1 < argc) index = !strcmp(argv[++i], "index");
     else if (!strcmp(argv[i], "--title")) title = true;
     else if (!strcmp(argv[i], "--standby")) standby = true;
+    else if (!strcmp(argv[i], "--divisor") && i + 1 < argc) divisor = atoi(argv[++i]);
   }
 
   std::string so = runtime + "/bin/linux64/vrclient.so";
@@ -408,7 +410,7 @@ int main(int argc, char **argv) {
       if (near(d, expect, 0.002f)) pose_ok++;
     }
     CHECK(near(render[0].mDeviceToAbsoluteTracking.m[1][3], 1.7f, 1e-4f), "head height");
-    if (i > 0 && frame != prev_frame + 1) skipped++;
+    if (i > 0 && frame != prev_frame + (uint64_t)divisor) skipped++;
     prev_yaw = yaw, prev_frame = frame;
 
     // prediction: 100 ms ahead = 0.05 rad more yaw

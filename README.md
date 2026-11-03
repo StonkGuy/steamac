@@ -122,7 +122,14 @@ uses goes back to the Mac:
 |---|---|---|---|
 | free page reporting (libkrun patch 0026) | pages the guest frees leave the VM's memory footprint on the Mac at once (stock libkrun keeps them charged on macOS) | on | idle after boot 0.7-0.8 GiB lower |
 | boot page-cache trim (`steamac-mem-trim`) | 150 s after boot the guest drops its clean page cache once, so it is reported free too; runs once per boot, nothing during play | on; `steamac.mem_trim=0` on the kernel command line turns it off | idle VM footprint 8.92 -> 7.39 GiB |
+| after-game trim (`steamac-mem-trim-games`) | when the last running game ends (or is killed), the guest drops its clean page cache and compacts free memory, so what the game used is reported free in whole 2 MiB blocks; a check every 10 s, nothing during play | on; `steamac.mem_trim=0` turns it off | after an OOM-killed VRChat, compacting took the VM footprint from 13 to 8.5 GiB |
 | DXMT arena trim (`wmtr/`, libkrun patch 0028) | DXMT path: shared buffers idle for 1 s beyond a 128 MiB reserve go back to the Mac after a loading peak | on; `WMTR_ARENA_KEEP_MB`, `WMTR_ARENA_TRIM_MS`, `-1` keeps all | offline test: 504 -> 203 MiB after a peak; live check pending |
+| DXMT objects of an ended game (`wmtr/`) | when a game exits or is killed, the Metal objects it still owned (textures, buffers, pipelines) are released at once; before, they stayed in the VM until it shut down | on | after an OOM-killed VRChat ~1.1 GiB of graphics memory stayed behind; offline test, live check pending |
+
+Swap inside the guest: zram as large as the VM's memory, compressed with zstd (SteamOS's own is half the RAM with
+lzo-rle), and behind it a swap file on /home of half the VM's memory that only takes pages once zram is full
+(`steamac.swap_fallback=0` turns the file off and removes it). With SteamOS's zram alone, a heavy VRChat world change in
+an 8 GiB VM filled RAM and zram and the guest kernel killed the game.
 
 Scope: general (any game on this stack). These lower the idle and after-load footprint; they do not make a game fit
 whose peak needs more than the VM and the Mac have (see *Limits*).

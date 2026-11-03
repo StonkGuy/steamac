@@ -315,9 +315,17 @@ static void test_vr_query(struct wmtr_vr *vr, int host_fd) {
         fr.input[1][SVR_IN_TRIGGER_VALUE] == 0.5f && fr.input[0][SVR_IN_THUMBSTICK_X] == -1.0f && fr.connected,
         "frame from VRL_TIMING/POSES/INPUT");
   fq.last_frame_id = 500; /* the guest already rendered it: continue the cadence */
-  /* no newer host frame: the next one a period later (wmtr_vr_frame_cadence) */
-  CHECK(wmtr_vr_call(&fq, sizeof fq, &fr, sizeof fr) == 0 && fr.frame_id == 501 &&
-        fr.wake_up == t0 + (int64_t)(1e9f / 72.0f), "frame after the pacer's");
+  /* no newer host frame: the next one a period later (wmtr_vr_frame_cadence). While the pacer is live that is when
+     its next frame is due, or now once that has passed (here when this thread took more than ~19 ms since t0 was
+     taken, e.g. on a loaded CI runner): bounded by the times measured around the call, not by the machine's speed */
+  const int64_t due = t0 + (int64_t)(1e9f / 72.0f);
+  const int64_t ask0 = (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  int frc = wmtr_vr_call(&fq, sizeof fq, &fr, sizeof fr);
+  const int64_t ask1 = (int64_t)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  CHECK(frc == 0 && fr.frame_id == 501 && !(fr.flags & SVR_FRAME_FROM_PACER) && fr.wake_up >= due &&
+        fr.wake_up <= (ask1 > due ? ask1 : due) && (!(fr.flags & SVR_FRAME_PACER_LIVE) || fr.wake_up >= ask0),
+        "frame after the pacer's: flags %u, wake %+lld ns from due, asked %+lld..%+lld ns", fr.flags,
+        (long long)(fr.wake_up - due), (long long)(ask0 - due), (long long)(ask1 - due));
 
   struct svr_haptic_req hp = {{SVR_HAPTIC, sizeof hp}, 1, 0.05f, 160.0f, 0.75f};
   struct svr_ack ack;
@@ -575,9 +583,10 @@ static void test_vr_cadence(void) {
   struct wmtr_vr_cadence c = {0};
   int64_t now = 1000000000000ll, wake, disp;
   uint64_t last = 0, id;
+  unsigned flags;
   int bad = 0;
 #define STEP(hid, hwake) do { \
-    wmtr_vr_frame_cadence(&c, (hid), (hwake), (hwake) + 2 * P, last, now, P, &id, &wake, &disp); \
+    flags = wmtr_vr_frame_cadence(&c, (hid), (hwake), (hwake) + 2 * P, last, now, P, P, &id, &wake, &disp); \
     if (id <= last || wake > now + 2 * P || wake < now - 2 * P || disp < wake) bad++; \
     last = id; now += P; } while (0)
   for (int i = 0; i < 9050; i++) STEP(0, 0);                 /* game started, no headset ever connected */
@@ -594,6 +603,61 @@ static void test_vr_cadence(void) {
   CHECK(bad == 0, "far-ahead timing: wake %lld ms ahead", (long long)((wake - now + P) / 1000000));
 #undef STEP
   printf("vr cadence: no headset / connect / disconnect / reconnect / far-ahead ok\n");
+
+  /* Spacewarp: the pacer releases a frame every other display period. In between the guest gets a local frame due
+   * at the pacer's next wake-up, flagged so that it waits for that frame instead of rendering an extra one. */
+  struct wmtr_vr_cadence s = {0};
+  int64_t t = now, hw = 0;
+  uint64_t hid = 0, g = 0, pacer = 0, local_live = 0;
+  bad = 0;
+  for (int i = 0; i < 600; i++, t += P) {
+    if (i % 2 == 0) hid++, hw = t;
+    flags = wmtr_vr_frame_cadence(&s, hid, hw, hw + 2 * P, g, t, P, 2 * P, &id, &wake, &disp);
+    if (i % 2 == 0) {
+      pacer += flags == (WMTR_VR_FRAME_FROM_PACER | WMTR_VR_FRAME_PACER_LIVE) && wake == hw;
+      g = id; /* the guest renders the pacer's frames only */
+    } else {
+      local_live += flags == WMTR_VR_FRAME_PACER_LIVE && wake == hw + 2 * P && disp >= wake && id == g + 1;
+    }
+  }
+  CHECK(pacer == 300 && local_live == 300, "spacewarp: pacer frames %llu/300, due local frames %llu/300",
+        (unsigned long long)pacer, (unsigned long long)local_live);
+  /* the pacer holds its next frame (GPU behind): once it is overdue the local frame wakes now, still flagged live */
+  flags = wmtr_vr_frame_cadence(&s, hid, hw, hw + 2 * P, g, hw + 3 * P, P, 2 * P, &id, &wake, &disp);
+  CHECK(flags == WMTR_VR_FRAME_PACER_LIVE && wake == hw + 3 * P, "held pacer: flags %u wake %+lld ns", flags,
+        (long long)(wake - hw - 3 * P));
+  /* and it comes: the pacer's frame, the next id */
+  flags = wmtr_vr_frame_cadence(&s, hid + 1, hw + 3 * P, hw + 5 * P, g, hw + 3 * P + 100000, P, 2 * P, &id, &wake, &disp);
+  CHECK(flags == (WMTR_VR_FRAME_FROM_PACER | WMTR_VR_FRAME_PACER_LIVE) && id == g + 1 && wake == hw + 3 * P,
+        "held pacer frame: flags %u id %+lld", flags, (long long)(id - g));
+  g = id, hw += 3 * P;
+  /* a GPU-bound game: the host holds the next timing for a 60 ms frame (5+ periods), the guest is still told to wait */
+  flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, hw + 60000000, P, 2 * P, &id, &wake, &disp);
+  CHECK(flags == WMTR_VR_FRAME_PACER_LIVE && id == g + 1, "held 60 ms: flags %u", flags);
+  /* a guest that does not wait for the pacer (it sleeps until each frame's wake-up and asks again right after)
+   * while the next pacer frame is overdue: one frame a period, not a burst all due now (vr_e2e: four frames in 80 us
+   * overran the producer's ring of three eye textures) */
+  {
+    int64_t q = hw + 60000000, prev = wake;
+    int spaced = 0;
+    for (int k = 0; k < 4; k++) {
+      flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, q, P, 2 * P, &id, &wake, &disp);
+      spaced += flags == WMTR_VR_FRAME_PACER_LIVE && id == g + 1 && wake >= prev + P;
+      prev = wake, g = id;
+      q = (wake > q ? wake : q) + 10000;
+    }
+    CHECK(spaced == 4, "local frames while the pacer is live: %d of 4 a period apart", spaced);
+  }
+  /* the pacer stopped (headset gone): after WMTR_VR_PACER_LIVE_NS the guest is no longer told to wait */
+  flags = wmtr_vr_frame_cadence(&s, hid + 1, hw, hw + 2 * P, g, hw + WMTR_VR_PACER_LIVE_NS + 1, P, 2 * P, &id, &wake, &disp);
+  CHECK(flags == 0 && id == g + 1, "stopped pacer: flags %u", flags);
+  /* an older host (no render divisor): due one display period after its last frame */
+  struct wmtr_vr_cadence o = {0};
+  wmtr_vr_frame_cadence(&o, 7, t, t + 2 * P, 0, t, P, P, &id, &wake, &disp);
+  flags = wmtr_vr_frame_cadence(&o, 7, t, t + 2 * P, id, t + P / 2, P, P, &id, &wake, &disp);
+  CHECK(flags == WMTR_VR_FRAME_PACER_LIVE && wake == t + P, "divisor 1: flags %u wake %+lld ns", flags,
+        (long long)(wake - t - P));
+  printf("vr cadence: spacewarp / held pacer / stopped pacer / divisor 1 ok\n");
 }
 
 /* ---------------- hostile requests (a guest that writes the ring itself) ---------------- */

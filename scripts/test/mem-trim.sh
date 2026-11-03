@@ -6,6 +6,9 @@
 #   other    another value (steamac.mem_trim=1) behaves like the default
 #   units    the timer is enabled (timers.target.wants), fires once per boot after boot settles,
 #            and starts the oneshot service that runs the script
+#   games    "mem-trim games": nothing while a game scope exists or when none ever did; one trim (drop_caches 1,
+#            compact_memory 1) on the first poll after the last game is gone, none on the next; off with
+#            steamac.mem_trim=0; its service is enabled and runs "games"
 # usage: scripts/test/mem-trim.sh
 set -u
 R=$(cd "$(dirname "$0")/../.." && pwd)/guest/layer
@@ -35,5 +38,29 @@ grep -q '^OnUnitActiveSec\|^OnCalendar' "$U/steamac-mem-trim.timer" && fail unit
 grep -qx 'Type=oneshot' "$U/steamac-mem-trim.service" && grep -qx 'ExecStart=/usr/lib/steamac/mem-trim' "$U/steamac-mem-trim.service" \
     || fail units "service does not run the script once"
 [ -x "$S" ] && bash -n "$S" || fail units "script not executable or invalid"
+
+A=$T/apps; mkdir -p "$A"
+games() { # cmdline: one poll of "mem-trim games"
+    printf '%s\n' "$1" > "$T/cmdline"; rm -f "$T/drop" "$T/compact"
+    STEAMAC_CMDLINE=$T/cmdline STEAMAC_DROP_CACHES=$T/drop STEAMAC_COMPACT=$T/compact STEAMAC_MEMINFO=$T/meminfo \
+        STEAMAC_APPS=$A STEAMAC_TRIM_STATE=$T/state STEAMAC_TRIM_POLLS=1 bash "$S" games > "$T/out" 2>&1
+}
+trimmed() { [ "$(cat "$T/drop" 2>/dev/null)" = 1 ] && [ "$(cat "$T/compact" 2>/dev/null)" = 1 ]; }
+untouched() { [ ! -e "$T/drop" ] && [ ! -e "$T/compact" ]; }
+rm -f "$T/state"
+games "rootwait" || fail games "exit status $?"
+untouched || fail games "trimmed although no game ever ran"
+mkdir "$A/app-steam-app438100-2792.scope"
+games "rootwait" && untouched || fail games "trimmed while a game runs"
+games "rootwait" && untouched || fail games "trimmed while a game runs (second poll)"
+rmdir "$A/app-steam-app438100-2792.scope"; mkdir "$A/app-steam-session.scope"
+games "rootwait" && trimmed || fail games "no trim after the game ended (drop '$(cat "$T/drop" 2>/dev/null)' compact '$(cat "$T/compact" 2>/dev/null)')"
+grep -q 'game ended' "$T/out" || fail games "no log line for the trim"
+games "rootwait" && untouched || fail games "trimmed again with no game started since"
+mkdir "$A/app-steam-app438100-3001.scope"; games "rootwait"; rmdir "$A/app-steam-app438100-3001.scope"
+games "console=hvc0 steamac.mem_trim=0" && untouched || fail games "trimmed although steamac.mem_trim=0"
+[ "$(readlink "$U/multi-user.target.wants/steamac-mem-trim-games.service")" = ../steamac-mem-trim-games.service ] \
+    || fail games "games service not enabled"
+grep -qx 'ExecStart=/usr/lib/steamac/mem-trim games' "$U/steamac-mem-trim-games.service" || fail games "service does not run games"
 
 [ $fails -eq 0 ] && echo "mem-trim: all PASS" || { echo "mem-trim: $fails FAIL"; exit 1; }

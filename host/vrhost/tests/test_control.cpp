@@ -4,6 +4,7 @@
 // connected headset's info and stream counters in the status, the paired list, unpair, pairing off, bad requests.
 #include "check.h"
 #include "control/control_server.h"
+#include "session/frames_in_flight.h"
 #include "fake_headset.h"
 #include "pattern_server.h"
 
@@ -216,6 +217,27 @@ int main()
 		ControlServer ctl(sock, srv.session);
 		CHECK(field(ask(sock, "status"), "encryption") == "disabled");
 		CHECK(has(ask(sock, "pair on"), "\"error\""));
+	}
+	{
+		// "frames-in-flight N|auto": 0-8 or auto reach the pipeline's hook, anything else is refused; no game link = error
+		Server srv({.encryption = WivrnConfig::Encryption::disabled, .known_keys_file = keys_file});
+		std::vector<uint32_t> got;
+		bool linked = true;
+		ControlServer ctl(sock, srv.session, {.set_frames_in_flight = [&](uint32_t n) {
+			                                      if (linked)
+				                                      got.push_back(n);
+			                                      return linked;
+		                                      }});
+		CHECK(not has(ask(sock, "frames-in-flight 1"), "\"error\""));
+		CHECK(not has(ask(sock, "frames-in-flight 0"), "\"error\""));
+		CHECK(not has(ask(sock, "frames-in-flight auto"), "\"error\""));
+		CHECK(has(ask(sock, "frames-in-flight 9"), "\"error\""));
+		CHECK(has(ask(sock, "frames-in-flight -1"), "\"error\""));
+		CHECK(has(ask(sock, "frames-in-flight autox"), "\"error\""));
+		CHECK(has(ask(sock, "frames-in-flight 2x"), "\"error\""));
+		CHECK((got == std::vector<uint32_t>{1, 0, FramesInFlight::adaptive}));
+		linked = false;
+		CHECK(has(ask(sock, "frames-in-flight auto"), "no game link"));
 	}
 	std::filesystem::remove_all(dir);
 	return test_result("control");

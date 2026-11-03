@@ -1,0 +1,15 @@
+# steamac: each time the last running game ends, return the memory it freed to the Mac
+# (see /usr/lib/steamac/mem-trim; steamac.mem_trim=0 turns it off).
+[Unit]
+Description=FX Steam Launcher: return a finished game's memory to the Mac
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/steamac/mem-trim games
+Nice=19
+IOSchedulingClass=idle
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

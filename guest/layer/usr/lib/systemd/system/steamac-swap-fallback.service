@@ -1,0 +1,14 @@
+# steamac: a disk swap file behind zram, used only once zram is full
+# (see /usr/lib/steamac/swap-fallback; steamac.swap_fallback=0 turns it off).
+[Unit]
+Description=FX Steam Launcher: swap file behind zram
+RequiresMountsFor=/home
+After=swap.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/steamac/swap-fallback
+
+[Install]
+WantedBy=multi-user.target

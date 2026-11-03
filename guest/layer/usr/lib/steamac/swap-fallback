@@ -1,0 +1,40 @@
+#!/bin/bash
+# steamac: a swap file on /home behind zram, for when zram is full (steamac-swap-fallback.service, at boot).
+#
+# zram (zram-generator.conf.d/50-steamac.conf) keeps swapped pages compressed in the guest's own RAM, so it
+# runs out exactly when a game needs the most memory; the kernel then OOM-kills the game (VRChat on a heavy
+# world change in an 8 GiB guest). This file, at priority 10 below zram's 100, only takes pages once zram is
+# full: a slow stretch instead of a killed game. Half the guest's RAM, created once with fallocate (on the Mac
+# the disk image grows only by what is really swapped out), and only while /home keeps twice that free.
+#
+# Default on; steamac.swap_fallback=0 on the kernel command line turns it off and removes the file.
+# Test overrides: STEAMAC_CMDLINE, STEAMAC_MEMINFO, STEAMAC_SWAPFILE.
+set -euo pipefail
+
+cmdline=${STEAMAC_CMDLINE:-/proc/cmdline}
+meminfo=${STEAMAC_MEMINFO:-/proc/meminfo}
+file=${STEAMAC_SWAPFILE:-/home/steamac-swap}
+
+active() { swapon --show=NAME --noheadings | grep -qxF "$file"; }
+
+for w in $(cat "$cmdline" 2>/dev/null); do
+    case $w in steamac.swap_fallback=0)
+        if active; then swapoff "$file"; fi
+        rm -f "$file"
+        echo "swap-fallback: off (steamac.swap_fallback=0)"; exit 0 ;;
+    esac
+done
+
+if active; then echo "swap-fallback: $file already in use"; exit 0; fi
+mib=$(awk '/^MemTotal:/ { print int($2 / 2048) }' "$meminfo")
+if [ ! -e "$file" ]; then
+    avail=$(df --output=avail -m "$(dirname "$file")" | tail -1 | tr -d ' ')
+    if [ "$avail" -lt $((mib * 3)) ]; then
+        echo "swap-fallback: ${avail} MiB free on $(dirname "$file"), want $((mib * 3)): no swap file"; exit 0
+    fi
+    fallocate -l "${mib}M" "$file"
+    chmod 600 "$file"
+    mkswap -q "$file" > /dev/null
+fi
+swapon -p 10 "$file"
+echo "swap-fallback: $file (${mib} MiB) behind zram"

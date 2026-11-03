@@ -111,6 +111,10 @@ struct svr_frame_req {
   uint64_t last_frame_id; /* frame id the guest last got (0 at start) */
 };
 
+/* svr_frame_rep.flags */
+#define SVR_FRAME_FROM_PACER 1u /* the host pacer's own frame (a fresh timing) */
+#define SVR_FRAME_PACER_LIVE 2u /* the pacer is running: without FROM_PACER, its next frame is not out yet */
+
 struct svr_frame_rep {
   struct svr_hdr h;
   uint64_t frame_id;          /* next frame to render */
@@ -121,7 +125,7 @@ struct svr_frame_rep {
   float refresh_hz;
   uint32_t connected;
   uint32_t profile;
-  uint32_t pad;
+  uint32_t flags; /* SVR_FRAME_*; 0 from older exporters */
   float ipd_m;
   float fov[2][4];
   struct svr_pose pose[SVR_DEV_COUNT];
