@@ -176,6 +176,9 @@ add_test(NAME vrlink_validate COMMAND test_vrlink_validate)
 # the test headset as a tool, for a running steamac-vrhost (docs/vr.md "Testing without a headset")
 add_executable(vrhost-test-headset tests/test_headset_tool.mm tests/fake_headset.cpp tests/vt_decode.mm)
 set_source_files_properties(tests/test_headset_tool.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+# --timeout is in seconds; values past the int range of milliseconds are refused instead of wrapping
+add_test(NAME headset_tool_timeout_range COMMAND vrhost-test-headset --timeout 2400000)
+set_tests_properties(headset_tool_timeout_range PROPERTIES PASS_REGULAR_EXPRESSION "--timeout 2400000: out of range")
 target_link_libraries(vrhost-test-headset PRIVATE vrhost-core "-framework ImageIO" "-framework CoreGraphics" "-framework Foundation")
 
 # End-to-end game-frame test (wmtr exporter -> link -> compositor -> session -> test headset). The exporter
