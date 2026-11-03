@@ -62,7 +62,8 @@ Switching between Steam client builds downloads up to about 1 GB; progress shows
 ## Installing VRChat
 
 1. In Steam, install **VRChat**.
-2. Set VRChat's compatibility tool to **Proton Experimental** (Properties > Compatibility). On ARM64 Steam, VRChat installs
+2. Set VRChat's compatibility tool to **Proton Experimental** (Properties > Compatibility), not `Proton 11.0 (ARM64)`: EAC's
+   module is x86-64 and fails to load in an ARM64 Proton (`206`). On ARM64 Steam, VRChat installs
    its Android build by default, which cannot run here; Proton Experimental selects the Windows build. This is the only
    compatibility tool you pick; the graphics path does not change it.
 3. Install **Proton EasyAntiCheat Runtime** (Steam tool 1826330) from Steam. It supplies the stock EAC launcher and client.
