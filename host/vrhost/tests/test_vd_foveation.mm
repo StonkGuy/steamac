@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Virtual Desktop adapter (personal use): geometry of the picture as the Quest shows it. The VD client undoes VD's
+// Virtual Desktop adapter: geometry of the picture as the Quest shows it. The VD client undoes VD's
 // fixed foveated encoding on every frame (vd_foveation_source / _encoded), so the host must apply it. A world-fixed
 // scene (lines every 15 degrees of azimuth and elevation, a thick horizon) is rendered for the Quest 3's asymmetric
 // FOV as the game does, goes through EyeCompositor into the stream, and is then shown like the VD client does:

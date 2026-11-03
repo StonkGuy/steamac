@@ -9,7 +9,7 @@
 //   --list-headsets [--json] / --unpair NAME / --unpair-all   manage paired headsets
 //   --control-socket PATH  status/pairing requests from the launcher (docs/vr-interfaces.md section 5)
 //   --audio-fd N           game audio / headset microphone via the VR audio region (docs/vr-interfaces.md section 6)
-//   --adapter wivrn|vd     headset protocol: WiVRn (default) or Virtual Desktop (private branch, personal use)
+//   --adapter wivrn|vd     headset protocol: WiVRn (default) or Virtual Desktop (unofficial)
 #include "audio/audio_bridge.h"
 #include "control/control_server.h"
 #include "encoder/vt_encoder.h"

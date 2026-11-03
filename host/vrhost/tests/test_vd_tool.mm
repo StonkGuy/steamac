@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// vrhost-test-vd: a synthetic Virtual Desktop headset for a running steamac-vrhost --adapter vd (personal-use adapter,
-// private repo). Speaks the VD LAN protocol like the Quest 3 app (fake_vd_client.cpp): discovery with the installed
+// vrhost-test-vd: a synthetic Virtual Desktop headset for a running steamac-vrhost --adapter vd.
+// Speaks the VD LAN protocol like the Quest 3 app (fake_vd_client.cpp): discovery with the installed
 // Streamer's key, the four channels, 72 Hz, Quest 3 FOV/IPD, real VideoToolbox decode, and real-headset conditions:
 //   --seconds N            run time (default 60)
 //   --motion calm|turns    head trace: slow look-around, or with fast 90-degree turns (~4 rad/s peak) (default turns)

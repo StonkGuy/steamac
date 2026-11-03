@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Virtual Desktop adapter: a LAN-only stand-in for the VD Streamer's VR mode behind the VrSession interface, so the
 // user's own VD headset client can stream from this Mac. Own implementation from private interoperability evidence
-// (personal use; this adapter lives on a private branch only). Protocol facts: vd_assumptions.h.
+// (unofficial, not affiliated with Virtual Desktop). Protocol facts: vd_assumptions.h.
 //
 //   UDP discovery (38850): offer (RSA key + account) -> RSA(wrapper key) + record (connection id, channel key/IV)
 //                          then "connect now" (connection id)
