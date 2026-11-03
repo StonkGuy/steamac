@@ -19,6 +19,7 @@
 #import <ImageIO/ImageIO.h>
 #import <CoreGraphics/CoreGraphics.h>
 #include <cmath>
+#include <limits>
 #include <map>
 #include "pattern/test_pattern.h"
 #include "session/clock.h"
@@ -308,7 +309,15 @@ int main(int argc, char ** argv)
 		}
 		if (a == "--timeout")
 		{
-			o.timeout_ms = std::stoi(v) * 1000;
+			// timeout_ms is an int: larger values used to overflow into an immediate handshake timeout
+			long long seconds = std::stoll(v);
+			if (seconds < 1 or seconds > std::numeric_limits<int>::max() / 1000)
+			{
+				fprintf(stderr, "vrhost-test-headset: --timeout %s: out of range (1-%d seconds)\n", v.c_str(),
+				        std::numeric_limits<int>::max() / 1000);
+				return 2;
+			}
+			o.timeout_ms = int(seconds * 1000);
 			continue;
 		}
 		if (a == "--port")
