@@ -25,8 +25,8 @@ HEADSHA=$(git rev-parse HEAD)
 if [ "$HEADSHA" != "$FEX_EAC_SHA" ]; then
   if { git cat-file -e "$FEX_EAC_TAG^{commit}" 2>/dev/null ||
        git fetch -q origin "refs/tags/$FEX_EAC_TAG:refs/tags/$FEX_EAC_TAG"; } &&
-     [ "$(git rev-parse "$FEX_EAC_TAG^{commit}")" = "$FEX_EAC_SHA" ] && git diff --quiet HEAD; then
-    git checkout -q "$FEX_EAC_TAG" && git submodule update --init --recursive --depth 1
+     [ "$(git rev-parse "$FEX_EAC_TAG^{commit}")" = "$FEX_EAC_SHA" ]; then
+    git checkout -q "$FEX_EAC_TAG"
   else
     echo "$SRC is at $(git rev-parse --short HEAD), not $FEX_EAC_TAG ($FEX_EAC_SHA)." >&2
     echo "It is probably a tree from an older build-fex.sh. Remove it and run this script again:" >&2
@@ -36,6 +36,7 @@ if [ "$HEADSHA" != "$FEX_EAC_SHA" ]; then
 fi
 [ "$(git rev-parse "$FEX_EAC_TAG^{commit}")" = "$FEX_EAC_SHA" ] ||
   { echo "$FEX_EAC_TAG is $(git rev-parse "$FEX_EAC_TAG^{commit}"), expected $FEX_EAC_SHA" >&2; exit 1; }
+git submodule update --init --recursive --depth 1
 
 # Release Steam-mode build: no tests, thunks or FEXConfig, native CPU tuning, module scanning off for clang 19.
 cmake -S . -B build-steam -G Ninja \
@@ -54,6 +55,8 @@ cmake -S . -B build-steam -G Ninja \
 
 # Build and stage only the Runtime component: that is what Valve's compat tool ships.
 cmake --build build-steam -j"${JOBS:-$(nproc)}"
+rm -f "$STAGE/.steamac-fex-source"
 DESTDIR=$STAGE cmake --install build-steam --component Runtime
+echo "$FEX_EAC_SHA" > "$STAGE/.steamac-fex-source.new" && mv -f "$STAGE/.steamac-fex-source.new" "$STAGE/.steamac-fex-source"
 
 echo "staged: $STAGE ($FEX_EAC_TAG)"
