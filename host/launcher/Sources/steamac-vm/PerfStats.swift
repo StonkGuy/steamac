@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import QuartzCore
+import Metal
 import os
 import Synchronization
 
@@ -305,4 +306,75 @@ func perfLog(_ message: String) {
                                             formatOptions: [.withInternetDateTime, .withFractionalSeconds])
     LogOutput.write("\(stamp) [steamac-vm] \(message)\n")
     CrashReporting.logged(message)
+}
+
+/// Independent of the performance-statistics setting and of the main queue.
+/// Logical Vulkan/shm/Metal totals overlap; none may be added to phys_footprint.
+/// Keeping the categories together distinguishes live application allocations,
+/// deferred shm reclamation and driver/private growth in the next hang report.
+final class VMMemoryDiagnostics: @unchecked Sendable {
+    static let shared = VMMemoryDiagnostics()
+    private let lock = NSLock()
+    private var timer: DispatchSourceTimer?
+    private var samples: [String] = []
+    private let device = MTLCreateSystemDefaultDevice()
+    private typealias VulkanStats = @convention(c) (UnsafeMutablePointer<UInt64>) -> Void
+    private let vulkanStats: VulkanStats? = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "virgl_steamac_memory_stats") else { return nil }
+        return unsafeBitCast(symbol, to: VulkanStats.self)
+    }()
+
+    private init() { samples.reserveCapacity(12) }
+
+    func start() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard timer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now(), repeating: 10)
+        timer.setEventHandler { [weak self] in self?.sample() }
+        self.timer = timer
+        timer.resume()
+    }
+
+    func history() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return "VM memory snapshots (MiB; overlapping logical categories, not additive):\n"
+            + samples.joined(separator: "\n")
+    }
+
+    private func sample() {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        var line = "t=\(Int(ProcessInfo.processInfo.systemUptime))"
+        if result == KERN_SUCCESS {
+            line += " footprint=\(info.phys_footprint >> 20) resident=\(info.resident_size >> 20)"
+                + " internal=\(info.internal >> 20) compressed=\(info.compressed >> 20)"
+                + " external=\(info.external >> 20) reusable=\(info.reusable >> 20)"
+        } else {
+            line += " task-info-error=\(result)"
+        }
+        if let device {
+            line += " metal-allocated=\(device.currentAllocatedSize >> 20)"
+                + " metal-recommended=\(device.recommendedMaxWorkingSetSize >> 20)"
+        }
+        if let vulkanStats {
+            var values = (UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+            withUnsafeMutableBytes(of: &values) { vulkanStats($0.bindMemory(to: UInt64.self).baseAddress!) }
+            line += " vkr-live=\(values.0 >> 20) vkr-count=\(values.1)"
+                + " shm-mapped=\(values.2 >> 20) shm-deferred=\(values.3 >> 20)"
+        } else {
+            line += " vkr-stats=unavailable"
+        }
+        lock.lock()
+        if samples.count == 12 { samples.removeFirst() }
+        samples.append(line)
+        lock.unlock()
+        log("memory: " + line + " (MiB; overlapping categories)")
+    }
 }

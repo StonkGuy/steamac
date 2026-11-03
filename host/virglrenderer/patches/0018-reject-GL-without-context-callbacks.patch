@@ -1,0 +1,28 @@
+From: steamac <steamac@local>
+Date: Sun, 1 Nov 2026 12:00:00 +0000
+Subject: [PATCH] renderer: reject GL initialization without context callbacks (STEAMAC-61)
+
+A flags override can request vrend from a Venus-only client. The context
+wrapper calls NULL callbacks when no internal winsys exists. Reject the
+unsupported combination before entering vrend; keep proper GL clients intact.
+
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -1022,6 +1022,16 @@
+          goto fail;
+       }
+ 
++      /* Without an internal winsys these wrappers call the client's GL
++       * callbacks directly. Venus-only clients may leave all three NULL. */
++      if (!state.winsys_initialized && !state.external_winsys_initialized &&
++          (!cbs->create_gl_context || !cbs->destroy_gl_context || !cbs->make_current)) {
++         virgl_error("OpenGL renderer requested without GL context callbacks "
++                     "(flags 0x%x); Venus-only clients must set NO_VIRGL\n", flags);
++         ret = -EINVAL;
++         goto fail;
++      }
++
+       /* vrend's sync thread requires a real eventfd (it creates one
+        * internally); without one, keep vrend on the poll path -- the pipe
+        * fallback above is scoped to the proxy. */

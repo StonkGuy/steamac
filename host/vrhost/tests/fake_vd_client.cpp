@@ -1,0 +1,386 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#include "fake_vd_client.h"
+
+#include "session/clock.h"
+#include "vd/vd_channel.h"
+#include "vd/vd_crypto.h"
+#include "vd/vd_settings.h"
+#include "vt_decode.h"
+#include "wivrn/annexb.h"
+
+#include <lz4.h>
+#define XXH_INLINE_ALL
+#include <xxhash.h>
+
+#include <arpa/inet.h>
+#include <atomic>
+#include <deque>
+#include <cstdlib>
+#include <memory>
+#include <mutex>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <thread>
+#include <unistd.h>
+
+using namespace vrhost;
+using namespace vrhost::vd;
+
+namespace
+{
+void send_datagram(const FakeVdOptions & o, std::span<const uint8_t> d, int fd)
+{
+	sockaddr_in to{};
+	to.sin_family = AF_INET;
+	to.sin_port = htons(o.discovery_port);
+	inet_pton(AF_INET, o.host.c_str(), &to.sin_addr);
+	sendto(fd, d.data(), d.size(), 0, (sockaddr *)&to, sizeof to);
+}
+
+std::optional<ComputerRecord> discover(const FakeVdOptions & o, int timeout_ms)
+{
+	RsaKeyPair rsa(1024);
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	auto offer = wrap_offer(o.discovery_key, {.rsa_public_xml = rsa.public_xml(), .platform = o.platform, .account = o.account});
+	send_datagram(o, offer, fd);
+	std::optional<ComputerRecord> r;
+	pollfd p{fd, POLLIN, 0};
+	if (poll(&p, 1, timeout_ms) == 1)
+	{
+		std::vector<uint8_t> buf(65536);
+		ssize_t n = recv(fd, buf.data(), buf.size(), 0);
+		if (n > 0)
+			r = parse_reply(std::span(buf.data(), size_t(n)), [&](std::span<const uint8_t> b) { return rsa.decrypt(b); });
+	}
+	close(fd);
+	return r;
+}
+
+std::vector<uint8_t> tracking_packet(const TrackingSample & s, size_t size)
+{
+	auto raw = encode_tracking(s, size);
+	std::vector<uint8_t> comp(LZ4_compressBound(int(raw.size())));
+	int n = LZ4_compress_default((const char *)raw.data(), (char *)comp.data(), int(raw.size()), int(comp.size()));
+	comp.resize(size_t(n));
+	uint64_t hash = XXH3_64bits(raw.data(), raw.size());
+	std::vector<uint8_t> out(frame_data_prefix);
+	memcpy(out.data(), &n, 4);
+	memcpy(out.data() + 4, &hash, 8);
+	out.insert(out.end(), comp.begin(), comp.end());
+	return out;
+}
+} // namespace
+
+std::optional<ComputerRecord> fake_vd_discover(const FakeVdOptions & o, int timeout_ms)
+{
+	return discover(o, timeout_ms);
+}
+
+void fake_vd_connect_now(const FakeVdOptions & o, const ComputerRecord & r)
+{
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	send_datagram(o, encode_connect_now({.connection_id = r.connection_id, .platform = o.platform}), fd);
+	close(fd);
+}
+
+FakeVdResult run_fake_vd_client(const FakeVdOptions & o, const std::function<void()> & after_first_frame)
+{
+	FakeVdResult r;
+	r.record = discover(o, 3000);
+	if (not r.record)
+	{
+		r.error = "no discovery reply";
+		return r;
+	}
+	const ComputerRecord & rec = *r.record;
+	if (rec.adapters.empty())
+	{
+		r.error = "record without address";
+		return r;
+	}
+	fake_vd_connect_now(o, rec);
+	std::string addr = rec.adapters.front().ip;
+	auto open = [&](uint16_t port) -> std::unique_ptr<Channel> {
+		int fd = connect_tcp(addr, port);
+		return fd < 0 ? nullptr : std::make_unique<Channel>(fd);
+	};
+
+	// control: always encrypted on the LAN
+	auto ctl = open(o.control_port);
+	if (not ctl)
+	{
+		r.error = "control connect failed";
+		return r;
+	}
+	ctl->encrypt(rec.channel_key);
+	std::mutex rm;
+	std::thread control_reader([&] {
+		uint8_t hdr[5];
+		while (ctl->read_exact(hdr, 5))
+		{
+			uint32_t n = uint32_t(hdr[1]) << 24 | uint32_t(hdr[2]) << 16 | uint32_t(hdr[3]) << 8 | hdr[4];
+			std::vector<uint8_t> payload(n);
+			if (n and not ctl->read_exact(payload.data(), n))
+				break;
+			std::lock_guard lock(rm);
+			r.control_types.push_back(hdr[0]);
+			r.control_messages.push_back({hdr[0], payload});
+			std::string text(payload.begin(), payload.end());
+			if (Msg(hdr[0]) == Msg::reload_streamer_settings)
+				r.streamer_settings = text;
+			else if (Msg(hdr[0]) == Msg::streamer_setting_changed)
+			{
+				Settings s;
+				if (s.parse(text))
+					for (auto & k: {key_active_codec, key_allow_extrapolation})
+						if (auto v = s.raw(k))
+							r.streamer_changes.push_back({k, *v});
+			}
+		}
+	});
+	ctl->send(control_message(Msg::reload_user_settings, o.user_settings));
+	ctl->send(control_message(Msg::reload_mobile_settings, o.mobile_settings));
+
+	// the Streamer's order: video, audio, data
+	auto video = open(o.video_port);
+	if (video and o.video_rate_bps > 0)
+	{
+		// with a throughput cap the backlog belongs on the sender's side, as on a real link (a large receive buffer
+		// here would hide it from the host and add latency no headset has)
+		int rcv = 128 << 10;
+		setsockopt(video->fd(), SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
+	}
+	auto audio = o.audio ? open(o.audio_port) : nullptr;
+	auto data = open(o.data_port);
+	std::thread audio_reader;
+	if (not data or not video or (o.audio and not audio))
+		r.error = "channel connect failed";
+	else
+	{
+		if (rec.encrypt_local)
+			for (Channel * c: {data.get(), video.get(), audio.get()})
+				if (c)
+					c->encrypt(rec.channel_key);
+		uint8_t probe[4];
+		if (data->read_exact(probe, 4, 5000))
+		{
+			int32_t n = int32_t(uint32_t(probe[0]) << 24 | uint32_t(probe[1]) << 16 | uint32_t(probe[2]) << 8 | probe[3]);
+			r.bandwidth_probe = n;
+			std::vector<uint8_t> junk(size_t(std::max(n, 0)));
+			if (n > 0)
+				data->read_exact(junk.data(), junk.size(), 5000);
+		}
+		if (audio)
+			audio_reader = std::thread([&] {
+				int32_t n;
+				while (audio->read_exact(&n, 4))
+				{
+					std::vector<int16_t> pcm(size_t(n) / 2);
+					if (n and not audio->read_exact(pcm.data(), size_t(n)))
+						break;
+					std::lock_guard lock(rm);
+					r.speaker.insert(r.speaker.end(), pcm.begin(), pcm.end());
+					r.speaker_packets++;
+					r.speaker_max_packet = std::max(r.speaker_max_packet, n);
+				}
+			});
+
+		std::array<std::unique_ptr<VtDecoder>, 2> dec;
+		bool mic_sent = false;
+		int complete = 0;
+		int64_t deadline = now_ns() + int64_t(o.timeout_ms) * 1000000;
+		std::array<CVPixelBufferRef, 2> pic{};
+		auto keep = [&](int eye, CVPixelBufferRef pb) {
+			if (pic[eye])
+				CVPixelBufferRelease(pic[eye]);
+			pic[eye] = pb;
+		};
+		auto decode = [&](int eye, std::span<const uint8_t> bits) {
+			std::vector<uint8_t> annexb;
+			bool start_code = bits.size() > 4 and bits[0] == 0 and bits[1] == 0 and bits[2] == 0 and bits[3] == 1;
+			if (o.annexb and start_code)
+				annexb.assign(bits.begin(), bits.end());
+			else if (o.annexb or bits.empty() or start_code or not annexb::append_length_prefixed(annexb, bits, 4))
+			{
+				r.framing_errors++;
+				return;
+			}
+			if (not o.decode or r.formats.empty())
+				return;
+			if (not dec[eye])
+				dec[eye] = std::make_unique<VtDecoder>(r.formats.back().codec == VideoCodec::hevc);
+			for (auto nal: annexb::split(annexb))
+				if (annexb::hevc_nal_type(nal) == annexb::hevc_vps)
+					r.idr[eye]++;
+			if (auto pb = dec[eye]->decode(annexb))
+			{
+				r.decoded[eye]++;
+				if (eye == 0)
+					r.decoded_at.push_back(int(r.frames.size()) - 1);
+				if (o.on_frame)
+					keep(eye, pb);
+				else
+					CVPixelBufferRelease(pb);
+			}
+		};
+		std::atomic<bool> tracking_stop{false};
+		std::thread tracker;
+		if (o.tracking_period_ms > 0 and (o.tracking_fn or o.tracking))
+			tracker = std::thread([&] {
+				std::deque<std::pair<int64_t, std::vector<uint8_t>>> pending;
+				for (int32_t n = 1; not tracking_stop; ++n)
+				{
+					TrackingSample s = o.tracking_fn ? o.tracking_fn(n) : *o.tracking;
+					s.frame_index = n;
+					// Wi-Fi: the sample leaves the headset now and reaches the host delay (+ jitter) later; queued
+					// in order (TCP), so jitter only ever adds to the delay of the samples behind it
+					int64_t due = now_ns() + int64_t(o.net_delay_ms) * 1'000'000 +
+					              (o.net_jitter_ms > 0 ? int64_t(arc4random_uniform(uint32_t(o.net_jitter_ms) * 1000)) * 1000 : 0);
+					pending.push_back({std::max(due, pending.empty() ? due : pending.back().first), tracking_packet(s, o.tracking_size)});
+					while (not pending.empty() and pending.front().first <= now_ns())
+					{
+						if (not data->send(pending.front().second))
+							return;
+						pending.pop_front();
+					}
+					std::this_thread::sleep_for(std::chrono::milliseconds(o.tracking_period_ms));
+				}
+			});
+		int64_t rate_t = now_ns();
+		auto throttle = [&](size_t bytes) {
+			if (o.video_rate_bps <= 0)
+				return;
+			rate_t = std::max(rate_t, now_ns() - 20'000'000) + int64_t(bytes * 8 / o.video_rate_bps * 1e9);
+			if (int64_t w = rate_t - now_ns(); w > 0)
+				std::this_thread::sleep_for(std::chrono::nanoseconds(w));
+		};
+		int64_t decode_free = 0;
+		FrameMetadata cur_md{};
+		int64_t cur_arrival = 0;
+		while (complete < o.frames and now_ns() < deadline)
+		{
+			uint8_t tag;
+			if (not video->read_exact(&tag, 1, o.video_idle_ms))
+			{
+				r.error = "video channel: nothing within " + std::to_string(o.video_idle_ms / 1000) + " s";
+				break;
+			}
+			if (tag == tag_video_format_old)
+			{
+				VideoFormat f;
+				if (not video->read_exact(&f, video_format_old_size, 5000))
+					break;
+				r.formats.push_back(f);
+				if (not mic_sent and not o.microphone.empty() and audio)
+				{
+					std::vector<uint8_t> m(4 + o.microphone.size() * 2);
+					int32_t n = int32_t(o.microphone.size() * 2);
+					memcpy(m.data(), &n, 4);
+					memcpy(m.data() + 4, o.microphone.data(), size_t(n));
+					audio->send(m);
+					mic_sent = true;
+				}
+			}
+			else if (tag == tag_frame)
+			{
+				FrameMetadata md;
+				if (not video->read_exact(&md, sizeof md, 5000))
+					break;
+				std::vector<uint8_t> bits(size_t(md.data_size));
+				throttle(bits.size() + sizeof md);
+				if (not video->read_exact(bits.data(), bits.size(), 5000))
+					break;
+				cur_md = md;
+				cur_arrival = now_ns();
+				if (o.keep_results or r.frames.empty())
+					r.frames.push_back(md);
+				else
+					r.frames.back() = md;
+				if (o.decode_cap_fps > 0)
+				{
+					// a decoder that needs 1/cap per frame: wait for it (the socket backs up like on the headset)
+					decode_free = std::max(decode_free, now_ns()) + int64_t(1e9 / o.decode_cap_fps);
+					if (int64_t w = decode_free - now_ns() - int64_t(1e9 / o.decode_cap_fps); w > 0)
+						std::this_thread::sleep_for(std::chrono::nanoseconds(w));
+				}
+				decode(0, bits);
+			}
+			else if (tag == tag_slice)
+			{
+				SliceHeader sh;
+				if (not video->read_exact(&sh, sizeof sh, 5000))
+					break;
+				std::vector<uint8_t> bits(size_t(sh.data_size));
+				throttle(bits.size() + sizeof sh);
+				if (not video->read_exact(bits.data(), bits.size(), 5000))
+					break;
+				if (o.keep_results or r.slices.empty())
+					r.slices.push_back(sh);
+				else
+					r.slices.back() = sh;
+				if (sh.stream_index == 1)
+					decode(1, bits);
+				++complete;
+				if (o.on_frame)
+				{
+					o.on_frame(cur_md, pic[0], pic[1], cur_arrival);
+					keep(0, nullptr);
+					keep(1, nullptr);
+				}
+				for (auto & [at, type, payload]: o.control_schedule)
+					if (at == complete)
+						ctl->send(control_message(Msg(type), payload));
+				for (auto & [at, k, v]: o.mobile_schedule)
+					if (at == complete)
+						ctl->send(control_message(Msg::mobile_setting_changed, setting_changed_payload(k, v)));
+				if (complete == o.stall_after)
+					std::this_thread::sleep_for(std::chrono::milliseconds(o.stall_ms));
+				if (o.tracking and o.tracking_period_ms <= 0)
+				{
+					TrackingSample s = *o.tracking;
+					s.frame_index = 1000 + complete;
+					data->send(tracking_packet(s, o.tracking_size));
+				}
+				if (complete == o.force_key_frame_after)
+					ctl->send(control_message(Msg::force_key_frame, std::string()));
+				if (complete == 1)
+				{
+					for (auto & [k, v]: o.user_changes)
+						ctl->send(control_message(Msg::user_setting_changed, setting_changed_payload(k, v)));
+					for (auto & [k, v]: o.mobile_changes)
+						ctl->send(control_message(Msg::mobile_setting_changed, setting_changed_payload(k, v)));
+					if (o.extra_requests)
+					{
+						ctl->send(control_message(Msg::update_required, std::string()));
+						ctl->send(control_message(Msg::wake_up_computer, std::string()));
+						ctl->send(control_message(Msg::recenter, std::string()));
+					}
+					if (after_first_frame)
+						after_first_frame();
+				}
+			}
+			else
+			{
+				r.error = "unknown video tag " + std::to_string(tag);
+				break;
+			}
+		}
+		keep(0, nullptr);
+		keep(1, nullptr);
+		tracking_stop = true;
+		if (tracker.joinable())
+			tracker.join();
+		if (r.error.empty() and complete < o.frames)
+			r.error = "timeout after " + std::to_string(complete) + " frames";
+		std::this_thread::sleep_for(std::chrono::milliseconds(50)); // let late control replies arrive
+		ctl->send(control_message(Msg::disconnect, std::string()));
+	}
+	for (Channel * c: {ctl.get(), data.get(), video.get(), audio.get()})
+		if (c)
+			c->shutdown();
+	control_reader.join();
+	if (audio_reader.joinable())
+		audio_reader.join();
+	return r;
+}

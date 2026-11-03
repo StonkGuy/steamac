@@ -60,6 +60,9 @@
 #    and 3 rounds of 4096 command buffers writing one timestamp each (counter heap entries return at reset), 16 timestamps
 #    written back to back (Metal's relaxed granularity sampled only 4 of a compute encoder)
 #    (STEAMAC-2X: Path of Exile 2's GPU context died on "vkCmdResetQueryPool resulted in CS error").
+#    1 and 3 timestamp pools of 65536 with every query reset and written in one one-time-submit command buffer
+#    (#45: Ratchet & Clank: Rift Apart's ~790k; past Metal 4's per-command-buffer capacity 65536 read 0 with VkResult
+#    0 and 786432 lost the device): completed, every query available, the first pool non-zero and not decreasing.
 # 13. texel_buffer.c: texel buffer views at offsets that are not 16-byte aligned (single texel alignment, required by
 #    vkd3d-proton): uniform/storage texel buffers, arrays, variable-count arrays, copies and push descriptors, values
 #    read back; storage buffer array sizes written one element per update; R32G32B32 uniform texel buffers (vkd3d-proton's
@@ -168,6 +171,21 @@
 # All three print the capability they need and skip when the driver does not advertise it, so an honest
 # driver stays green; when it is advertised, the values must be right. REPRO_FORCE=1 skips the
 # capability check and makes the pipeline fail to compile, reproducing the game's failure on the host.
+# image_views.c (KosmicKrisp only; STEAMAC-62/64/3): empty and out-of-bounds
+# image-view slice ranges (explicit, REMAINING_ARRAY_LAYERS, 3D slices, narrowed
+# counts) and incompatible RGBA8 -> R8 views fail cleanly before Metal; valid
+# remaining-layer and 3D-slice controls still create.
+# nir_cache.c (KosmicKrisp only; STEAMAC-6M/6K): corrupted precompiled NIR,
+# checksum corruption, missing checksum and legacy entries must be cache misses
+# before nir_deserialize; an unmodified control and every rebuilt pipeline dispatch
+# and read back 42. Each rejected entry logs once, not on the second lookup.
+# linear_images.c (KosmicKrisp only; STEAMAC-3F/6Y): LINEAR images with mips, layers, volume depth or
+# samples beyond what the format query advertises are refused by vkCreateImage (each case in its own
+# process: the old driver reached Metal's `Linear texture: cannot be mipmapped` abort on bind); valid
+# LINEAR and seven-mip OPTIMAL images, imported or not, still create, bind and view their last mip.
+# encoder_shapes.c (KosmicKrisp only; STEAMAC-74/73): with MESA_KK_DEBUG=shapes (Apple9+ logs without it) each
+# render encoder shape is logged once per thread: 100 shapes over 30 frames must log exactly the lines of one frame
+# (0073's direct-mapped cache logged 2275 render shape lines), and 300 shapes stop at 256 with one note.
 # All run with Metal API validation in assert mode (MTL_DEBUG_LAYER), so a Metal validation error
 # fails the run instead of aborting a VM later.
 # All applicable tests must pass on MoltenVK. On KosmicKrisp all but 5 and 10 must pass (1 sizes the descriptor pool with
@@ -311,6 +329,27 @@ if [ "$driver" = moltenvk ]; then
 	"$work/vertex_input" "$gspv"
 fi
 
+if [ "$driver" = moltenvk ]; then
+	# STEAMAC-67 / 3A / X: auxiliary buffer pressure and integer attachment blend validation.
+	build pipeline_limits
+	MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 "$work/pipeline_limits" "$gspv" buffers
+	"$work/pipeline_limits" "$gspv" blend
+	build spec_ids
+	"$work/spec_ids" "$gspv"
+	"$work/pipeline_limits" "$gspv" shared
+	compute_log=$work/compute-memory-log.txt
+	"$work/pipeline_limits" "$gspv" oversized 2> "$compute_log"
+	if grep -q 'Compute pipeline diagnostics: entry=main hash=.*shared-memory-limit=32768' "$compute_log" &&
+		grep -q '^\[mvk-msl\] // Pipeline failure MSL stage=.*bytes=.*lines=' "$compute_log" &&
+		grep -q 'threadgroup .*11616' "$compute_log"; then
+		echo "OK oversized compute pipeline logs workgroup, memory limit and MSL declarations"
+	else
+		cat "$compute_log"
+		echo "FAIL oversized compute pipeline lacks memory/source diagnostics"
+		exit 1
+	fi
+fi
+
 build device_address
 "$work/device_address" "$gspv"
 
@@ -368,8 +407,9 @@ if [ "$driver" = moltenvk ]; then
 	"$work/msl_helpers" "$gspv" link-log 2> "$link_log"
 	if grep -q '^\[mvk-msl\] // vertex entry=main hash=' "$link_log" &&
 		grep -q '^\[mvk-msl\] // fragment entry=main hash=' "$link_log" &&
-		grep -q '^\[mvk-msl\] // in location=3 component=0 type=.* width=4 ' "$link_log"; then
-		echo "OK graphics pipeline failure includes stage interfaces"
+		grep -q '^\[mvk-msl\] // in location=3 component=0 type=.* width=4 ' "$link_log" &&
+		grep -q '^\[mvk-msl\] // Pipeline failure MSL stage=.*bytes=.*lines=' "$link_log"; then
+		echo "OK graphics pipeline failure includes stage interfaces and bounded MSL source"
 	else
 		cat "$link_log"
 		echo "FAIL graphics pipeline failure lacks stage interfaces"
@@ -400,6 +440,54 @@ build d3d12_caps
 "$work/d3d12_caps"
 
 if [ "$driver" = kosmickrisp ]; then
+	build image_views
+	"$work/image_views"
+	build linear_images
+	"$work/linear_images"
+
+	# Private cache robustness, not valid Vulkan input. Never let the disk cache
+	# or a translated MSL entry hide the damaged precompiled NIR.
+	build nir_cache
+	for case_id in 0 1 2 3 4 5 6; do
+		nir_log=$work/nir-cache-$case_id.log
+		MESA_SHADER_CACHE_DISABLE=true "$work/nir_cache" "$gspv/nir_cache.comp.spv" "$case_id" > "$nir_log" 2>&1 ||
+			{ cat "$nir_log"; exit 1; }
+		expected=1
+		[ "$case_id" != 0 ] || expected=0
+		actual=$(grep -c 'rejecting cached precompiled NIR' "$nir_log" || true)
+		if [ "$actual" != "$expected" ]; then
+			cat "$nir_log"
+			echo "FAIL nir_cache $case_id: $actual integrity rejection logs, expected $expected"
+			exit 1
+		fi
+		grep '^OK nir_cache' "$nir_log"
+	done
+
+	# STEAMAC-74/73: encoder shape diagnostics must not grow with frames, and stay bounded per thread.
+	build encoder_shapes
+	shapes_log() { MESA_KK_DEBUG=shapes "$work/encoder_shapes" "$1" "$2" > "$work/encoder-shapes-$1-$2.log" 2>&1 ||
+		{ cat "$work/encoder-shapes-$1-$2.log"; exit 1; }; grep -c '^kk: encoder render shape=.* cmd=' "$work/encoder-shapes-$1-$2.log" || true; }
+	one=$(shapes_log 100 1)
+	thirty=$(shapes_log 100 30)
+	capped=$(shapes_log 300 2)
+	notes=$(grep -c 'not logging new ones' "$work/encoder-shapes-300-2.log" || true)
+	if [ "$one" != 100 ] || [ "$thirty" != 100 ] || [ "$capped" != 256 ] || [ "$notes" != 1 ]; then
+		echo "FAIL encoder_shapes: render shape lines 1 frame $one, 30 frames $thirty (100 each), 300 shapes $capped (256) with $notes notes (1)"
+		exit 1
+	fi
+	echo "OK encoder_shapes: 100 shapes logged once over 30 frames, 300 shapes capped at 256"
+
+	# STEAMAC-5E/5F: block-edge and volume scratch copies with Metal validation.
+	build sentry-image-copy
+	"$work/sentry-image-copy" compressed
+	"$work/sentry-image-copy" color
+
+	# STEAMAC-6H/6G: unused NULL sets and missing descriptor declarations.
+	build sentry_descriptors
+	for case_id in 0 1 2 3 4; do
+		"$work/sentry_descriptors" "$gspv" "$case_id"
+	done
+
 	glslangValidator -V --quiet -x "$here/shaders/texture_descriptors.comp" -o "$work/texture_descriptors.comp.inc"
 	build texture_descriptors -I"$work"
 	"$work/texture_descriptors"

@@ -231,9 +231,44 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  vr:
+    # The experimental VR route (docs/vr.md): the guest's OpenVR runtime (vrclient.so, built and tested in the
+    # Steam Runtime 3 sniper SDK) and Proton's vrclient_x64 with guest/proton-vrclient/patches, both x86-64
+    # Linux builds in containers. 30-layer.sh ships them in the layer; without them the VR setting stays off.
+    name: VR guest payload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - name: Disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo mkdir -p /mnt/vr && sudo chown "$(id -u):$(id -g)" /mnt/vr
+          df -h / /mnt
+      - name: OpenVR runtime (sniper SDK, unit and end-to-end tests)
+        run: guest/vr/build-sniper.sh build-sniper
+      - name: Proton vrclient_x64 (Proton's build system)
+        run: guest/proton-vrclient/build.sh /mnt/vr/proton-vrclient /mnt/vr/out
+      - name: Pack
+        run: |
+          mkdir -p work/out/vr/runtime/bin/linux64
+          cp -a /mnt/vr/out/x86_64-windows /mnt/vr/out/x86_64-unix work/out/vr/
+          install -m 0644 guest/vr/build-sniper/runtime/bin/linux64/vrclient.so work/out/vr/runtime/bin/linux64/vrclient.so
+          find work/out/vr -type f -exec sha256sum {} +
+          tar -cf vr.tar work/out/vr
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vr
+          path: vr.tar
+          retention-days: 7
+          if-no-files-found: error
+
   layer:
     name: DXMT guest payload and layer
-    needs: [dxmt, guest]
+    needs: [dxmt, guest, vr]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
@@ -250,8 +285,12 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dxmt-host
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vr
       - name: Unpack (receipts checked against this checkout)
         run: |
+          tar -xf vr.tar && rm vr.tar
           tar -xf guest-base.tar
           tar -xf dxmt-host.tar work/out/dxmt-pe
           rm guest-base.tar dxmt-host.tar
@@ -318,6 +357,9 @@ jobs:
       # the features of Apple silicon (mesh shaders, Metal 4). The MoltenVK repros and KosmicKrisp's
       # probe/repros run on a Mac against the built dylibs instead (docs/release-build.md); every other
       # build test runs here. A self-hosted Mac runner runs them all.
+      # before the app: bundle.sh puts work/out/host/bin/steamac-vrhost into it when it exists
+      - name: VR host (steamac-vrhost)
+        run: host/vrhost/build.sh
       - name: Host stack and app (./build.sh host)
         run: |
           system_profiler SPDisplaysDataType || true
@@ -329,7 +371,7 @@ jobs:
       - name: Launcher self-tests (no VM)
         run: |
           app="work/out/FX Steam Launcher.app/Contents/MacOS/steamac-vm"
-          for t in graphics-path metal-cache game-layers remote-play; do
+          for t in graphics-path metal-cache game-layers remote-play vr; do
             echo "=== --selftest-$t"
             "$app" "--selftest-$t"
           done

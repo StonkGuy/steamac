@@ -1,29 +1,68 @@
 #!/bin/bash
-# steamac: return the boot's page cache to the Mac, once (steamac-mem-trim.timer, 150 s after boot).
+# steamac: return guest memory the Mac is still paying for.
+#
+#   mem-trim         once per boot (steamac-mem-trim.timer, 150 s after boot): drop the boot's clean page cache.
+#   mem-trim games   (steamac-mem-trim-games.service) each time the last running game ends: drop the clean page
+#                    cache and compact free memory.
 #
 # Booting SteamOS and starting the Steam client leave ~3 GiB of clean page cache in the guest. The
 # guest frees memory to the Mac through virtio-balloon free page reporting, and since libkrun patch
 # 0026 the Mac really gets reported pages back (they leave the VM's phys_footprint), but page cache
 # is not free memory, so it is never reported. Dropping the clean page cache once, after boot has
 # settled, frees it: ~1.7 GiB less VM footprint at idle (audit numbers in the commit). Re-reads are
-# served from the Mac's own file cache of the disk image. It runs once per boot, so it costs nothing
-# while a game runs.
+# served from the Mac's own file cache of the disk image.
 #
-# Default on; steamac.mem_trim=0 on the kernel command line turns it off.
-# Test overrides: STEAMAC_CMDLINE, STEAMAC_DROP_CACHES, STEAMAC_MEMINFO.
+# A game that exits (or is killed) leaves its memory free, but scattered in pieces smaller than the
+# 2 MiB blocks free page reporting hands back (page_reporting_order 9), and its files in the page
+# cache: the Mac keeps paying for both until the guest happens to reuse them. After an OOM-killed
+# VRChat the VM stayed at 13 GiB phys_footprint with 6.4 GiB free in the guest; compacting brought it
+# to 8.5 GiB. "games" looks for running games (Steam's app-steam-app*.scope cgroups) every 10 s and
+# trims once when the last one is gone, so nothing runs while a game does.
+#
+# Default on; steamac.mem_trim=0 on the kernel command line turns both off.
+# Test overrides: STEAMAC_CMDLINE, STEAMAC_DROP_CACHES, STEAMAC_COMPACT, STEAMAC_MEMINFO, STEAMAC_APPS (the
+# cgroup directories holding the game scopes, a glob), STEAMAC_TRIM_STATE, STEAMAC_TRIM_POLLS (polls, then exit).
 set -euo pipefail
 
 cmdline=${STEAMAC_CMDLINE:-/proc/cmdline}
 drop=${STEAMAC_DROP_CACHES:-/proc/sys/vm/drop_caches}
+compact=${STEAMAC_COMPACT:-/proc/sys/vm/compact_memory}
 meminfo=${STEAMAC_MEMINFO:-/proc/meminfo}
+apps=${STEAMAC_APPS:-/sys/fs/cgroup/user.slice/user-*.slice/user@*.service/app.slice}
+state=${STEAMAC_TRIM_STATE:-/run/steamac-mem-trim.games}
 
 for w in $(cat "$cmdline" 2>/dev/null); do
     case $w in steamac.mem_trim=0) echo "mem-trim: off (steamac.mem_trim=0)"; exit 0 ;; esac
 done
 
 free_kib() { awk '/^MemFree:/ { print $2 }' "$meminfo"; }
-before=$(free_kib)
-# 1 = clean page cache only: dirty pages, anonymous memory and slab stay untouched.
-echo 1 > "$drop"
-after=$(free_kib)
-echo "mem-trim: dropped clean page cache, MemFree ${before} -> ${after} KiB"
+
+case ${1:-boot} in
+boot)
+    before=$(free_kib)
+    # 1 = clean page cache only: dirty pages, anonymous memory and slab stay untouched.
+    echo 1 > "$drop"
+    after=$(free_kib)
+    echo "mem-trim: dropped clean page cache, MemFree ${before} -> ${after} KiB"
+    ;;
+games)
+    polls=${STEAMAC_TRIM_POLLS:-0}
+    while :; do
+        # the state file keeps "a game was running" across restarts of the service
+        was=$(cat "$state" 2>/dev/null || echo 0)
+        if compgen -G "$apps/app-steam-app*.scope" > /dev/null; then
+            [ "$was" = 1 ] || echo 1 > "$state"
+        elif [ "$was" = 1 ]; then
+            before=$(free_kib)
+            echo 1 > "$drop"
+            echo 1 > "$compact"
+            after=$(free_kib)
+            echo 0 > "$state"
+            echo "mem-trim: game ended: dropped clean page cache and compacted, MemFree ${before} -> ${after} KiB"
+        fi
+        if [ "$polls" -gt 0 ]; then polls=$((polls - 1)); [ "$polls" -gt 0 ] || break; fi
+        sleep 10
+    done
+    ;;
+*) echo "usage: mem-trim [boot|games]" >&2; exit 2 ;;
+esac

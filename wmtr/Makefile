@@ -41,7 +41,7 @@ $(OUT)/winemetal_unix.o: $(DXMT)/src/winemetal/unix/winemetal_unix.c | $(OUT)
 	  -Wno-deprecated-declarations -c $< -o $@
 $(OUT)/cache.o: $(DXMT)/src/winemetal/unix/cache.c | $(OUT)
 	$(CC) $(CFLAGS) -ObjC -c $< -o $@
-$(OUT)/wmtr_host.o: src/wmtr_host.m include/*.h src/wmtr_calls.inc | $(OUT)
+$(OUT)/wmtr_host.o: src/wmtr_host.m include/*.h src/wmtr_calls.inc src/wmtr_objects.h src/wmtr_objects.inc src/wmtr_object_cmds.inc | $(OUT)
 	$(CC) $(CFLAGS) -ObjC -c $< -o $@
 $(OUT)/wmtr_vr.o: src/wmtr_vr.m include/wmtr_vr.h ../host/vrhost/include/vrlink.h | $(OUT)
 	$(CC) $(CFLAGS) -ObjC -c $< -o $@
@@ -62,18 +62,28 @@ $(OUT)/x86_64-macos/winemetal.so: src/wmtr_client.c src/transport_sock.c include
 	$(CC) -arch x86_64 $(CFLAGS) -shared -fPIC -o $@ src/wmtr_client.c src/transport_sock.c -Wl,-undefined,dynamic_lookup
 	codesign -s - -f $@
 
-test: $(OUT)/wmtr_loopback $(OUT)/wmtr_present_test $(OUT)/wmtr_spin_test
+test: $(OUT)/wmtr_loopback $(OUT)/wmtr_present_test $(OUT)/wmtr_spin_test $(OUT)/wmtr_lifetime_test $(OUT)/wmtr_dxmt_test $(OUT)/dxmt_test.metallib
 	./$(OUT)/wmtr_loopback
 	WMTR_TEST_TRIGGER=1 ./$(OUT)/wmtr_loopback
 	WMTR_CLIENT_HANDLES=0 ./$(OUT)/wmtr_loopback
 	./$(OUT)/wmtr_present_test
 	./$(OUT)/wmtr_spin_test
+	./$(OUT)/wmtr_lifetime_test
+	./$(OUT)/wmtr_dxmt_test $(OUT)/dxmt_test.metallib
+$(OUT)/wmtr_lifetime_test: tests/wmtr_lifetime_test.m src/wmtr_host.m src/wmtr_objects.h src/wmtr_objects.inc src/wmtr_object_cmds.inc src/wmtr_vr.m include/*.h | $(OUT)
+	$(CC) $(CFLAGS) -o $@ tests/wmtr_lifetime_test.m src/wmtr_vr.m -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore -framework IOSurface
 $(OUT)/wmtr_spin_test: tests/wmtr_spin_test.c include/wmtr_spin.h | $(OUT)
 	$(CC) -O2 -Wall $(INC) -o $@ tests/wmtr_spin_test.c -lpthread
 $(OUT)/wmtr_present_test: tests/wmtr_present_test.m $(OUT)/libwmtr_host.dylib
 	$(CC) $(CFLAGS) -o $@ tests/wmtr_present_test.m -L$(OUT) -lwmtr_host -Wl,-rpath,@executable_path -framework Cocoa -framework Metal -framework QuartzCore
-$(OUT)/wmtr_loopback: tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_vr.m src/wmtr_client.c include/*.h | $(OUT)
-	$(CC) $(CFLAGS) -o $@ tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_vr.m src/wmtr_client.c -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore -framework IOSurface
+# DXMT's own guest API (winemetal_thunks.c) over the wmtr client into the production libwmtr_host
+$(OUT)/wmtr_dxmt_test: tests/wmtr_dxmt_test.m tests/dxmt-shim/wineunixlib.h src/wmtr_client.c include/*.h src/*.inc $(OUT)/libwmtr_host.dylib
+	$(CC) -Itests/dxmt-shim $(CFLAGS) -DNDEBUG -o $@ tests/wmtr_dxmt_test.m src/wmtr_client.c $(DXMT)/src/winemetal/winemetal_thunks.c \
+	  -L$(OUT) -lwmtr_host -Wl,-rpath,@executable_path -framework Foundation -framework Metal
+$(OUT)/dxmt_test.metallib: tests/dxmt_test.metal | $(OUT)
+	xcrun -sdk macosx metal -o $@ $<
+$(OUT)/wmtr_loopback: tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_objects.h src/wmtr_objects.inc src/wmtr_object_cmds.inc src/wmtr_vr.m src/wmtr_client.c include/*.h | $(OUT)
+	$(CC) $(CFLAGS) -DWMTR_TESTING -o $@ tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_vr.m src/wmtr_client.c -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore -framework IOSurface
 
 # -mtls-dialect=gnu: newer GCC defaults to TLS descriptors, which need GLIBC_ABI_GNU2_TLS (absent in the
 # Steam Runtime's and the FEX rootfs's glibc), so the unixlib would not load

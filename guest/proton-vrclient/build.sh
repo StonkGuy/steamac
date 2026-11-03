@@ -24,6 +24,8 @@ if [[ ! -d $src/.git ]]; then
     mkdir -p "$src"
     git -C "$src" init -q
 fi
+# Proton's submodules use relative URLs (../wine, ...): they resolve against origin, so it must be Proton's
+git -C "$src" remote get-url origin >/dev/null 2>&1 || git -C "$src" remote add origin "$PROTON_REPO"
 if ! git -C "$src" cat-file -e "$PROTON_COMMIT^{commit}" 2>/dev/null; then
     git -C "$src" fetch -q --depth 1 "$PROTON_REPO" "$PROTON_COMMIT"
 fi

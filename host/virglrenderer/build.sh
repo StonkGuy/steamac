@@ -26,6 +26,11 @@
 # (server + workers are threads inside the VMM process, no extra executable).
 # Output install_name: @rpath/libvirglrenderer.1.dylib.
 #
+# Local diagnostics: patch 0018 rejects a GL renderer request without GL context callbacks
+# (STEAMAC-61) instead of calling NULL through vrend. Patch 0019 exports process-wide live
+# VkDeviceMemory bytes/count plus mapped/deferred shm bytes for the launcher's independent
+# memory history (STEAMAC-S/G); logical aliasing totals, not resident pages or an extra budget.
+#
 # Installation never rewrites a file in place (a running VM may have the dylib mapped): meson
 # installs into a staging DESTDIR and every file is moved into work/out/host (new inode).
 set -eu

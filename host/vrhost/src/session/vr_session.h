@@ -45,6 +45,25 @@ enum class Codec : uint8_t
 	raw,
 };
 
+// What the encoder input of a stream looks like (A2, DESIGN.md section 2: the adapter states it, the compositor and
+// the session's encoders follow). Defaults = what WiVRn clients take, so adapters that leave them alone are unchanged.
+enum class StreamLayout : uint8_t
+{
+	per_eye, // one stream per eye, EyeImage per eye (WiVRn, Virtual Desktop)
+};
+
+enum class PixelFormat : uint8_t
+{
+	nv12_full, // '420f', BT.709 full range, 8-bit
+};
+
+enum class FoveationModel : uint8_t
+{
+	wivrn, // WiVRn's foveation_parameter (compositor/foveation_params.h); the client undoes it
+	none,  // no host foveation: the guest renders at the stream size and the headset scales the decoded image
+	vd,    // Virtual Desktop's fixed foveated encoding (compositor/foveation_params.h); the headset undoes it
+};
+
 // Interleaved S16 PCM as the headset plays/records it.
 struct AudioFormat
 {
@@ -64,6 +83,12 @@ struct HeadsetInfo
 	bool hand_tracking = false, eye_gaze = false;
 	std::string name;
 	std::optional<AudioFormat> speaker, microphone; // absent: the headset has none
+	// Encoder input and rate the adapter negotiated (A2). max_bitrate_bps: the protocol's ceiling (0 = none known);
+	// bitrate_bps: total for both eyes the session encodes at (0 = adapter default).
+	StreamLayout layout = StreamLayout::per_eye;
+	PixelFormat pixel_format = PixelFormat::nv12_full;
+	FoveationModel foveation = FoveationModel::wivrn;
+	uint32_t max_bitrate_bps = 0, bitrate_bps = 0;
 };
 
 struct TrackedPose
@@ -88,6 +113,11 @@ struct FrameTiming
 	// Frame id the session assigned to this frame (WiVRn's pacer counts frames itself and matches the headset's
 	// feedback by it): the producer must submit the frame with Frame::frame_id = this value.
 	uint64_t frame_id = 0;
+	// The headset's display period and how many display periods one rendered frame spans: render_divisor 2 = the
+	// producer runs at half the display rate and the headset synthesises the frames in between (spacewarp);
+	// predicted_display is still the display time this frame is shown first. 0 = not reported.
+	ns display_period = 0;
+	uint32_t render_divisor = 1;
 };
 
 // One eye of a submitted frame. The image is the ENCODER input: an IOSurface in
@@ -124,6 +154,8 @@ public:
 	virtual void on_tracking(std::span<const TrackedPose>) {}
 	virtual void on_input(std::span<const InputValue>) {}
 	virtual void on_refresh_rate(float hz) {}
+	// The session changed FrameTiming::render_divisor (A1): frames now span this many display periods.
+	virtual void on_render_rate(uint32_t render_divisor) {}
 	// Headset microphone PCM, HeadsetInfo::microphone format (only while set_microphone(true)).
 	virtual void on_microphone(std::span<const int16_t> pcm, ns time) {}
 };

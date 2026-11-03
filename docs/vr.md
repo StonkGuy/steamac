@@ -1,7 +1,7 @@
 # VR (experimental)
 
 Play a game in VR on a standalone headset streamed from the Mac. The Mac runs `steamac-vrhost`, a WiVRn-compatible
-server; the headset runs the stock **WiVRn v26.9** client. Inside SteamOS, the game talks to this fork's OpenVR runtime
+server; the headset runs the stock **WiVRn v26.9** client (or Virtual Desktop, below). Inside SteamOS, the game talks to this fork's OpenVR runtime
 through a patched Proton `vrclient_x64`, and its eye images go over the DXMT path to the Mac, where they are encoded
 with VideoToolbox and streamed.
 
@@ -36,6 +36,17 @@ headset opens pairing by itself; the PIN is shown in Settings > VR and in the VM
 the headset. The PIN never crosses the network (WiVRn's SMP check), and the link is encrypted (AES-128). Paired
 headsets reconnect without a PIN. With the option off, new headsets are refused and the panel offers **Pair this
 headset**. **Unpair** removes a headset (entries of the same name are grouped).
+
+### Virtual Desktop instead of WiVRn
+
+Settings > VR > **Use Virtual Desktop** streams to the Virtual Desktop app on the headset instead (vrhost
+`--adapter vd`). It needs Virtual Desktop on the headset and **Virtual Desktop Streamer for macOS** installed in
+Applications (or ~/Applications), signed in to the same account as the headset; quit the Streamer itself while the VM
+streams, since both cannot take the headset. The headset then lists the Mac in Virtual Desktop's computer list. There
+is no PIN: pairing is Virtual Desktop's own (the account). The game shows in its Games tab and starts from there.
+Spacewarp follows the headset's setting. Unofficial and not affiliated with Virtual Desktop; the discovery key is
+read at start from the installed Streamer, kept in memory only and never stored or logged. Verified with a Quest 3
+and VRChat (2026-10-29).
 
 ### Starting a game
 
@@ -113,6 +124,13 @@ only.
   blit and display times, converted with the timesync clock offset) set how early a frame is started (99.5th
   percentile of present-to-decoded + 1 ms) and the predicted display time, and phase-lock frames to the headset's
   vsync. `next_frame_timing()` returns the frame id the pacer assigned (`FrameTiming::frame_id`).
+* **Frame release** (`--frames-in-flight N|auto`, default 0): how long the frame clock holds the game's next timing.
+  0 sends it on every pacer frame; N holds it until all but N-1 released frames are back (1: lowest latency, but the
+  game's CPU and GPU work no longer overlap); `auto` (`session/adaptive_release.h`) releases a GPU-bound game's next
+  frame so that its CPU work ends as the GPU finishes the frame before (CPU and GPU time measured from the frames that
+  come back), the latency of 1 at the frame rate of 0, and does not hold a game that is not GPU-bound. Every hold is
+  bounded (100 ms) and none happens while the game renders nothing. The control socket's `frames-in-flight N|auto`
+  changes it while a game runs; `auto` keeps its estimates up to date in every mode, so it holds from the first frame.
 * Timesync (WiVRn's clock regression), `tracking_control`, head/controller pose history with interpolation and bounded
   extrapolation, per-eye poses from the headset's view offsets.
 * VideoToolbox **HEVC** (H.264 fallback), hardware encoder required, low-latency rate control, no frame reordering,
@@ -151,9 +169,12 @@ build/vrhost/steamac-vrhost --selftest-encoder          # headless VideoToolbox 
 | `pose_history` | interpolation, angular/linear extrapolation and its 100 ms bound, pose composition |
 | `encoder` | hardware + low-latency session, VPS/SPS/PPS only before IDRs, IDR on request, decode back (VideoToolbox) to the same frame number; HEVC and H.264 |
 | `pacer` | WiVRn's pacer with synthetic feedback (headset clock 5 s ahead): learns decode time + margin and blit-to-display, phase-locks display times to the headset vsync grid, ignores stale feedback |
+| `frames_in_flight` | the frame clock's hold: N in flight held until the copy, released at once when allowed, never while the game renders nothing, bounded in time; `auto`: no hold without an estimate, held to the predicted release time, released early when a frame comes back early, bounded |
+| `adaptive_release` | `auto` against a simulated D3D11 game under DXMT's one-frame bound and VdSession's pacer, next to 0 and 1: GPU-bound (with jitter, a heavier CPU share, CPU hitches, 120 Hz, a GPU -> CPU -> GPU load change) at the frame rate of 0 and the latency of 1, and the fixed policies each failing one of the two; CPU-bound and light loads no worse than 0 |
 | `crypto` | both peers derive the same AES keys (X448 + PBKDF2), SMP accepts the right PIN and rejects a wrong one, key PEM round trip, paired-headset store (replace, remove, mode 0600) |
 | `self_contained` | `otool -L steamac-vrhost` lists only `/usr/lib` and `/System` libraries |
 | `loopback` | the full server against a test headset that follows the WiVRn client's connection sequence over loopback: handshake, stream description, tracking control, timesync, UDP shards, decode of 60+ frames per eye with matching frame numbers, poses 64 mm apart, display time in the headset clock, a lost frame → new IDR → decoding resumes, wrong protocol refused; pacing: with synthetic headset feedback (8 ms decode, 72 Hz vsync at a 3.3 ms phase) the announced display times land on the headset's vsync grid; encryption: PIN pairing then encrypted stream (lost frame + IDR included), reconnect of the paired headset without PIN, wrong PIN refused and not stored, pairing disabled refuses an unknown headset |
+| `vr_release_e2e` | (needs `VRHOST_DXMT_DIR`) the whole path with a GPU-bound producer that behaves like a D3D11 game in the guest (30 ms GPU frame, DXMT's one-frame bound), limit off then switched to `auto` on the running pipeline: `auto` detects the GPU-bound game and lowers pose-to-decode latency without fewer frames (M2: 0.74-0.91 of the latency of 0, 23-30 fps against 21-22) |
 
 Encoder self-test on an M2 MacBook Air (16 GB, macOS 27), 2 eyes encoded concurrently, measured while a steamac VM was
 running (2026-10-11):

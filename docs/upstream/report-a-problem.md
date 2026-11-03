@@ -14,29 +14,39 @@ what you expected, what happened), and checkboxes for attachments:
 - **Include SteamOS logs (system journal, Steam/Proton logs)** (enabled) — the guest console (hvc0) for
   the session and a `steamos-logs.tar.gz` archive collected by the guest agent: the systemd journal
   for the current boot (`journalctl -b`, the last 5000 lines, plus the user journal), `coredumpctl list`/`info`,
-  `dmesg`, `systemctl --failed`, `os-release`, `layer-release`, `/proc/cmdline`, `df`/`free`, tails of
+  `dmesg`, `systemctl --failed`, `os-release`, `layer-release`, `/proc/cmdline`, `df`/`free`,
+  thread IDs/states/CPU/wait channels and command names (`threads.txt`, no command arguments), tails of
   Steam client logs (`console_log`, `stderr`, `bootstrap_log`, `compat_log`, `connection_log`,
-  `webhelper`, `cef_log`, `shader_log`, `steamui_*`) and Proton logs (`~/steam-*.log` from `PROTON_LOG=1`,
+  `webhelper`, `cef_log`, `shader_log`, `steamui_*`, Steam Input's `controller`, `controller_ui` and
+  `cloud_log`) and Proton logs (`~/steam-*.log` from `PROTON_LOG=1`,
   `version` and `config_info` of prefixes in `compatdata`), FEX tool build ID / Steam manifest /
-  configuration, an opt-in FEX log, memory limits, and the last 512 KiB of American Truck
+  configuration, an opt-in FEX log, memory limits, memory/IO/CPU pressure (`/proc/pressure/*`),
+  `/proc/vmstat` and three `vmstat` samples, SteamVR and streaming log tails (`vrserver`,
+  `vrcompositor`, `vrmonitor`, `vrwebhelper`, `vrstream`, `streaming_log`, 256 KiB each, IP addresses
+  redacted), and the last 512 KiB of American Truck
   Simulator's `game.log.txt`. For an ATS emulator crash, set its Steam launch options to
   `FEX_SILENTLOG=0 FEX_OUTPUTLOG=/home/steamos/fex-amtrucks.log %command%`, reproduce, and report;
   the collector includes the last 512 KiB of that log. Remove the launch options afterwards.
+  Without Proton logs the archive notes that `PROTON_LOG=1 %command%` as a game's launch options,
+  one reproduction and a new report are needed to see a Windows game's own failure.
   FEX re-raises a crash of the emulated game from its JIT code, so the core's stack shows only an
-  anonymous AArch64 address. To record where the x86_64 code faulted, set the game's launch options to
-  `LD_PRELOAD=/usr/lib/steamac/x86_64/fault-report.so:$LD_PRELOAD %command%`, reproduce, and report.
+  anonymous AArch64 address. To record where the x86_64 code faulted, create
+  `~/.local/share/Steam/steamapps/compatdata/<appid>/fex-emu/AppConfig/<executable>.json` (ATS:
+  `270880/fex-emu/AppConfig/amtrucks.json`) containing
+  `{"Config":{"Env":"LD_PRELOAD=/usr/lib/steamac/x86_64/fault-report.so"}}`, reproduce, and report.
+  Steam launch options cannot do this: FEX's compat tool removes `LD_PRELOAD` from the environment.
   On SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT the library writes the x86_64 RIP, the fault address,
   the registers, a backtrace with the module and offset of every frame, and the memory map to
   `~/.local/state/steamac/fault-report.txt`. The file stays under 256 KiB and the report includes it
   as `fex/fault-report.txt`. Then the game's own handler or the default action runs, so the crash and
-  its core dump are unchanged. Without the launch option the library is never loaded.
+  its core dump are unchanged. Without that file the library is never loaded; delete it afterwards.
   Completed crash metadata is exported by a root hook for `steamos` only (root-owned, mode 0640);
   raw cores remain private and are never attached. `coredump-pending.txt` identifies dumps still
   running: reports do not wait for them; send another report once they finish. Namespace-aware
   stack extraction resolves pressure-vessel libraries where symbols are available (FEX JIT code
   may still be unsymbolized). Core processing limits are not lowered: oversized cores would lose
   their backtraces, and `Storage=none` still writes a full temporary core. Steam IDs (`[U:1:…]`,
-  7656119…), Steam account/persona names and email addresses are replaced with placeholders before
+  7656119…, account IDs as in `userdata/<n>`), Steam account/persona names and email addresses are replaced with placeholders before
   packaging; `collect-notes.txt` lists what could be read. Over SSH, the same scrubbed archive is
   available with `/usr/lib/steamac/fx-progress-agent collect > /tmp/steamos-logs.tar.gz`;
 - **Include a screenshot of the VM window** (disabled by default: the image may show your Steam
@@ -74,4 +84,3 @@ Testing: `--control-fifo PATH`, commands `report open`, `report fill EMAIL TEXT�
 overrides the DSN (failure path), `STEAMAC_SENTRY_DEBUG=1` prints the server's response. Post-crash
 window: `--sentry-test-crash abort` with `STEAMAC_REPORT_DUMP=<dir>` (PNGs of the window and dialog,
 then it closes on its own; `STEAMAC_REPORT_TEST_SEND=1` also sends a test report).
-

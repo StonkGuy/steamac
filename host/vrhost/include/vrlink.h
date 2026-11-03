@@ -127,7 +127,7 @@ struct vrl_timing {
   int64_t wake_up;           /* when the app should start it (WaitGetPoses returns) */
   int64_t predicted_display; /* when it will be shown */
   float refresh_hz;
-  uint32_t pad;
+  uint32_t render_divisor; /* the pacer releases a frame every this many display periods (spacewarp: 2); 0 = 1 */
 };
 
 struct vrl_poses {

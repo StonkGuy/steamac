@@ -318,7 +318,10 @@ do {
     let progressPort = try ProgressPort()
     // Log bundles requested by Report a Problem arrive on the same port.
     let guestLogs = GuestLogs(port: progressPort)
-    progressPort.start { line in if !guestLogs.handle(line) { progress.guestLine(line) } }
+    progressPort.start { line in
+        if MainActor.assumeIsolated({ VRRelay.current?.guestLine(line) }) == true { return }
+        if !guestLogs.handle(line) { progress.guestLine(line) }
+    }
     progress.onRebootIntent = {
         // Tell the supervisor to boot again once libkrun exits; remember where the window was
         // (unless Settings changed the default window size: then the next boot opens at that).
@@ -451,6 +454,15 @@ do {
     wc.onCloseRequest = { lifecycle.windowCloseRequested() }
     wc.onSuspendRequest = { lifecycle.menuSuspend() }
     wc.attach(progress: progress)
+    func sendCursorTracking(_ tracking: Bool) {
+        _ = progressPort.send("cursor-track \(tracking ? 1 : 0)")
+    }
+    wc.view.onCursorTrackingChange = { sendCursorTracking($0) }
+    progress.onCursorReady = { [weak wc] in
+        wc?.view.guestCursorVisibility(false)
+        sendCursorTracking(wc?.view.cursorTracking ?? false)
+    }
+    sendCursorTracking(wc.view.cursorTracking)
     let ctxId = vm.ctx
     let gpuCounters: () -> StallMonitor.Counters? = {
         var ctrl: UInt64 = 0, ring: UInt64 = 0
@@ -472,6 +484,14 @@ do {
     gamePause.onConfirmedChange = { [weak wc] in wc?.gamePaused($0); gameStats.gamePaused($0) }
     // Settings > General "Share clipboard with SteamOS" (fx.clipboard).
     let clipboard = clipboardPort.map { ClipboardSync(port: $0, settings: settings) }
+    // Settings > General "Use the Mac's keyboard layouts in Desktop Mode" (fx.progress).
+    let keyboardLayouts = KeyboardLayoutSync(settings: settings) { progressPort.send($0) }
+    let focusBeforeKeyboard = progress.onFocus
+    progress.onFocus = { f in
+        focusBeforeKeyboard?(f)
+        keyboardLayouts.focused(f)
+    }
+    keyboardLayouts.start()
     let suspender = SuspendController(ctx: vm.ctx, clock: clockPort, sleepPort: sleepPort, window: wc, presenter: presenter,
                                       stall: stall, gamePause: gamePause, gpuCounters: gpuCounters)
     suspender.onShutdown = { lifecycle.requestShutdown() }
@@ -556,10 +576,14 @@ do {
             }
         }
     }
-    withExtendedLifetime((presenter, gamepad, progressPort, supervisorWatch, perfSubscription, gamePause, suspender, clipboard,
+    withExtendedLifetime((presenter, gamepad, progressPort, keyboardLayouts, supervisorWatch, perfSubscription, gamePause, suspender, clipboard,
                           gameStats, vrRelay)) {
         app.run()
     }
+} catch let error as DiskLock.InUse {
+    log("error: \(error)")
+    MainActor.assumeIsolated { AppBundle.alertIfLaunchedFromFinder("SteamOS is already running", error.localizedDescription) }
+    exit(CrashReporting.startupRejectedStatus)
 } catch {
     fatal("\(error)")
 }

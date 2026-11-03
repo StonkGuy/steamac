@@ -25,6 +25,8 @@ enum EdidSize {
     }
 
     static func resolve(_ o: Options) -> Result {
+        log("display pacing: guest EDID refresh \(o.refreshRate) Hz"
+            + " (virtual mode only; does not set the host refresh or phase-lock DXMT presents)")
         // Physical sizes from the window size in points; per-unit values per guest pixel.
         let w = o.displayWidth, h = o.displayHeight
         let (gw, gh) = o.guestSize

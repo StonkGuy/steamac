@@ -30,6 +30,15 @@ FetchContent_Declare(openxr_sdk URL https://github.com/KhronosGroup/OpenXR-SDK/a
 FetchContent_Declare(boost_pfr URL https://github.com/boostorg/pfr/archive/refs/tags/boost-1.89.0.tar.gz
 	SOURCE_SUBDIR do-not-add)
 FetchContent_MakeAvailable(openxr_sdk boost_pfr)
+# Virtual Desktop adapter (src/vd): LZ4 block decompression and XXH3 for the tracking/input packets (both BSD-2-Clause).
+FetchContent_Declare(lz4 URL https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz
+	URL_HASH SHA256=537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b SOURCE_SUBDIR do-not-add)
+FetchContent_Declare(xxhash URL https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.3.tar.gz
+	URL_HASH SHA256=aae608dfe8213dfd05d909a57718ef82f30722c392344583d3f39050c7f29a80 SOURCE_SUBDIR do-not-add)
+FetchContent_MakeAvailable(lz4 xxhash)
+add_library(vd-lz4 STATIC ${lz4_SOURCE_DIR}/lib/lz4.c)
+# xxHash first: lz4's lib/ carries an older xxhash.h without XXH3 (vd_session.cpp static_asserts the version).
+target_include_directories(vd-lz4 SYSTEM PUBLIC ${xxhash_SOURCE_DIR} ${lz4_SOURCE_DIR}/lib)
 
 # OpenSSL (libcrypto only: X448, PBKDF2, AES-128-CTR, BIGNUM for WiVRn's crypto/smp/secrets). Default: a static
 # libcrypto built from a pinned release tarball into the build directory, so steamac-vrhost links no Homebrew dylib.
@@ -101,11 +110,20 @@ add_library(vrhost-core STATIC
 	src/wivrn/dnssd_publisher.cpp
 	src/wivrn/annexb.cpp
 	src/wivrn/input_map.cpp
+	src/wivrn/wivrn_control.cpp
 	src/control/control_server.cpp
+	src/vd/vd_accounts.cpp
+	src/vd/vd_channel.cpp
+	src/vd/vd_crypto.cpp
+	src/vd/vd_discovery.cpp
+	src/vd/vd_session.cpp
+	src/vd/vd_settings.cpp
+	src/vd/vd_streamer_key.cpp
+	src/vd/vd_wire.cpp
 	src/encoder/vt_encoder.mm
 	src/pattern/test_pattern.mm)
 target_include_directories(vrhost-core PUBLIC src include)
-target_link_libraries(vrhost-core PUBLIC wivrn-common wivrn-pacer
+target_link_libraries(vrhost-core PUBLIC wivrn-common wivrn-pacer vd-lz4
 	"-framework CoreFoundation" "-framework CoreMedia" "-framework CoreVideo" "-framework VideoToolbox"
 	"-framework IOSurface" "-framework Metal" "-framework Foundation")
 target_compile_options(vrhost-core PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -128,7 +146,7 @@ add_custom_command(TARGET steamac-vrhost POST_BUILD
 option(VRHOST_TESTS "Build the tests" ON)
 if(VRHOST_TESTS)
 enable_testing()
-foreach(t protocol annexb pose_history encoder loopback pacer crypto audio control)
+foreach(t protocol annexb pose_history encoder loopback pacer frames_in_flight adaptive_release crypto audio control vd_wire vd_loopback vd_key vd_stream vd_games)
 	add_executable(test_${t} tests/test_${t}.cpp)
 	target_link_libraries(test_${t} PRIVATE vrhost-core)
 	add_test(NAME ${t} COMMAND test_${t})
@@ -138,7 +156,20 @@ target_sources(test_control PRIVATE tests/fake_headset.cpp tests/vt_decode.mm)
 target_sources(test_encoder PRIVATE tests/vt_decode.mm)
 target_sources(test_loopback PRIVATE tests/vt_decode.mm)
 set_source_files_properties(tests/vt_decode.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
-set_tests_properties(encoder loopback control PROPERTIES TIMEOUT 60)
+target_sources(test_vd_loopback PRIVATE tests/fake_vd_client.cpp tests/vt_decode.mm)
+target_sources(test_vd_stream PRIVATE tests/fake_vd_client.cpp tests/vt_decode.mm)
+target_sources(test_vd_games PRIVATE tests/fake_vd_client.cpp tests/vt_decode.mm)
+set_tests_properties(encoder loopback control vd_wire vd_loopback vd_key vd_stream vd_games PROPERTIES TIMEOUT 60)
+# VD fixed foveated encoding: picture geometry as the Quest shows it (Metal compositor, no DXMT checkout needed)
+add_executable(test_vd_foveation tests/test_vd_foveation.mm)
+set_source_files_properties(tests/test_vd_foveation.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+target_link_libraries(test_vd_foveation PRIVATE vrhost-core vrhost-compositor "-framework Metal" "-framework IOSurface" "-framework Foundation")
+add_test(NAME vd_foveation COMMAND test_vd_foveation)
+set_tests_properties(vd_foveation PROPERTIES TIMEOUT 120)
+# synthetic Virtual Desktop headset (real-headset conditions) for a running steamac-vrhost --adapter vd
+add_executable(vrhost-test-vd tests/test_vd_tool.mm tests/fake_vd_client.cpp tests/vt_decode.mm)
+set_source_files_properties(tests/test_vd_tool.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+target_link_libraries(vrhost-test-vd PRIVATE vrhost-core "-framework Foundation")
 add_executable(test_vrlink_validate tests/test_vrlink_validate.cpp src/compositor/foveation_params.cpp)
 target_link_libraries(test_vrlink_validate PRIVATE vrhost-core)
 add_test(NAME vrlink_validate COMMAND test_vrlink_validate)
@@ -166,11 +197,25 @@ if(VRHOST_DXMT_DIR)
 	target_link_libraries(test_foveation_geometry PRIVATE vrhost-core vrhost-compositor "-framework Metal" "-framework IOSurface")
 	add_test(NAME foveation_geometry COMMAND test_foveation_geometry)
 	set_tests_properties(vr_e2e PROPERTIES TIMEOUT 90)
+	# the frame clock's adaptive release in the full pipeline (the producer is not GPU-bound: no hold, nothing else changes)
+	add_test(NAME vr_e2e_auto COMMAND test_vr_e2e)
+	set_tests_properties(vr_e2e_auto PROPERTIES TIMEOUT 90 ENVIRONMENT VR_E2E_FRAMES_IN_FLIGHT=auto)
 	# the same path with the eyes in one double-wide texture (OpenVR texture bounds) and in one two-slice array
 	foreach(layout wide array)
 		add_test(NAME vr_e2e_${layout} COMMAND test_vr_e2e)
 		set_tests_properties(vr_e2e_${layout} PROPERTIES TIMEOUT 90 ENVIRONMENT VR_E2E_LAYOUT=${layout})
 	endforeach()
+	# One at a time under ctest -j: the producer renders into a ring of 3 right away, and with several pipelines and
+	# video encoders/decoders on the GPU at once the exporter's copy can run more than 3 frames late (the copy then
+	# reads a newer frame: "carries frame N+3", wrong pose). One pipeline per machine is what the host runs.
+	# frame release with a GPU-bound game: no limit, then auto switched on in the running pipeline
+	add_executable(test_vr_release_e2e tests/test_vr_release_e2e.mm tests/fake_headset.cpp tests/vt_decode.mm)
+	target_include_directories(test_vr_release_e2e PRIVATE ${wmtr_dir}/include ${CMAKE_CURRENT_SOURCE_DIR}/../../guest/vr/include ${VRHOST_DXMT_DIR}/src/winemetal)
+	set_source_files_properties(tests/test_vr_release_e2e.mm PROPERTIES COMPILE_FLAGS -fobjc-arc)
+	target_link_libraries(test_vr_release_e2e PRIVATE vrhost-core vrhost-compositor vrhost-test-exporter "-framework Metal")
+	add_test(NAME vr_release_e2e COMMAND test_vr_release_e2e)
+	set_tests_properties(vr_e2e vr_e2e_auto vr_e2e_wide vr_e2e_array vr_release_e2e PROPERTIES RESOURCE_LOCK vr_gpu_pipeline)
+	set_tests_properties(vr_release_e2e PROPERTIES TIMEOUT 120)
 else()
 	message(STATUS "vr_e2e test off: set VRHOST_DXMT_DIR to a StonkGuy/dxmt vr-export checkout")
 endif()

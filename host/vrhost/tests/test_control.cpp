@@ -4,6 +4,8 @@
 // connected headset's info and stream counters in the status, the paired list, unpair, pairing off, bad requests.
 #include "check.h"
 #include "control/control_server.h"
+#include "session/frames_in_flight.h"
+#include "wivrn/wivrn_control.h"
 #include "fake_headset.h"
 #include "pattern_server.h"
 
@@ -64,13 +66,15 @@ int main()
 	{
 		// encryption on, nothing paired, pairing off: what a host started without --pair after unpairing everything
 		Server srv({.encryption = WivrnConfig::Encryption::enabled, .known_keys_file = keys_file});
-		ControlServer ctl(sock, srv.session);
+		WivrnControl wc(srv.session);
+		ControlServer ctl(sock, wc);
 		CHECK(ControlServer::json_string("a\"b\\c\n") == "\"a\\\"b\\\\c\\u000a\"");
 
 		auto s = ask(sock, "status");
 		CHECK(has(s, "\"v\":1") and field(s, "state") == "waiting" and field(s, "encryption") == "enabled");
 		CHECK(field(s, "pin").empty() and has(s, "\"headset\":null"));
 		CHECK(has(s, "\"port\":" + std::to_string(srv.session.port())));
+		CHECK(field(s, "adapter") == "wivrn");
 
 		// pairing on at run time: fresh 6-digit PIN, a new headset pairs with it
 		s = ask(sock, "pair on");
@@ -151,7 +155,8 @@ int main()
 			            std::lock_guard l(m);
 			            pins.push_back(p);
 		            }});
-		ControlServer ctl(sock, srv.session);
+		WivrnControl wc(srv.session);
+		ControlServer ctl(sock, wc);
 		auto s = ask(sock, "status");
 		CHECK(field(s, "state") == "waiting" and field(s, "encryption") == "enabled" and field(s, "pin").empty());
 
@@ -213,9 +218,32 @@ int main()
 	{
 		// encryption disabled: no pairing to switch on
 		Server srv({.encryption = WivrnConfig::Encryption::disabled, .known_keys_file = keys_file});
-		ControlServer ctl(sock, srv.session);
+		WivrnControl wc(srv.session);
+		ControlServer ctl(sock, wc);
 		CHECK(field(ask(sock, "status"), "encryption") == "disabled");
 		CHECK(has(ask(sock, "pair on"), "\"error\""));
+	}
+	{
+		// "frames-in-flight N|auto": 0-8 or auto reach the pipeline's hook, anything else is refused; no game link = error
+		Server srv({.encryption = WivrnConfig::Encryption::disabled, .known_keys_file = keys_file});
+		std::vector<uint32_t> got;
+		bool linked = true;
+		WivrnControl wc(srv.session);
+		ControlServer ctl(sock, wc, {.set_frames_in_flight = [&](uint32_t n) {
+			                                      if (linked)
+				                                      got.push_back(n);
+			                                      return linked;
+		                                      }});
+		CHECK(not has(ask(sock, "frames-in-flight 1"), "\"error\""));
+		CHECK(not has(ask(sock, "frames-in-flight 0"), "\"error\""));
+		CHECK(not has(ask(sock, "frames-in-flight auto"), "\"error\""));
+		CHECK(has(ask(sock, "frames-in-flight 9"), "\"error\""));
+		CHECK(has(ask(sock, "frames-in-flight -1"), "\"error\""));
+		CHECK(has(ask(sock, "frames-in-flight autox"), "\"error\""));
+		CHECK(has(ask(sock, "frames-in-flight 2x"), "\"error\""));
+		CHECK((got == std::vector<uint32_t>{1, 0, FramesInFlight::adaptive}));
+		linked = false;
+		CHECK(has(ask(sock, "frames-in-flight auto"), "no game link"));
 	}
 	std::filesystem::remove_all(dir);
 	return test_result("control");

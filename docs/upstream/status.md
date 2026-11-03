@@ -27,8 +27,9 @@ Verified:
 - Steam sign-in, installation of Proton 11.0-2 (ARM64) and FEX, running a DX11 game (Death's Door)
   through DXVK → Venus → MoltenVK;
 - guest resolution follows the window size at constant DPI; fast shutdown (2–4 s);
-- Heroes of Might and Magic: Olden Era (Unity, DX11) — 7 minutes without errors (offline test).
+- Heroes of Might and Magic: Olden Era (Unity, DX11) — 7 minutes without errors (offline test);
+- American Truck Simulator (native Linux x86_64 under FEX, OpenGL 4.6 core through zink) — a career loads
+  and the world renders on KosmicKrisp and on MoltenVK.
 
 Stutters on the first pass are Metal compilation (~50–100 ms per new pipeline); subsequent passes take
 ~1 ms. On reboot after an abrupt shutdown, initramfs checks and repairs FAT on esp/efi.
-

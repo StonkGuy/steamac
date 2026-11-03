@@ -67,8 +67,9 @@ void SessionEncoderSink::encode(int eye, CVPixelBufferRef buffer, const LinkFram
 	}
 }
 
-VrPipeline::VrPipeline(VrSession & session, int link_fd, const std::string & mach_name, CompositorOptions opt) :
-        session(session), opt(opt)
+VrPipeline::VrPipeline(VrSession & session, int link_fd, const std::string & mach_name, CompositorOptions opt,
+                       uint32_t frames_in_flight) :
+        session(session), opt(opt), in_flight(frames_in_flight)
 {
 	server = std::make_unique<VrLinkServer>(
 	        link_fd, mach_name, [this](const LinkFrame & f) { on_frame(f); },
@@ -84,6 +85,7 @@ const char * VrPipeline::upscaler() const
 VrPipeline::~VrPipeline()
 {
 	quit = true;
+	in_flight.shutdown();
 	if (clock.joinable())
 		clock.join();
 	server.reset(); // joins the link thread before the bridge goes away
@@ -128,8 +130,10 @@ void VrPipeline::send_state(bool connected)
 	s.connected = connected;
 	if (auto info = connected ? session.headset() : std::nullopt)
 	{
-		s.eye_width = info->render_eye_width ? info->render_eye_width : info->eye_width;
-		s.eye_height = info->render_eye_height ? info->render_eye_height : info->eye_height;
+		// Without host foveation the compositor only converts, so the guest renders at the stream size (A2).
+		bool own_size = info->render_eye_width and info->foveation != FoveationModel::none;
+		s.eye_width = own_size ? info->render_eye_width : info->eye_width;
+		s.eye_height = own_size ? info->render_eye_height : info->eye_height;
 		s.refresh_hz = refresh ? refresh.load() : info->preferred_refresh_rate;
 		for (int e = 0; e < 2; e++)
 		{
@@ -239,9 +243,11 @@ void VrPipeline::on_message(const void * msg, size_t n)
 }
 
 // The pacer's frame cadence, forwarded: the guest's WaitGetPoses returns on VRL_TIMING with the poses for its
-// display time, and submits with that frame id (WiVRn matches the headset's feedback by it).
+// display time, and submits with that frame id (WiVRn matches the headset's feedback by it). The render divisor goes
+// along, so that the guest waits for the pacer's next frame instead of rendering frames in between.
 void VrPipeline::frame_clock()
 {
+	uint64_t issued = 0; // the last frame id sent to the guest
 	while (not quit and not server->peer_closed())
 	{
 		if (not session.connected())
@@ -249,13 +255,17 @@ void VrPipeline::frame_clock()
 			std::this_thread::sleep_for(std::chrono::milliseconds(20));
 			continue;
 		}
+		if (in_flight.enabled())
+			in_flight.wait(issued, ns(1e9 / std::max(refresh.load(), 1.0f)), now_ns());
 		FrameTiming t = session.next_frame_timing();
+		issued = t.frame_id;
 		vrl_timing tm{};
 		tm.h = {VRL_TIMING, sizeof tm};
 		tm.frame_id = t.frame_id;
 		tm.wake_up = t.wake_up;
 		tm.predicted_display = t.predicted_display;
 		tm.refresh_hz = refresh;
+		tm.render_divisor = t.render_divisor;
 		vrl_poses ps{};
 		ps.h = {VRL_POSES, sizeof ps};
 		ps.time = t.predicted_display;
@@ -264,7 +274,10 @@ void VrPipeline::frame_clock()
 		// poses first: the guest's frame starts on the timing packet
 		server->send(&ps, sizeof ps);
 		if (server->send(&tm, sizeof tm))
+		{
 			timings++;
+			in_flight.released(t.frame_id, now_ns());
+		}
 	}
 }
 
@@ -284,6 +297,7 @@ void VrPipeline::on_frame_error()
 void VrPipeline::on_frame(const LinkFrame & f)
 {
 	st.received++;
+	in_flight.ready(f.frame_id, f.received_time, f.app_submit_time, f.ready_time); // also while off: the limit can be switched on at run time
 	auto info = session.connected() ? session.headset() : std::nullopt;
 	if (not info or not info->eye_width)
 	{
@@ -292,17 +306,19 @@ void VrPipeline::on_frame(const LinkFrame & f)
 	}
 	std::lock_guard lock(m);
 	CompositorOptions o = opt;
+	o.vd_foveation = info->foveation == FoveationModel::vd;
 	if (info->nominal_render_width > info->render_eye_width) // render scale < 1: upscale to the headset's size
 	{
 		o.upscale_w = info->nominal_render_width;
 		o.upscale_h = info->nominal_render_height;
 	}
-	if (info->eye_width != w or info->eye_height != h or not bridge or o.upscale_w != up_w)
+	if (info->eye_width != w or info->eye_height != h or not bridge or o.upscale_w != up_w or o.vd_foveation != vd_fov)
 	{
 		bridge.reset();
 		sink = std::make_unique<SessionEncoderSink>(session, info->eye_width, info->eye_height);
 		bridge = std::make_unique<CompositorBridge>(info->eye_width, info->eye_height, *sink, o);
 		up_w = o.upscale_w;
+		vd_fov = o.vd_foveation;
 		w = info->eye_width;
 		h = info->eye_height;
 	}

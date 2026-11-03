@@ -1,0 +1,5 @@
+#version 450
+layout(local_size_x=256) in;
+shared uint data[11616];
+layout(set=0,binding=0,std430) buffer Result { uint value; } result;
+void main() { for(uint i=gl_LocalInvocationIndex;i<11616;i+=256) data[i]=i; barrier(); atomicAdd(result.value,data[(gl_LocalInvocationIndex+17)%11616]); }

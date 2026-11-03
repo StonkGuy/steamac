@@ -68,6 +68,14 @@ enum DiskCreationFilesystem {
         return "filesystem=\(type), block=\(fs.f_bsize), flags=0x\(String(fs.f_flags, radix: 16)), free=\(UInt64(fs.f_bavail) * UInt64(fs.f_bsize))"
     }
 
+    /// Identity and allocation, not file contents: distinguish a removed/replaced output from
+    /// bad bytes on the same file and a disconnected parent volume.
+    static func fileDiagnostic(_ path: String) -> String {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return "\(path): lstat: \(String(cString: strerror(errno)))" }
+        return "\(path): dev=\(st.st_dev), inode=\(st.st_ino), size=\(st.st_size), allocated=\(st.st_blocks * 512), links=\(st.st_nlink)"
+    }
+
     /// Before downloading: reject volumes that cannot hold the disk. Returns whether files
     /// occupy their full logical size (exFAT does not support sparse files).
     static func preflight(directory: String, diskBytes: UInt64, rootfsBytes: UInt64, existingBytes: UInt64 = 0) throws -> Bool {

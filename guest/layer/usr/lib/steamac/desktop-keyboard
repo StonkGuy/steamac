@@ -1,0 +1,196 @@
+#!/usr/bin/python3
+"""Desktop Mode keyboard layouts follow the Mac's input sources.
+
+    desktop-keyboard <active index> <layout[(variant)]>...
+
+The progress agent runs it on every `keyboard-layout` request of the launcher
+(the Mac's enabled keyboard layouts as XKB layouts, in macOS's order, and the
+one selected now). The first sync owns Plasma's keyboard settings; an observed
+user edit permanently stops following the Mac. It reloads KWin and selects the
+active layout on the nested Plasma session's own bus (nested-desktop writes its
+address to $XDG_RUNTIME_DIR/nested_plasma/steamac-session-bus). Without a live
+desktop bus it exits without touching configuration. A live bus may still be
+starting Plasma, so this invocation waits for org.kde.keyboard to register.
+"""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+SPEC = re.compile(r"([a-z]{2,3})(?:\(([A-Za-z0-9_-]+)\))?")
+XKB_SYMBOLS = Path("/usr/share/X11/xkb/symbols")
+CONFIG_KEYS = ("Use", "LayoutList", "VariantList", "DisplayNames")
+
+
+def busctl(addr, *args, timeout=2):
+    return subprocess.run(["busctl", "--address=" + addr, "--timeout=1", *args],
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def kwin_layouts(addr):
+    """[(layout, display name, long name)] KWin uses now, None while org.kde.keyboard is
+    not up. The variant is not in it: the long name tells it ("Russian (Macintosh)")."""
+    r = busctl(addr, "--json=short", "call", "org.kde.keyboard", "/Layouts",
+               "org.kde.KeyboardLayouts", "getLayoutsList")
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)["data"][0]
+        if not isinstance(data, list) or any(
+                not isinstance(layout, list) or len(layout) != 3
+                or not all(isinstance(value, str) for value in layout) for layout in data):
+            return None
+        return [tuple(layout) for layout in data]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
+def config(key):
+    r = subprocess.run(["kreadconfig6", "--file", "kxkbrc", "--group", "Layout", "--key", key],
+                       capture_output=True, text=True, check=True)
+    return r.stdout.rstrip("\n")
+
+
+def atomic_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+        os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def supported_layouts(wanted, index):
+    """Filter against the guest's XKB files, retaining the original active item."""
+    symbols = {}
+    valid = []
+    for original, (layout, variant) in enumerate(wanted):
+        if layout not in symbols:
+            try:
+                text = (XKB_SYMBOLS / layout).read_text()
+                # Ignore commented-out declarations, but leave quoted strings intact.
+                symbols[layout] = re.sub(
+                    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/',
+                    lambda m: "" if m[0].startswith(("//", "/*")) else m[0], text)
+            except OSError:
+                symbols[layout] = None
+        text = symbols[layout]
+        if text is None or (variant and not re.search(
+                r'\bxkb_symbols\s+"' + re.escape(variant) + r'"\s*\{', text)):
+            print(f"desktop-keyboard: ignoring unavailable {layout}({variant})", file=sys.stderr)
+            continue
+        valid.append((original, layout, variant))
+    active = next((item for item in valid if item[0] == index), None)
+    if len(valid) > 4:
+        valid = valid[:4] if active is None or active in valid[:4] else valid[:3] + [active]
+    active_index = valid.index(active) if active is not None else None
+    return [(layout, variant) for _, layout, variant in valid], active_index
+
+
+def main(argv):
+    if len(argv) < 3 or not argv[1].isdigit():
+        print("usage: desktop-keyboard <active index> <layout[(variant)]>...", file=sys.stderr)
+        return 2
+    index = int(argv[1])
+    wanted = []
+    for spec in argv[2:]:
+        m = SPEC.fullmatch(spec)
+        if not m:
+            print(f"desktop-keyboard: bad layout {spec!r}", file=sys.stderr)
+            return 2
+        wanted.append((m.group(1), m.group(2) or ""))
+    if index >= len(wanted):
+        print(f"desktop-keyboard: index {index} beyond {len(wanted)} layouts", file=sys.stderr)
+        return 2
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    try:
+        with open(os.path.join(runtime, "nested_plasma", "steamac-session-bus")) as f:
+            addr = f.read().strip()
+    except OSError:
+        return 0  # no Desktop Mode now
+    if not addr:
+        return 0
+
+    # A stale address must not cause config access or a long registration wait.
+    try:
+        if busctl(addr, "status", timeout=1).returncode != 0:
+            return 0
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+
+    wanted, index = supported_layouts(wanted, index)
+    if not wanted:
+        return 0
+    marker_path = Path.home() / ".config/steamac/mac-keyboard.json"
+    marker = json.loads(marker_path.read_text()) if marker_path.exists() else {}
+    if marker.get("user"):
+        return 0
+    current = {key: config(key) for key in CONFIG_KEYS}
+    if "last" in marker and current != marker["last"]:
+        marker["user"] = True
+        atomic_write(marker_path, json.dumps(marker, sort_keys=True) + "\n")
+        print("desktop-keyboard: keeping user keyboard settings", file=sys.stderr)
+        return 0
+
+    layouts = ",".join(layout for layout, _ in wanted)
+    variants = ",".join(variant for _, variant in wanted)
+    desired = dict(zip(CONFIG_KEYS, ("true", layouts, variants, "")))
+    now = kwin_layouts(addr)
+    changed = current != desired
+    if changed:
+        for key, value in desired.items():
+            cmd = ["kwriteconfig6", "--file", "kxkbrc", "--group", "Layout", "--key", key]
+            if key == "Use":
+                cmd += ["--type", "bool"]
+            subprocess.run(cmd + [value], check=True)
+        print(f"desktop-keyboard: layouts {layouts} ({variants})", file=sys.stderr)
+    # Even a matching first sync establishes ownership, as mac-clock-format does.
+    marker["last"] = desired
+    atomic_write(marker_path, json.dumps(marker, sort_keys=True) + "\n")
+
+    codes = [layout for layout, _ in wanted]
+    deadline = time.monotonic() + 15
+    reloaded_at = None
+    before = None
+    while time.monotonic() < deadline:
+        if now is not None:
+            if reloaded_at is None and (changed or [layout[0] for layout in now] != codes):
+                before = now
+                r = busctl(addr, "emit", "/Layouts", "org.kde.keyboard", "reloadConfig")
+                if r.returncode != 0:
+                    print(f"desktop-keyboard: reloadConfig: {r.stderr.strip()}", file=sys.stderr)
+                    return 1
+                reloaded_at = time.monotonic()
+            elif ([layout[0] for layout in now] == codes and (
+                    reloaded_at is None or now != before or time.monotonic() >= reloaded_at + 2)):
+                # reloadConfig is asynchronous. Variants may keep the same codes
+                # (and even names); retain a settling wait when no change is visible.
+                if index is None:
+                    return 0  # The active Mac layout was dropped: never switch.
+                r = busctl(addr, "call", "org.kde.keyboard", "/Layouts",
+                           "org.kde.KeyboardLayouts", "setLayout", "u", str(index))
+                if r.returncode == 0:
+                    return 0
+                print(f"desktop-keyboard: setLayout: {r.stderr.strip()}", file=sys.stderr)
+                return 1
+        time.sleep(0.2)
+        now = kwin_layouts(addr)
+    print(f"desktop-keyboard: KWin has {now}, not {codes}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print("desktop-keyboard: " + str(error), file=sys.stderr)
+        sys.exit(1)

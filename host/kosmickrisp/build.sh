@@ -246,14 +246,90 @@
 #              for a Metal compile (0051 waited under virglrenderer's submission lock, and took static state
 #              for dynamic when the compile failed). A program destroyed during the inline compile of its first
 #              use (0057) is freed by that thread instead of leaking.
-#   0064       steamac (Mesa util): the fallback util_barrier (macOS has no pthread barriers) may be destroyed by
-#              its serial thread, as util_queue_finish does. util_barrier_wait returned true in every thread and
-#              each destroyed the mutex while the others still re-acquired it in pthread_cond_wait; macOS cannot
-#              unlock a destroyed mutex (EINVAL), so the next thread blocked on it forever. disk_cache_destroy of
-#              0055's per-device disk cache then hung in util_queue_finish under virglrenderer's render state
-#              lock and every Venus context and virtio-gpu blob map of the guest stopped. Only the serial thread
-#              gets true now, and destroy waits for the threads it released. Mesa main has the same fallback;
-#              open MR !32068 (serial thread only) alone still deadlocks. Test: src/util/tests/u_queue_test.cpp.
+#   0064       steamac: timestamp writes outside render encoders resolve contiguous entries in one range, and
+#              a recording starts another Metal command buffer (same allocator) every 16384 of them. Metal 4
+#              rejects a command buffer past a capacity of 61680 sample + dispatch + single-entry resolve
+#              triples (123330 with range resolves; M5 Pro, macOS 27.2; per command buffer, not per
+#              allocator): MTL4CommandQueueErrorDomain code 1 and nothing in it runs. #45: Ratchet & Clank:
+#              Rift Apart's vkd3d-proton writes ~790k timestamps in one one-time-submit command buffer
+#              (command buffer 68 failed with OutOfMemory, then the queue timed out and the device was lost
+#              ~9 s into play); it now completes in ~3.5 s of GPU time. Entries past the process' 131072 still
+#              read 0 (0045). Repro: host/moltenvk/repro queries.c (1 and 3 timestamp pools of 65536, every
+#              query written in one command buffer, the first pool non-zero and not decreasing).
+#   0065       steamac: reject empty/out-of-bounds image-view ranges before Mesa's assert-only range resolution
+#              and Metal (STEAMAC-62/64/3). Explicit zero layers, REMAINING_ARRAY_LAYERS at the array size or the
+#              selected 3D mip's depth, and a 65536-layer count narrowed to uint16 all reproduce the reported
+#              zero-slice Metal abort; valid remaining-layer and 3D-slice views do not. Reports lack the Vulkan
+#              arguments, so rejected views log the original range, extent, type, flags, usage and tiling.
+#              Driver-internal 3D meta clear/copy views use depth as layerCount and retain that convention.
+#              Repro: image_views.c (five valid controls, eight invalid cases including 0066's format case).
+#   0066       steamac: reject incompatible color texel-block sizes before Metal (STEAMAC-3 d7f4d319 and
+#              STEAMAC-62's 6C-associated event: a distinct RGBA8Unorm -> R8Unorm assertion, also at :1866).
+#              Depth/stencil and multi-planar aspect views keep their plane-format path; compressed block-texel
+#              aliases keep their equal block sizes. Rejections log both Vulkan formats, image flags and usage.
+#              Repro: image_views.c invalid-format-2d reproduces the exact assertion on M1 Max.
+#   0067       steamac: rejected image-view arguments (0065/0066) are printed to stderr in release builds,
+#              without a Vulkan debug messenger or MESA_VK_LOG: the fixed-driver repro showed that vk_errorf
+#              alone is silent by default. This distinguishes the possible zero-slice Vulkan inputs in the
+#              next guest report instead of attributing one without evidence.
+#   0068       steamac: missing pipeline-layout descriptors (STEAMAC-6H/6G): a shader may reference a
+#              set/binding absent from Venus independent-set layouts. Lower absent resources to null
+#              (zero reads/atomic results, dropped writes), guard descriptor lookup, and print the
+#              first missing stage/set/binding once per pipeline. Valid layouts retain their selected robustness.
+#   0069       steamac: malformed NIR diagnostics (STEAMAC-5T): check instruction classes/opcodes and SSA
+#              sources before each bulk varyings pass; log stage and source BLAKE3 and reject malformed input
+#              without terminating the host. Root cause remains unproven; this does not claim to fix
+#              corruption introduced inside varying optimization.
+#   0071       steamac: compatible-format image copies into compressed mip tails clamp the expanded
+#              destination extent to the mip edge (RG32_UINT -> 1x1 BC1 expanded to 4x4 and aborted
+#              Metal API validation in copyFromBuffer:toTexture: on M1 Max). STEAMAC-5E/5F has that
+#              CmdCopyImage2 fallback stack, but its resource formats were not captured. Repro:
+#              host/moltenvk/repro/sentry-image-copy.c compressed (1/2/4/8 BC1, every byte checked).
+#   0072       steamac: the same image-copy fallback sizes its scratch buffer for every depth slice
+#              of a 3D volume and advances its scratch offset by that volume; requests past the
+#              32-bit pool limit fail command recording instead of truncating the allocation. A
+#              256x256x8 RG32_UINT -> RGBA16_UINT copy used 4 MiB of a 512 KiB buffer and aborted
+#              Metal validation on M1 Max. Repro: sentry-image-copy.c color (all volume bytes checked).
+#   0073       steamac: log new copy/render descriptor shapes before entering AGX on Apple9+,
+#              with a ready marker after the call: Metal formats/types, sizes, levels/layers,
+#              samples, usage/storage/buffer backing, attachment load/store/resolve metadata and
+#              copy offsets/strides/options. Its per-thread 64-entry shape cache was meant to avoid
+#              repeat-frame logs (replaced in 0078); MESA_KK_DEBUG=cbs logs every call/return on any
+#              GPU. STEAMAC-5H and STEAMAC-3 e265653f are one M4 Pro render-load/background-program
+#              compiler abort without an AGX reason or descriptor data; neither that M4 failure nor
+#              5E/5F's actual resource shape is provable on M1 Max. Existing residency.c exercises
+#              descriptor logging.
+#   0074       steamac: prioritize fault feedback and shader excerpts before innocent victims and successful
+#              compositor records in bounded GPU-failure diagnostics (STEAMAC-G); no submission changes.
+#   0075       steamac: vkCreateImage refuses LINEAR (buffer-backed) images with more mips, layers, volume
+#              depth or samples than the format query advertises (1 each). Binding forwarded all seven
+#              levels to Metal's buffer texture constructor: `Linear texture: cannot be mipmapped,
+#              mipmapLevelCount (7) disallowed` aborted the VM (STEAMAC-3F/6Y, appid 1174180, M3).
+#              host/moltenvk/repro/linear_images.c: the 1.9.6 driver aborts in Metal on all five invalid
+#              cases, with 0075 they are refused and the valid LINEAR/seven-mip OPTIMAL controls bind.
+#   0076       steamac: BLAKE3 integrity for precompiled NIR in pipeline/device/disk caches
+#              before nir_deserialize, with a versioned entry format and a new KK cache identity.
+#              A missing hash or mismatch is a cache miss, logged once when the rejected entry is
+#              removed; SPIR-V is translated again. STEAMAC-6M/6K fault in glsl_get_struct_field
+#              while loading cached NIR; the reports do not identify the corruption source.
+#              KK's translated-shader objects store MSL, not NIR, and keep their existing format.
+#              Repro: nir_cache.c (unmodified, three dereference corruptions, bad/missing hash,
+#              legacy entry; pipeline creation, dispatch and readback; no repeat rejection log).
+#   0077       steamac: Mesa's util_barrier fallback (macOS has no pthread barriers) returned true to every
+#              thread and util_queue_finish_execute destroys the barrier on true: the first thread out
+#              destroyed the mutex/condvar under the other waiters and util_queue_finish hung
+#              (disk_cache_destroy in kk_physical_device_destroy: the repro `compilers` test hung in about
+#              half of today's builds, a VM process tearing down a Vulkan instance could too). Only the last
+#              thread leaving returns true. test/util_queue_finish.c (10000 finishes of 4-thread queues
+#              against the build's libmesa_util.a, 60 s watchdog) runs after the driver build: without the
+#              patch it hangs after 42-103 finishes (3 of 3 runs), with it 10000 finish in under a second.
+#   0078       steamac: 0073's direct-mapped 64-slot cache evicted alternating shapes, so Steam's UI (eleven
+#              framebuffers a frame, several sharing a slot) logged every render encoder of every frame on
+#              M3/M5: ~1800 lines/s (STEAMAC-74 "Steam UI feels very sluggish", STEAMAC-73; their
+#              10000-line logs covered five seconds). An open-addressed per-thread set logs each shape
+#              once, at most 256 per thread, then one note. MESA_KK_DEBUG=shapes logs new shapes on any
+#              GPU. host/moltenvk/repro/encoder_shapes.c: 100 shapes x 30 frames logged 2275 render shape
+#              lines with 0073's cache, 100 with 0078; 300 shapes log 256 and the note.
 #
 # Two meson builds: (1) the host compiler tools mesa_clc + vtn_bindgen2 against Homebrew LLVM
 # (shared) and SPIRV-LLVM-Translator, installed into work/build/host-kosmickrisp/clc; (2) the driver
@@ -403,6 +479,13 @@ env PATH="$driver_path" SDKROOT="$sdk" MACOSX_DEPLOYMENT_TARGET=26.0 meson setup
 env PATH="$driver_path" SDKROOT="$sdk" MACOSX_DEPLOYMENT_TARGET=26.0 ninja -C "$work/build"
 built=$work/build/src/kosmickrisp/vulkan/libvulkan_kosmickrisp.dylib
 
+# --- Mesa util regression on macOS: util_queue_finish over the mutex/condvar barrier fallback (0077)
+uqf=$work/util_queue_finish
+eval xcrun clang $("$work/venv/bin/python3" "$here/test/util-cflags.py" "$work/build") \
+	"$here/test/util_queue_finish.c" "$work/build/src/util/libmesa_util.a" \
+	"$work/build/src/c11/impl/libmesa_util_c11.a" -lz -lpthread -framework CoreFoundation -o "$uqf"
+"$uqf"
+
 # --- stage
 stage=$work/stage
 rm -rf "$stage"
@@ -492,7 +575,20 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "  0047 = steamac: KK_WORKAROUND_11 (one shared MTL4Compiler) kept on macOS 27; compiling threads named after their compile"
 	echo "  0059 = steamac: zero texel-buffer widths are null; oversized views clamp to Metal's per-format capacity after alignment"
 	echo "  0061 = steamac: buffer-backed texture-buffer views inherit buffer residency, avoiding IOGPU's per-set entry limit"
-	echo "  0064 = steamac: the fallback util_barrier may be destroyed by its serial thread (util_queue_finish deadlock on macOS)"
+	echo "  0064 = steamac: coalesce timestamp resolves and split timestamp-heavy recordings every 16384 writes"
+	echo "  0065 = steamac: reject empty/out-of-bounds image view ranges before Metal, with original Vulkan arguments logged"
+	echo "  0066 = steamac: reject incompatible color image view texel-block sizes before Metal"
+	echo "  0067 = steamac: rejected image view Vulkan arguments printed on stderr in release builds"
+	echo "  0068 = steamac: lower unprovided pipeline-layout descriptors to null, diagnosing the first missing stage/set/binding"
+	echo "  0069 = steamac: diagnose malformed NIR with stage/source hash before bulk varying optimization"
+	echo "  0071 = steamac: clamp expanded compressed-copy destination extents to the mip edge"
+	echo "  0072 = steamac: include every depth slice in image-copy fallback scratch storage"
+	echo "  0073 = steamac: retain copy/render encoder descriptor shapes before entering AGX on Apple9+ (cbs on any GPU)"
+	echo "  0074 = steamac: prioritize GPU fault feedback before victims and successful compositor records"
+	echo "  0075 = steamac: refuse LINEAR images beyond one mip/layer/sample before Metal's buffer texture (STEAMAC-3F/6Y)"
+	echo "  0076 = steamac: verify versioned precompiled NIR BLAKE3 before deserialization; reject bad entries as cache misses"
+	echo "  0077 = steamac: only the last waiter leaving the macOS fallback barrier may destroy it; util_queue_finish regression"
+	echo "  0078 = steamac: log each encoder descriptor shape once per thread, at most 256 (STEAMAC-74/73 log flood)"
 	echo
 	echo "Known gaps (host/moltenvk/repro/run.sh): transform feedback with strip geometry shaders and"
 	echo "the overflow counter (draft !44928)."

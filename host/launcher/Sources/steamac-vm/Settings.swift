@@ -21,7 +21,7 @@ final class LauncherSettings: ObservableObject {
     enum Key: String, CaseIterable {
         // General
         case showOverlay, showStallIndicator, openFullscreen, perfStats, sendCrashReports, muteInBackground, pauseInBackground,
-             closeAction, checkForUpdates, followMacTime, shareClipboard, shareConcealedClipboard, shareGameStats
+             closeAction, checkForUpdates, followMacTime, followMacKeyboard, shareClipboard, shareConcealedClipboard, shareGameStats
         // Display
         case dpiSource, fixedDPI, fixedWidthMM, fixedHeightMM, refreshRate, followWindowSize, windowWidth, windowHeight,
              windowSizePreset, retinaResolution, metalHUD, superResolution, renderScale, upscaleLowerResolutions
@@ -36,7 +36,7 @@ final class LauncherSettings: ObservableObject {
              graphicsPath, frameLatency, wmtr, wmtrLibrary
         // VR
         case vrEnabled, vrBitrateMbps, vrEyeSize, vrCodec, vrPairOnRequest, vrHeadsetAudio, vrGameAppID
-        case vrRenderScale, vrUpscaler, vrSharpness, vrForceSRGB, vrKeyframeInterval, vrTCPOnly, vrShowStats
+        case vrRenderScale, vrUpscaler, vrSharpness, vrForceSRGB, vrKeyframeInterval, vrTCPOnly, vrVirtualDesktop, vrShowStats
 
         var nextStart: Bool {
             switch self {
@@ -45,7 +45,7 @@ final class LauncherSettings: ObservableObject {
                  .sshPort, .network, .lanRemotePlay,
                  .diskImage, .steamClient, .followMacTime, .vulkanDriver, .graphicsPath, .wmtr, .wmtrLibrary, .frameLatency, .vrEnabled,
                  .vrEyeSize, .vrCodec, .vrPairOnRequest, .vrHeadsetAudio, .vrRenderScale, .vrUpscaler, .vrSharpness,
-                 .vrForceSRGB, .vrKeyframeInterval, .vrTCPOnly:
+                 .vrForceSRGB, .vrKeyframeInterval, .vrTCPOnly, .vrVirtualDesktop:
                 return true
             default:
                 return false
@@ -384,6 +384,8 @@ final class LauncherSettings: ObservableObject {
     /// The guest's time zone and 12/24-hour format follow the Mac (MacTime kernel parameters)
     /// until each is changed inside SteamOS; next start.
     @Published var followMacTime = true { didSet { save(.followMacTime, followMacTime) } }
+    /// Desktop Mode's keyboard layouts follow the Mac's input sources (KeyboardLayoutSync); now.
+    @Published var followMacKeyboard = true { didSet { save(.followMacKeyboard, followMacKeyboard) } }
     // Display
     @Published var dpiSource = DPISource.auto { didSet { save(.dpiSource, dpiSource.rawValue) } }
     @Published var fixedDPI = 110 { didSet { save(.fixedDPI, fixedDPI) } }
@@ -482,6 +484,8 @@ final class LauncherSettings: ObservableObject {
     @Published var vrKeyframeInterval = 0.0 { didSet { save(.vrKeyframeInterval, vrKeyframeInterval) } }
     /// Settings > VR "Stream": everything over TCP (WiVRn's tcp_only; for networks that drop UDP).
     @Published var vrTCPOnly = false { didSet { save(.vrTCPOnly, vrTCPOnly) } }
+    /// Settings > VR "Headset app": Virtual Desktop instead of WiVRn (vrhost --adapter vd).
+    @Published var vrVirtualDesktop = false { didSet { save(.vrVirtualDesktop, vrVirtualDesktop) } }
     /// Settings > VR live statistics section (panel only, read while Settings is open).
     @Published var vrShowStats = false { didSet { save(.vrShowStats, vrShowStats) } }
     static let vrRenderScaleRange = 0.5...1.5
@@ -567,6 +571,7 @@ final class LauncherSettings: ObservableObject {
         bool(.checkForUpdates, &checkForUpdates)
         bool(.shareGameStats, &shareGameStats)
         bool(.followMacTime, &followMacTime)
+        bool(.followMacKeyboard, &followMacKeyboard)
         if let s = d.string(forKey: Key.dpiSource.rawValue).flatMap(DPISource.init(rawValue:)) { dpiSource = s }
         int(.fixedDPI, &fixedDPI)
         int(.fixedWidthMM, &fixedWidthMM)
@@ -636,6 +641,7 @@ final class LauncherSettings: ObservableObject {
         bool(.vrForceSRGB, &vrForceSRGB)
         if let v = d.object(forKey: Key.vrKeyframeInterval.rawValue) as? Double, (0...60).contains(v) { vrKeyframeInterval = v }
         bool(.vrTCPOnly, &vrTCPOnly)
+        bool(.vrVirtualDesktop, &vrVirtualDesktop)
         bool(.vrShowStats, &vrShowStats)
         reloadGames()
     }
@@ -672,6 +678,7 @@ final class LauncherSettings: ObservableObject {
         case .checkForUpdates: guard let b else { return false }; checkForUpdates = b
         case .shareGameStats: guard let b else { return false }; shareGameStats = b
         case .followMacTime: guard let b else { return false }; followMacTime = b
+        case .followMacKeyboard: guard let b else { return false }; followMacKeyboard = b
         case .dpiSource: guard let v = DPISource(rawValue: text) else { return false }; dpiSource = v
         case .fixedDPI: guard let i else { return false }; fixedDPI = i
         case .fixedWidthMM: guard let i else { return false }; fixedWidthMM = i
@@ -732,6 +739,7 @@ final class LauncherSettings: ObservableObject {
         case .vrForceSRGB: guard let b else { return false }; vrForceSRGB = b
         case .vrKeyframeInterval: guard let d, (0...60).contains(d) else { return false }; vrKeyframeInterval = d
         case .vrTCPOnly: guard let b else { return false }; vrTCPOnly = b
+        case .vrVirtualDesktop: guard let b else { return false }; vrVirtualDesktop = b
         case .vrShowStats: guard let b else { return false }; vrShowStats = b
         }
         return true
@@ -750,7 +758,7 @@ final class LauncherSettings: ObservableObject {
         muteInBackground = fresh.muteInBackground; pauseInBackground = fresh.pauseInBackground
         shareClipboard = fresh.shareClipboard; shareConcealedClipboard = fresh.shareConcealedClipboard
         closeAction = fresh.closeAction; checkForUpdates = fresh.checkForUpdates; shareGameStats = fresh.shareGameStats
-        followMacTime = fresh.followMacTime
+        followMacTime = fresh.followMacTime; followMacKeyboard = fresh.followMacKeyboard
         dpiSource = fresh.dpiSource; fixedDPI = fresh.fixedDPI; fixedWidthMM = fresh.fixedWidthMM
         fixedHeightMM = fresh.fixedHeightMM; refreshRate = fresh.refreshRate; followWindowSize = fresh.followWindowSize
         windowWidth = fresh.windowWidth; windowHeight = fresh.windowHeight; windowSizePreset = fresh.windowSizePreset
@@ -773,7 +781,7 @@ final class LauncherSettings: ObservableObject {
         vrGameAppID = fresh.vrGameAppID
         vrRenderScale = fresh.vrRenderScale; vrUpscaler = fresh.vrUpscaler; vrSharpness = fresh.vrSharpness
         vrForceSRGB = fresh.vrForceSRGB; vrKeyframeInterval = fresh.vrKeyframeInterval
-        vrTCPOnly = fresh.vrTCPOnly; vrShowStats = fresh.vrShowStats
+        vrTCPOnly = fresh.vrTCPOnly; vrVirtualDesktop = fresh.vrVirtualDesktop; vrShowStats = fresh.vrShowStats
         loading = false
         reloadGames()
         log("settings: reset to defaults")
@@ -811,7 +819,7 @@ final class LauncherSettings: ObservableObject {
             .vrEnabled: vrEnabled, .vrEyeSize: vrEyeSize, .vrCodec: vrCodec.rawValue,
             .vrPairOnRequest: vrPairOnRequest, .vrHeadsetAudio: vrHeadsetAudio, .vrRenderScale: vrRenderScale,
             .vrUpscaler: vrUpscaler.rawValue, .vrSharpness: vrSharpness, .vrForceSRGB: vrForceSRGB,
-            .vrKeyframeInterval: vrKeyframeInterval, .vrTCPOnly: vrTCPOnly,
+            .vrKeyframeInterval: vrKeyframeInterval, .vrTCPOnly: vrTCPOnly, .vrVirtualDesktop: vrVirtualDesktop,
         ]
         var s: [Key: String] = [:]
         for (k, v) in values where k.nextStart && overrides[k] == nil { s[k] = "\(v)" }

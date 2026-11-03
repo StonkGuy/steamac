@@ -1,0 +1,24 @@
+From: steamac <steamac@local>
+Date: Sun, 1 Nov 2026 12:00:00 +0000
+Subject: [PATCH] libkrun: identify block device initialization failures (STEAMAC-15)
+
+Log the block id and path before initialization, and preserve the concrete
+BlockConfigError in the failure line rather than reducing every failure to
+an unexplained -EINVAL. The identity line uses stderr because the launcher's
+default warn filter suppresses info. No extra disk opens or changed error semantics.
+
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -3282,8 +3282,9 @@
+ 
+     #[cfg(feature = "blk")]
+     for block_cfg in ctx_cfg.get_block_cfg() {
+-        if ctx_cfg.vmr.add_block_device(block_cfg).is_err() {
+-            error!("Error configuring virtio-blk for block");
++        eprintln!("virtio-blk: configuring {}: {}", block_cfg.block_id, block_cfg.disk_image_path);
++        if let Err(err) = ctx_cfg.vmr.add_block_device(block_cfg) {
++            error!("Error configuring virtio-blk for block: {err:?}");
+             return -libc::EINVAL;
+         }
+     }

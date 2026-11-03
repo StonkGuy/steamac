@@ -34,4 +34,14 @@ FoveationParams compute_foveation(const EyeFov & fov, float eye_x, uint32_t src_
 // [b[i], b[i+1]) (reversed when flipped). offset/size: the eye's sub-rect on that axis.
 std::vector<uint32_t> foveation_boundaries(const std::vector<uint16_t> & params, bool flip, uint32_t offset,
                                            uint32_t size, uint32_t out_dim);
+
+// Virtual Desktop's fixed foveated encoding, per axis and the same on x and y: the
+// central 75% of the encoded frame holds the central 50% of the rendered eye at 1.5x (1:1 when the render size is
+// 1.5x the stream size, as VD's presets are), the outer 12.5% on each side hold the outer 25% on a square-root
+// curve. The Quest client always undoes it (VD-FACT(foveated-encoding), from the Streamer's Foveation effect).
+// vd_foveation_source: encoded coordinate u in [0,1] -> rendered coordinate s in [0,1]; vd_foveation_encoded: inverse.
+double vd_foveation_source(double u);
+double vd_foveation_encoded(double s);
+// out_dim+1 source boundaries like foveation_boundaries, for the VD curve.
+std::vector<uint32_t> vd_foveation_boundaries(bool flip, uint32_t offset, uint32_t size, uint32_t out_dim);
 } // namespace vrhost

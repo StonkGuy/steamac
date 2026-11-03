@@ -57,14 +57,24 @@ void wmtr_vr_get_stats(struct wmtr_vr *vr, struct wmtr_vr_stats *out);
  * connected; ids are mapped (host id + offset) and, without a fresh timing, the cadence continues locally from
  * `now`. The wake-up time is never more than two frames ahead: a guest must not sleep on a stale or remapped
  * timing (2026-10-17: a reconnect mid-game put it ~9000 frames ahead, VRChat froze). Pure, for tests. */
+/* While the pacer runs (its newest timing is current), a local frame is only what the guest gets when it asks before
+ * the pacer's next frame is out: its wake-up is when that frame is due (last host wake-up + render_period, the
+ * pacer's interval: spacewarp releases a frame every other display period, and the host may hold one while the GPU
+ * is behind), and the flags tell the guest to wait for it rather than render a frame the headset never asked for.
+ * Returns WMTR_VR_FRAME_* (= SVR_FRAME_*). */
+#define WMTR_VR_FRAME_FROM_PACER 1u /* a fresh timing: the pacer's own frame */
+#define WMTR_VR_FRAME_PACER_LIVE 2u /* the pacer's newest timing is current */
+/* how long after its last timing the pacer counts as running: in time, not display periods, since a host that holds
+ * frames for a GPU-bound game (VRChat at 24 fps: 41 ms+ per frame) sends its timings several periods apart */
+#define WMTR_VR_PACER_LIVE_NS 150000000ll
 struct wmtr_vr_cadence {
   uint64_t host_last;  /* host frame id of the last fresh timing used */
   int64_t offset;      /* guest id = host id + offset */
   int64_t last_wake;   /* wake-up of the last frame handed out */
 };
-void wmtr_vr_frame_cadence(struct wmtr_vr_cadence *c, uint64_t host_id, int64_t host_wake, int64_t host_display,
-                           uint64_t guest_last, int64_t now, int64_t period, uint64_t *id, int64_t *wake,
-                           int64_t *display);
+unsigned wmtr_vr_frame_cadence(struct wmtr_vr_cadence *c, uint64_t host_id, int64_t host_wake, int64_t host_display,
+                               uint64_t guest_last, int64_t now, int64_t period, int64_t render_period, uint64_t *id,
+                               int64_t *wake, int64_t *display);
 /* the executor encoded a signal of shared event `event` (host object) to `value` for the guest: the time is kept
  * for the stage split of the frames that wait for it. vr == NULL is ignored. */
 void wmtr_vr_note_signal(struct wmtr_vr *vr, uint64_t event, uint64_t value);

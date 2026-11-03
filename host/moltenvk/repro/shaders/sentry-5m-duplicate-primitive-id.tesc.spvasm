@@ -1,0 +1,25 @@
+; STEAMAC-5M: zink may expose PrimitiveId twice, as shader input and system value.
+OpCapability Tessellation
+OpMemoryModel Logical GLSL450
+OpEntryPoint TessellationControl %main "main" %primitive_a %primitive_b %result
+OpExecutionMode %main OutputVertices 4
+OpDecorate %primitive_a BuiltIn PrimitiveId
+OpDecorate %primitive_b BuiltIn PrimitiveId
+OpDecorate %result Patch
+OpDecorate %result Location 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%input_uint = OpTypePointer Input %uint
+%output_uint = OpTypePointer Output %uint
+%primitive_a = OpVariable %input_uint Input
+%primitive_b = OpVariable %input_uint Input
+%result = OpVariable %output_uint Output
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%a = OpLoad %uint %primitive_a
+%b = OpLoad %uint %primitive_b
+%sum = OpIAdd %uint %a %b
+OpStore %result %sum
+OpReturn
+OpFunctionEnd

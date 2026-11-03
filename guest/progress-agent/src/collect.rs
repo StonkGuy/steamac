@@ -47,6 +47,20 @@ const STEAM_LOGS: &[&str] = &[
 ];
 const STEAM_LOG_TAIL: usize = 512 * 1024;
 const PROTON_LOG_TAIL: usize = 1024 * 1024;
+// SteamVR and Remote Play do not write their device/encoder failures to the
+// client console reliably (STEAMAC-65). Fixed names bound both size and scope.
+const VR_LOGS: &[&str] = &[
+    "vrserver.txt",
+    "vrcompositor.txt",
+    "vrmonitor.txt",
+    "vrwebhelper.txt",
+    "vrclient_vrstartup.txt",
+    "vrclient_vrmonitor.txt",
+    "vrclient_vrwebhelper.txt",
+    "vrstream.txt",
+    "streaming_log.txt",
+];
+const VR_LOG_TAIL: usize = 256 * 1024;
 
 type Done = (String, Result<Vec<u8>, String>);
 
@@ -200,6 +214,9 @@ fn gather(dir: &Path, steam: &Path, home: &Path) -> Result<(), String> {
     out("uname.txt", &["uname", "-a"], 4096);
     out("df.txt", &["df", "-h"], 64 << 10);
     out("free.txt", &["free", "-m"], 4096);
+    // The first row is since boot; the next two measure current swap/IO/CPU
+    // stalls. A single free/meminfo snapshot cannot explain STEAMAC-5S.
+    out("vmstat.txt", &["vmstat", "-w", "1", "3"], 16 << 10);
     // Game/compositor waits distinguish a live guest waiting for GPU fences from a CPU stall
     // (STEAMAC-4F/3P). Command names only: never include arguments or environment variables.
     out("threads.txt", &["ps", "-eLo", "pid,tid,stat,pcpu,wchan:32,comm"], 256 << 10);
@@ -230,6 +247,10 @@ fn gather(dir: &Path, steam: &Path, home: &Path) -> Result<(), String> {
         ("overcommit-memory.txt", "/proc/sys/vm/overcommit_memory"),
         ("overcommit-ratio.txt", "/proc/sys/vm/overcommit_ratio"),
         ("meminfo.txt", "/proc/meminfo"),
+        ("vmstat-counters.txt", "/proc/vmstat"),
+        ("pressure-memory.txt", "/proc/pressure/memory"),
+        ("pressure-io.txt", "/proc/pressure/io"),
+        ("pressure-cpu.txt", "/proc/pressure/cpu"),
         ("agent-status.txt", "/proc/self/status"),
         ("cpuinfo.txt", "/proc/cpuinfo"),
     ] {
@@ -257,6 +278,10 @@ fn gather(dir: &Path, steam: &Path, home: &Path) -> Result<(), String> {
         let note = copy_tail(&logs.join(&n), &steam_dir.join(&n), STEAM_LOG_TAIL, &s);
         notes.push(format!("steam/{n}: {note}"));
     }
+    for n in VR_LOGS {
+        let note = copy_tail(&logs.join(n), &steam_dir.join(n), VR_LOG_TAIL, &s);
+        notes.push(format!("steam/{n}: {note}"));
+    }
 
     // Proton: PROTON_LOG=1 writes ~/steam-<appid>.log; compatdata holds the
     // Proton version / config of each prefix.
@@ -282,8 +307,8 @@ fn gather(dir: &Path, steam: &Path, home: &Path) -> Result<(), String> {
             }
         }
     }
-    if proton_logs.is_empty() && prefixes.is_empty() {
-        notes.push("proton: no PROTON_LOG files or compatdata prefixes".into());
+    if proton_logs.is_empty() {
+        notes.push("proton: no PROTON_LOG files. To capture a Windows game's failure, set Steam launch options to PROTON_LOG=1 %command%, reproduce once, then report again. Existing prefixes alone do not contain Wine exception logs.".into());
     }
     let fex_dir = dir.join("fex");
     let _ = std::fs::create_dir_all(&fex_dir);
@@ -481,11 +506,47 @@ impl Scrubber {
         let mut s = steam3_ids(text);
         s = steam64_ids(&s);
         s = emails(&s);
+        s = ip_addresses(&s);
         for (name, with) in &self.names {
             s = replace_word(&s, name, with);
         }
         s
     }
+}
+
+/// Network diagnostics may contain LAN headset addresses or public endpoints.
+/// Preserve ports and non-address version strings, but never upload literal IPs.
+fn ip_addresses(text: &str) -> String {
+    let token_char = |c: char| c.is_ascii_alphanumeric() || ".:%_-".contains(c);
+    let mut out = String::with_capacity(text.len());
+    let mut start = 0;
+    for (end, c) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
+        if token_char(c) {
+            continue;
+        }
+        if start < end {
+            let token = &text[start..end];
+            let address = token.trim_end_matches('.');
+            let host = address.split_once('%').map_or(address, |(host, _)| host);
+            if host.parse::<std::net::IpAddr>().is_ok() {
+                out.push_str("<ip>");
+                out.push_str(&token[address.len()..]);
+            } else if let Some((_, port)) = address.rsplit_once(':').filter(|(host, port)| {
+                host.parse::<std::net::Ipv4Addr>().is_ok() && port.parse::<u16>().is_ok()
+            }) {
+                out.push_str("<ip>:");
+                out.push_str(port);
+                out.push_str(&token[address.len()..]);
+            } else {
+                out.push_str(token);
+            }
+        }
+        if end < text.len() {
+            out.push(c);
+        }
+        start = end + c.len_utf8();
+    }
+    out
 }
 
 /// `"key"   "value"` lines of a VDF text file.
@@ -649,6 +710,19 @@ mod tests {
     }
 
     #[test]
+    fn network_addresses() {
+        let s = Scrubber::with_names(&[("gamer", "<account>")]);
+        assert_eq!(
+            s.scrub("gamer [U:1:123] 76561198000000001 192.168.1.20:27031 [2001:db8::12]:443 fe80::1%eth0 ::1 8.8.8.8."),
+            "<account> [U:1:<id>] <steamid> <ip>:27031 [<ip>]:443 <ip> <ip> <ip>."
+        );
+        assert_eq!(
+            s.scrub("version 1.2.3 encoder h264 2026-11-01T00:21:23Z ::ffff:192.0.2.1"),
+            "version 1.2.3 encoder h264 2026-11-01T00:21:23Z <ip>"
+        );
+    }
+
+    #[test]
     fn vdf() {
         let t = "\"users\"\n{\n\t\"7656\"\n\t{\n\t\t\"AccountName\"\t\t\"bob\"\n\t\t\"PersonaName\"\t\t\"Bobby B\"\n\t}\n}\n";
         let p = vdf_pairs(t);
@@ -686,6 +760,11 @@ mod tests {
         std::fs::write(&src, "short\n").unwrap();
         assert_eq!(copy_tail(&src, &dst, 22, &s), "6 bytes");
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "short\n");
+        std::fs::write(&src, format!("{}\nheadset 192.168.1.20:27031\n", "old\n".repeat(VR_LOG_TAIL / 4))).unwrap();
+        assert!(copy_tail(&src, &dst, VR_LOG_TAIL, &s).starts_with("last "));
+        let text = std::fs::read_to_string(&dst).unwrap();
+        assert!(text.len() <= VR_LOG_TAIL);
+        assert!(text.ends_with("headset <ip>:27031\n"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

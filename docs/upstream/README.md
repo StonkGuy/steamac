@@ -18,12 +18,14 @@ documentation, start at the repository's top-level `README.md` and `docs/fork.md
 - [Controller](controller.md) — the virtual gamepad, rumble, DualSense passthrough
 - [FX Steam Launcher.app](app-bundle.md) — the app bundle, disk locking, fsck
 - [Creating a disk](creating-a-disk.md) — creating the SteamOS disk without Docker
+- [Languages](languages.md) — the launcher's and SteamOS's languages
 - [Steam client](steam-client.md) — Deck / Deck beta / Frame client selection
 - [Vulkan driver](vulkan-driver.md) — KosmicKrisp and MoltenVK
 - [Signing in](signing-in.md) — signing in to Steam in the VM
 - [Distribution (DMG)](distribution.md) — building and notarizing the DMG
 - [Crash reports](crash-reports.md) — Sentry crash reports and diagnostics
 - [Update check](update-check.md) — the launcher's update check
+- [Game statistics](game-statistics.md) — the opt-in game statistics service
 - [Report a Problem](report-a-problem.md) — the in-app report dialog
 - [How it works](how-it-works.md) — repository layout and notable fixes
 - [Status](status.md) — what has been verified

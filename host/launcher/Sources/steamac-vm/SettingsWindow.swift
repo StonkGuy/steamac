@@ -324,6 +324,11 @@ private struct GeneralTab: View {
                            detail: String(localized: "SteamOS gets the Mac's time zone and 12/24-hour format at every start, until you change each in SteamOS or Steam."),
                            now: false, key: .followMacTime)
                 }
+                Toggle(isOn: $settings.followMacKeyboard) {
+                    Label2(title: "Use the Mac's keyboard layouts in Desktop Mode",
+                           detail: String(localized: "Desktop Mode follows the Mac's keyboard layouts (Fn/Globe, Control-Space) until you change the layouts in SteamOS. The first sync replaces existing layouts; later user edits win."),
+                           now: true, key: .followMacKeyboard)
+                }
             }
             Section {
                 Toggle(isOn: $settings.shareClipboard) {

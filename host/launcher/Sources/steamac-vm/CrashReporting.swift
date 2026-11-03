@@ -412,6 +412,8 @@ enum CrashReporting {
         runDir = dir
         try? FileManager.default.removeItem(atPath: dir + "/user-exit")
         try? FileManager.default.removeItem(atPath: dir + "/sentry-tags.json")
+        try? FileManager.default.removeItem(atPath: dir + "/gpu-history.txt")
+        locked { lineScanner.resetExitDiagnostics() }
         let run = locked { tags["run"] } ?? String(format: "%08x", arc4random())
         env[runIdEnv] = run
         setTags(["run": run, "boot": String(boot), "vm_cpus": String(o.cpus), "vm_mem_mib": String(o.memMiB),
@@ -435,6 +437,9 @@ enum CrashReporting {
     /// logged "No space left on device" flushing the guest disk just before).
     static let forceQuitStatus: Int32 = 3
 
+    /// An expected startup refusal already explained by the VM process (e.g. a disk lock race).
+    static let startupRejectedStatus: Int32 = 4
+
     /// Ways to ask a process to end (logout, `kill`, ^C, the terminal closing). The VM process
     /// handles them (guest power key); one that kills it came before its handlers were installed
     /// (first-run sheet, startup) and is no crash.
@@ -445,7 +450,7 @@ enum CrashReporting {
     /// with forceQuitStatus). SIGPIPE (its output pipe closed; ignored since STEAMAC-10, see
     /// main.swift) is no crash either.
     static func unexpectedExit(status: Int32, runDir dir: String) -> Bool {
-        guard status != 0, status != forceQuitStatus else { return false }
+        guard status != 0, status != forceQuitStatus, status != startupRejectedStatus else { return false }
         let signal = status > 128 ? status - 128 : 0
         if terminationSignals.contains(signal) || signal == SIGPIPE { return false }
         let userExit = FileManager.default.fileExists(atPath: dir + "/user-exit")
@@ -484,7 +489,9 @@ enum CrashReporting {
         let signal = exit.signal
         followSetting()
         tap?.waitIdle()   // the VM process's last lines are breadcrumbs of this report
-        let (pending, last) = locked { (lineScanner.flushPending(), lineScanner.lastError) }
+        let (pending, last, nativeException) = locked {
+            (lineScanner.flushPending(), lineScanner.lastError, lineScanner.nativeException.joined(separator: "\n"))
+        }
         for f in pending { report(f.kind, key: f.key, message: f.message, extra: f.extra) }
         guard unexpected else {
             if !pending.isEmpty { flush() }
@@ -518,6 +525,13 @@ enum CrashReporting {
             var key = signal != 0 ? signalName(signal) : "status \(exit.status)"
             var lines = [exitSummary(status: exit.status) + lastError]
             var extra: [String: String] = [:]
+            if signal != 0 && !nativeException.isEmpty {
+                lines.append(nativeException.components(separatedBy: "\n")[0])
+                extra["native_exception_stderr"] = nativeException
+                // CPPExceptionTerminate is Sentry's catch-all terminate hook, not the throw site.
+                // Distinct ObjC exceptions must not all group as a single SIGABRT in that hook.
+                key += " " + normalize(nativeException.components(separatedBy: "\n")[0])
+            }
             // macOS's report names the crash site, so crashes group by it instead of by signal, and
             // carries what Sentry's report of the VM process leaves out: libmalloc's message on a
             // heap corruption trap (STEAMAC-31/13: SIGTRAP in libsystem_malloc under
@@ -626,6 +640,13 @@ enum CrashReporting {
 
     // MARK: reports
 
+    /// VM process: publish a bounded snapshot for the supervisor's fatal-line reports.
+    /// StallMonitor calls this once per second; no history is persisted when reporting is off.
+    static func updateGPUHistory(_ history: String) {
+        guard locked({ running }), let dir = Supervisor.runDir else { return }
+        try? String(scrub(history).prefix(8000)).write(toFile: dir + "/gpu-history.txt", atomically: true, encoding: .utf8)
+    }
+
     /// Rate-limited, deduplicated report (no-op when reporting is off). `extra`: long scrubbed
     /// details (event extra data), `tags`: short searchable values.
     static func report(_ kind: Kind, key: String, message: String, level: SentryLevel = .error,
@@ -647,6 +668,12 @@ enum CrashReporting {
         event.message = SentryMessage(formatted: String(scrub(message).prefix(2000)))
         event.fingerprint = [kind.rawValue, String(key.prefix(200))]
         if !extra.isEmpty { event.extra = extra.mapValues { String(scrub($0).prefix(8000)) } }
+        if kind == .gpuContextFatal || kind == .vmKilled, let dir = role == .launcher ? runDir : Supervisor.runDir,
+           let history = try? String(contentsOfFile: dir + "/gpu-history.txt", encoding: .utf8) {
+            var diagnostics = event.extra ?? [:]
+            diagnostics["gpu_history"] = String(scrub(history).prefix(8000))
+            event.extra = diagnostics
+        }
         var t = extraTags
         t["kind"] = kind.rawValue
         if role == .launcher, let dir = runDir,
@@ -780,6 +807,9 @@ enum CrashReporting {
         if unexpectedExit(status: forceQuitStatus, runDir: dir) { failures.append("exit: force quit without marker reported") }
         if !unexpectedExit(status: 1, runDir: dir) { failures.append("exit: status 1 without marker not reported") }
         if !unexpectedExit(status: 128 + SIGSEGV, runDir: dir) { failures.append("exit: SIGSEGV not reported") }
+        for status in [startupRejectedStatus, 128 + SIGTERM, 128 + SIGINT, 128 + SIGHUP, 128 + SIGPIPE] {
+            if unexpectedExit(status: status, runDir: dir) { failures.append("exit: expected status \(status) reported") }
+        }
         FileManager.default.createFile(atPath: dir + "/steamos.img", contents: Data(count: 512))
         if AppBundle.isDiskImage(dir + "/Apps.app") { failures.append("disk: an app bundle is a disk image") }
         if !AppBundle.isDiskImage(dir + "/steamos.img") { failures.append("disk: a file is no disk image") }
@@ -827,6 +857,16 @@ enum CrashReporting {
             if f.count != 1 || f.first?.kind != .gpuContextFatal || f.first?.message.hasSuffix(line) != true {
                 failures.append("scanner: \(f.count) findings for \(line)")
             }
+        }
+        let exception = "*** Terminating app due to uncaught exception 'NSInvalidArgumentException', reason: 'object cannot be nil'"
+        _ = scanner.feed(exception)
+        _ = scanner.feed("*** First throw call stack:")
+        _ = scanner.feed("(")
+        _ = scanner.feed("\t3 libwmtr_host.dylib _NSString_getCString + 32")
+        _ = scanner.feed(")")
+        for _ in 0..<250 { _ = scanner.feed("[steamac-vm] unrelated breadcrumb") }
+        if scanner.nativeException.first != exception || scanner.nativeException.last?.contains("_NSString_getCString") != true {
+            failures.append("scanner: native exception reason or first-throw stack lost")
         }
         log("selftest-settings: scanner check: \(LineScanner.teardownSample.count) teardown lines → no report, "
             + "\(LineScanner.fatalSample.count) fatal lines → one report each: "
@@ -1002,9 +1042,29 @@ private struct LineScanner {
     private var serial = 0
     /// Last launcher error line (`[steamac-vm] error: …`), for VM exit reports.
     private(set) var lastError: String?
+    /// Keep the first-throw reason and stack even if other threads fill the breadcrumb ring.
+    private(set) var nativeException: [String] = []
+    private var collectingNativeException = false
+
+    mutating func resetExitDiagnostics() {
+        lastError = nil
+        nativeException = []
+        collectingNativeException = false
+    }
 
     mutating func feed(_ line: String) -> [Finding] {
         var out: [Finding] = []
+        if line.hasPrefix("*** Terminating app due to uncaught exception ") {
+            nativeException = [String(line.prefix(2000))]
+            collectingNativeException = true
+        } else if collectingNativeException {
+            if line == ")" || nativeException.count >= 32 {
+                collectingNativeException = false
+            } else if line.hasPrefix("*** First throw call stack:") || line == "("
+                        || line.first?.isWhitespace == true {
+                nativeException.append(String(line.prefix(500)))
+            }
+        }
         if var p = pending {
             if p.kind == .pipelineCompile && line.hasPrefix(Self.mslPrefix) {
                 if p.msl.count < 120 { p.msl.append(String(line.dropFirst(Self.mslPrefix.count))) }

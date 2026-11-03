@@ -10,6 +10,10 @@ Easy Anti-Cheat (verified in game: VRChat; Mini Royale also passes EAC), with a 
 - **DXMT (lean)**: Direct3D 11 through [DXMT](https://github.com/3Shain/dxmt). Its Metal calls run natively on the Mac
   over a dedicated virtio-gpu channel, so there are fewer translation layers.
 
+**Like it? Help it along.** A star on the repository, an issue when something breaks (with your Mac model and the
+log), and pull requests are all welcome. If you keep a fork with a fix or an improvement, please open a pull request
+here too: it gets reviewed, credited to you and shipped to everyone in the next release.
+
 **Found a bug?** Please report it here (an issue, or a pull request with a test) instead of fixing it only in your own
 fork, so everyone gets the fix. This fork sends nothing to libkrun, Mesa, FEX or Proton itself; steamac changes are
 discussed with its maintainer directly. If you have reviewed a change here and think it is good enough for one of those
@@ -122,7 +126,14 @@ uses goes back to the Mac:
 |---|---|---|---|
 | free page reporting (libkrun patch 0026) | pages the guest frees leave the VM's memory footprint on the Mac at once (stock libkrun keeps them charged on macOS) | on | idle after boot 0.7-0.8 GiB lower |
 | boot page-cache trim (`steamac-mem-trim`) | 150 s after boot the guest drops its clean page cache once, so it is reported free too; runs once per boot, nothing during play | on; `steamac.mem_trim=0` on the kernel command line turns it off | idle VM footprint 8.92 -> 7.39 GiB |
+| after-game trim (`steamac-mem-trim-games`) | when the last running game ends (or is killed), the guest drops its clean page cache and compacts free memory, so what the game used is reported free in whole 2 MiB blocks; a check every 10 s, nothing during play | on; `steamac.mem_trim=0` turns it off | after an OOM-killed VRChat, compacting took the VM footprint from 13 to 8.5 GiB |
 | DXMT arena trim (`wmtr/`, libkrun patch 0028) | DXMT path: shared buffers idle for 1 s beyond a 128 MiB reserve go back to the Mac after a loading peak | on; `WMTR_ARENA_KEEP_MB`, `WMTR_ARENA_TRIM_MS`, `-1` keeps all | offline test: 504 -> 203 MiB after a peak; live check pending |
+| DXMT objects of an ended game (`wmtr/`) | when a game exits or is killed, the Metal objects it still owned (textures, buffers, pipelines) are released at once; before, they stayed in the VM until it shut down | on | after an OOM-killed VRChat ~1.1 GiB of graphics memory stayed behind; offline test, live check pending |
+
+Swap inside the guest: zram as large as the VM's memory, compressed with zstd (SteamOS's own is half the RAM with
+lzo-rle), and behind it a swap file on /home of half the VM's memory that only takes pages once zram is full
+(`steamac.swap_fallback=0` turns the file off and removes it). With SteamOS's zram alone, a heavy VRChat world change in
+an 8 GiB VM filled RAM and zram and the guest kernel killed the game.
 
 Scope: general (any game on this stack). These lower the idle and after-load footprint; they do not make a game fit
 whose peak needs more than the VM and the Mac have (see *Limits*).
@@ -133,7 +144,7 @@ whose peak needs more than the VM and the Mac have (see *Limits*).
   reaches `301` (not played further). Other titles are untested and results differ game by game.
 - 16 GB Macs: heavy titles can exceed the memory available. Unigine Superposition (720p, Low) went past 14 GB of app
   memory on both paths with an 8 GiB VM.
-- VR (Meta Quest 3 over WiVRn) is experimental and off by default: see [docs/vr.md](docs/vr.md).
+- VR (Meta Quest 3 over WiVRn or Virtual Desktop) is experimental and off by default: see [docs/vr.md](docs/vr.md).
 - DXMT: Direct3D 11/10. Its Direct3D 12 is limited (feature level 11_1, DXBC only, no DXIL, no ray tracing;
   ExecuteIndirect stalls the GPU); use *Vulkan* for Direct3D 12 games.
 - DXMT: Direct3D 11 stream output with rasterization or from a geometry shader is not implemented upstream; such games
@@ -158,7 +169,7 @@ whose peak needs more than the VM and the Mac have (see *Limits*).
 | [docs/fork.md](docs/fork.md) | what changed in this fork and its status |
 | [docs/eac-how-it-works.md](docs/eac-how-it-works.md) | the EAC chain and why the FEX swap is needed |
 | [docs/eac-performance.md](docs/eac-performance.md) | measurements and limits |
-| [docs/vr.md](docs/vr.md) | VR with a Quest 3 over WiVRn (experimental): setup, pairing, options, limits |
+| [docs/vr.md](docs/vr.md) | VR with a Quest 3 over WiVRn or Virtual Desktop (experimental): setup, pairing, options, limits |
 | [fex-eac/README.md](fex-eac/README.md) | patched FEX setup and launch options |
 | [docs/upstream/README.md](docs/upstream/README.md) | upstream steamac's documentation (Apache-2.0, © FX GAMES FZ LLC) |
 

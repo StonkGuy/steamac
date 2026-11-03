@@ -35,6 +35,8 @@ struct CompositorOptions
 	// Decode every 8-bit RGBA/BGRA eye image as sRGB, also when the game's format did not say so (DXGI *_TYPELESS
 	// swapchains that hold sRGB data): fixes a washed-out picture; wrong for a game that really submits linear data.
 	bool force_srgb = false;
+	// Virtual Desktop's fixed foveated encoding instead of WiVRn's (vd_foveation_boundaries); no parameters are sent
+	bool vd_foveation = false;
 };
 
 class EyeCompositor

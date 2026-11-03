@@ -23,11 +23,26 @@ code (`SteamOSLicense.eulaURL`) changes.
 External APFS, Mac OS Extended, and exFAT volumes can hold the disk. FAT32/MS-DOS is rejected
 before downloading because of its 4 GiB per-file limit (the temporary rootfs alone is 10 GiB).
 Read-only volumes and folders you can't write to are also rejected. Unlike APFS, exFAT has no sparse files: it needs space for the
-full selected disk size plus the temporary rootfs and download cache, even before games are installed;
-the launcher checks this space before reconstructing the rootfs.
-These expected rejections (including an existing destination file or a busy download cache) are logged, not sent as errors
-to Sentry. Unexpected creation failures still report: Foundation errors group by domain and code,
-with the original technical diagnostic in the event details rather than pointers/task IDs in the title.
+full selected disk size plus the temporary rootfs, even before games are installed. There the download cache also costs far
+more than its ~4.4 GB of data: macOS keeps each chunk file's provenance attribute in an extra `._` file, and every file and
+folder occupies whole clusters (128 KiB on a 2 TB drive), about 28 GB in all. The launcher checks this space before
+reconstructing the rootfs, and on exFAT deletes the chunk cache before allocating the disk when the volume would otherwise
+be too full (`--keep-cache` keeps it and needs room for both).
+Expected location failures (an existing destination, busy cache, read-only volume, missing write permission,
+full volume, disconnected drive, or filesystem I/O error) are logged with guidance, not sent as errors to Sentry,
+including failures after creation has started. Metadata/bundle connectivity failures (offline, DNS, timeout,
+connection loss, and system TLS rejection) follow the same policy as exhausted desync download retries.
+HTTPS certificate validation is never bypassed. Unexpected creation and bundle-signature failures still report,
+with the original technical diagnostic in event details.
+The launcher logs the target/cache filesystem type. A chunk-cache rename collision is retried once with a
+single worker and no cache. A rootfs hash mismatch is checked again with a sequential read to distinguish bad
+sparse-extent metadata from bad file bytes. If the bytes are bad, the temporary rootfs and chunk cache are
+deleted and downloaded again once, serially without a cache; both disk slots are cleared before retrying.
+A second integrity failure remains reportable; no disk is published without matching the signed manifest.
+Disk creation compares the partition table read back with what it wrote, both in the private file and
+after publishing the disk. A difference (STEAMAC-6J, exFAT), or a reconstructed rootfs that disappears
+before the disk is allocated (STEAMAC-68), stays reportable with file identities and the differing GPT
+fields; the window suggests Disk Utility First Aid or another drive.
 
 If a download cannot reach Valve securely, the window explains that a VPN, proxy, or network filter
 may be interfering: try disabling it or using another network. Update checks give the same advice
@@ -50,8 +65,9 @@ This expected rejection is logged only; all other signature failures still repor
    from Valve's chunk stores (~4.4 GB of data); the chunk cache is `desync/` in
    `~/Library/Caches/es.fxgam.steamac` for a disk on the home volume, otherwise in `<disk>.cache` next
    to the disk (an external drive then needs no internal space for it; the folder is removed after
-   success). The partial `<disk>.rootfs-tmp` remains too, so Stop/Resume (or rerunning the command
-   after Ctrl+C) continues where it left off. One creation per cache at a time: a second one (another
+   success), so Stop/Resume (or rerunning the command after Ctrl+C) continues where it left off; a
+   complete `<disk>.rootfs-tmp` left by an attempt that failed later is deleted first (desync never
+   reuses it, and it would take its space twice). One creation per cache at a time: a second one (another
    window or `--create-disk`) stops with “another SteamOS disk is being created” (`flock` on
    `creation.lock` in the cache folder) instead of sharing the chunk cache and temporary files.
 4. A sparse disk file: protective MBR + GPT (primary and backup, CRC32) with exactly the names,
@@ -70,12 +86,14 @@ This expected rejection is logged only; all other signature failures still repor
    and reports `provision done` — the launcher then removes the payload; subsequent boots do not
    use it.
 
-Space: ~14 GB on the disk volume during creation (~9 GB afterward), ~6 GB of cache (deleted after
-success unless `--keep-cache` is specified). Checks: `work/out/steamac-vm --selftest-provision` —
+Space on sparse-capable volumes: ~20 GB on the disk volume during creation (~9 GB afterward), plus ~6 GB of cache.
+desync preallocates the full 10 GiB temporary rootfs on macOS, even on APFS; only the two destination slots stay sparse.
+The preflight estimate includes this allocation and a safety margin (~27 GB total for SteamOS 20261007).
+The cache is deleted after success unless `--keep-cache` is specified.
+Checks: `work/out/steamac-vm --selftest-provision` —
 GPT against the Docker-built disk (`work/out/steamos.img` is opened read-only;
 `--reference-disk IMG`), CMS/squashfs against the `work/cache/rootfs` cache, cpio, SHA-512 crypt.
-The self-test also checks network messages, stable error fingerprints and log-only location
-rejections. To exercise an actual TLS failure without sending any events, point
-`STEAMAC_PROVISION_TEST_TLS_URL=https://localhost:PORT/` at a local server with an untrusted
-certificate when running `--selftest-provision`; it prints the message, title and fingerprint.
-
+The self-test also checks network messages, log-only network/filesystem failures, unexpected-error reporting,
+and sparse/sequential rootfs copying into both slots. To exercise an actual TLS failure without sending events,
+point `STEAMAC_PROVISION_TEST_TLS_URL=https://localhost:PORT/` at a local server with an untrusted
+certificate when running `--selftest-provision`; it prints the message and checks that no report is produced.

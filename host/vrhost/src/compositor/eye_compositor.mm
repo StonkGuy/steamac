@@ -271,9 +271,19 @@ bool EyeCompositor::compose(const EyeSource src_in[2], const EyeFov fov[2], cons
 			impl::Key k{fov[e], eye_x[e], src[e].x, src[e].y, src[e].w, src[e].h, src[e].flip_y};
 			if (!p->key_valid[e] || !(p->key[e] == k))
 			{
-				p->params[e] = compute_foveation(fov[e], eye_x[e], src[e].w, src[e].h, p->out_w, p->out_h);
-				auto bx = foveation_boundaries(p->params[e].x, false, src[e].x, src[e].w, p->out_w);
-				auto by = foveation_boundaries(p->params[e].y, src[e].flip_y, src[e].y, src[e].h, p->out_h);
+				std::vector<uint32_t> bx, by;
+				if (p->opt.vd_foveation)
+				{
+					p->params[e] = {};
+					bx = vd_foveation_boundaries(false, src[e].x, src[e].w, p->out_w);
+					by = vd_foveation_boundaries(src[e].flip_y, src[e].y, src[e].h, p->out_h);
+				}
+				else
+				{
+					p->params[e] = compute_foveation(fov[e], eye_x[e], src[e].w, src[e].h, p->out_w, p->out_h);
+					bx = foveation_boundaries(p->params[e].x, false, src[e].x, src[e].w, p->out_w);
+					by = foveation_boundaries(p->params[e].y, src[e].flip_y, src[e].y, src[e].h, p->out_h);
+				}
 				memcpy(p->bounds[e][0].contents, bx.data(), bx.size() * 4);
 				memcpy(p->bounds[e][1].contents, by.data(), by.size() * 4);
 				p->key[e] = k;
