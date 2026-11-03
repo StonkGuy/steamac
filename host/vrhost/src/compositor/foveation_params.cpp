@@ -164,4 +164,44 @@ std::vector<uint32_t> foveation_boundaries(const std::vector<uint16_t> & params,
 		ubo[k] = ubo[k - 1];
 	return ubo;
 }
+double vd_foveation_source(double u)
+{
+	u = std::clamp(u, 0.0, 1.0);
+	if (u < 0.125)
+		return M_SQRT1_2 * std::sqrt(u);
+	if (u < 0.875)
+		return 0.25 + (u - 0.125) * (2.0 / 3.0);
+	return 1 - M_SQRT1_2 * std::sqrt(1 - u);
+}
+
+double vd_foveation_encoded(double s)
+{
+	s = std::clamp(s, 0.0, 1.0);
+	if (s < 0.25)
+		return 2 * s * s;
+	if (s < 0.75)
+		return 0.125 + (s - 0.25) * 1.5;
+	return 1 - 2 * (1 - s) * (1 - s);
+}
+
+std::vector<uint32_t> vd_foveation_boundaries(bool flip, uint32_t offset, uint32_t size, uint32_t out_dim)
+{
+	std::vector<uint32_t> b(out_dim + 1);
+	for (uint32_t k = 0; k <= out_dim; ++k)
+	{
+		double s = vd_foveation_source(double(k) / out_dim) * size;
+		uint32_t px = std::min<uint32_t>(uint32_t(std::lround(s)), size);
+		b[k] = flip ? offset + size - px : offset + px;
+	}
+	// every output pixel reads at least one source pixel (magnified regions repeat a pixel)
+	for (uint32_t k = 0; k < out_dim; ++k)
+		if (b[k] == b[k + 1])
+		{
+			if (flip)
+				b[k] = std::min(b[k] + 1, offset + size);
+			else
+				b[k + 1] = std::min(b[k + 1] + 1, offset + size);
+		}
+	return b;
+}
 } // namespace vrhost

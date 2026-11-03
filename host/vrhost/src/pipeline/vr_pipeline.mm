@@ -130,8 +130,10 @@ void VrPipeline::send_state(bool connected)
 	s.connected = connected;
 	if (auto info = connected ? session.headset() : std::nullopt)
 	{
-		s.eye_width = info->render_eye_width ? info->render_eye_width : info->eye_width;
-		s.eye_height = info->render_eye_height ? info->render_eye_height : info->eye_height;
+		// Without host foveation the compositor only converts, so the guest renders at the stream size (A2).
+		bool own_size = info->render_eye_width and info->foveation != FoveationModel::none;
+		s.eye_width = own_size ? info->render_eye_width : info->eye_width;
+		s.eye_height = own_size ? info->render_eye_height : info->eye_height;
 		s.refresh_hz = refresh ? refresh.load() : info->preferred_refresh_rate;
 		for (int e = 0; e < 2; e++)
 		{
@@ -304,17 +306,19 @@ void VrPipeline::on_frame(const LinkFrame & f)
 	}
 	std::lock_guard lock(m);
 	CompositorOptions o = opt;
+	o.vd_foveation = info->foveation == FoveationModel::vd;
 	if (info->nominal_render_width > info->render_eye_width) // render scale < 1: upscale to the headset's size
 	{
 		o.upscale_w = info->nominal_render_width;
 		o.upscale_h = info->nominal_render_height;
 	}
-	if (info->eye_width != w or info->eye_height != h or not bridge or o.upscale_w != up_w)
+	if (info->eye_width != w or info->eye_height != h or not bridge or o.upscale_w != up_w or o.vd_foveation != vd_fov)
 	{
 		bridge.reset();
 		sink = std::make_unique<SessionEncoderSink>(session, info->eye_width, info->eye_height);
 		bridge = std::make_unique<CompositorBridge>(info->eye_width, info->eye_height, *sink, o);
 		up_w = o.upscale_w;
+		vd_fov = o.vd_foveation;
 		w = info->eye_width;
 		h = info->eye_height;
 	}

@@ -295,6 +295,16 @@ enum VRSelfTest {
         let r2 = VRRelay.actions(nil, lastSeq: 4)
         check(r0.start == nil && r0.seq == 3 && r0.pin == nil && r1.start == 438100 && r1.seq == 4 && r1.pin == "123456"
               && r2.start == nil && r2.seq == 4 && r2.pin == nil, "relay actions: \(r0) \(r1) \(r2)")
+        // an adapter without PIN pairing (Virtual Desktop) leaves encryption/pin out; its Games-tab pick still starts
+        let vd = try? JSONDecoder().decode(VRRelay.Reply.self, from: Data(#"{"app_request":{"id":"438100","seq":2}}"#.utf8))
+        let r3 = VRRelay.actions(vd, lastSeq: 1)
+        check(r3.start == 438100 && r3.seq == 2 && r3.pin == nil, "relay actions without encryption/pin: \(r3)")
+        // the guest's installed VR apps (list-vr-apps answer) become the host's "apps" request
+        check(VRRelay.vrApps("vr-apps 438100 2370570") == [438100, 2370570] && VRRelay.vrApps("vr-apps") == []
+              && VRRelay.vrApps("vr-appsx 1") == nil && VRRelay.vrApps("progress 5") == nil
+              && VRRelay.vrApps("vr-apps 7 x -3 0") == [7], "vr-apps line parse")
+        check(VRRelay.appsRequest([438100, 2370570]) == "apps 438100 2370570" && VRRelay.appsRequest([]) == "apps",
+              "apps request: \(VRRelay.appsRequest([438100, 2370570]))")
         check(LauncherSettings.vrEyeSizes.allSatisfy(LauncherSettings.vrEyeSizeValid)
               && !["", "1440", "1441x1584", "8x8", "axb"].contains(where: LauncherSettings.vrEyeSizeValid), "eye size validation")
         failures += VRPanelSelfTest.text()
@@ -349,27 +359,48 @@ enum VRSelfTest {
 /// every 2 s (VR boots only; nothing runs otherwise) it reads the host's status and
 /// * starts the game the headset picked in its WiVRn app list (`app_request` seq moved on) in the guest;
 /// * reports the pairing PIN while pairing is open (window subtitle), so a headset that asks for a PIN finds
-///   it on the VM window and not only in Settings > VR.
+///   it on the VM window and not only in Settings > VR;
+/// * asks the guest agent once for the installed VR apps (`list-vr-apps`, retried until it answers) and hands
+///   the ids to the host (control socket `apps`), which offers them next to the configured game (VD: Games tab).
 @MainActor
 final class VRRelay {
     struct Reply: Decodable {
         struct AppRequest: Decodable { var id: String; var seq: UInt64 }
-        var encryption: String
-        var pin: String
+        var encryption: String?   // WiVRn's; absent from adapters without PIN pairing
+        var pin: String?
         var app_request: AppRequest?
     }
 
     /// What one status reply asks for: the app to start (a new request since `lastSeq`) and the PIN to show.
     nonisolated static func actions(_ r: Reply?, lastSeq: UInt64?) -> (start: Int?, seq: UInt64?, pin: String?) {
         guard let r else { return (nil, lastSeq, nil) }
-        let pin = r.encryption == "pairing" && !r.pin.isEmpty ? r.pin : nil
+        let pin = r.encryption == "pairing" && !(r.pin ?? "").isEmpty ? r.pin : nil
         guard let a = r.app_request else { return (nil, lastSeq, pin) }
         // the first reply only sets the baseline: a request from before this launcher run is not repeated
         let start = lastSeq != nil && a.seq > lastSeq! ? Int(a.id) : nil
         return (start, a.seq, pin)
     }
 
+    /// Steam app ids of a guest `vr-apps <id>...` line; nil for any other line.
+    nonisolated static func vrApps(_ line: String) -> [Int]? {
+        let w = line.split(separator: " ")
+        guard w.first == "vr-apps" else { return nil }
+        return w.dropFirst().compactMap { Int($0) }.filter { $0 > 0 }
+    }
+
+    /// The control request that hands the installed VR apps to the host.
+    nonisolated static func appsRequest(_ ids: [Int]) -> String {
+        (["apps"] + ids.map(String.init)).joined(separator: " ")
+    }
+
+    nonisolated(unsafe) private(set) static weak var current: VRRelay?
+    private static let appsRetry: TimeInterval = 10, appsMaxAsks = 30
+
     private var timer: Timer?
+    private var appsAsked = Date.distantPast
+    private var appsAsks = 0
+    private var appsPending: [Int]?   // guest's answer, not yet accepted by the host
+    private var appsDone = false
     private var lastSeq: UInt64?
     private var shownPIN: String?
     private var busy = false
@@ -379,6 +410,7 @@ final class VRRelay {
     init(socketPath: String = VRControl.socketPath, onPIN: @escaping (String?) -> Void) {
         self.socketPath = socketPath
         self.onPIN = onPIN
+        Self.current = self
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -386,14 +418,36 @@ final class VRRelay {
 
     deinit { timer?.invalidate() }
 
+    /// A guest agent line (main thread); true when it was the `vr-apps` answer.
+    func guestLine(_ line: String) -> Bool {
+        guard let ids = Self.vrApps(line) else { return false }
+        if !appsDone {
+            appsPending = ids
+            log("vr: guest has \(ids.count) installed VR app(s)\(ids.isEmpty ? "" : ": " + ids.map(String.init).joined(separator: " "))")
+        }
+        return true
+    }
+
     private func tick() {
         guard VRHost.running != nil, !busy else { return }
+        // the guest agent answers once it runs; an older agent never does (bounded retries)
+        if !appsDone, appsPending == nil, appsAsks < Self.appsMaxAsks, Date().timeIntervalSince(appsAsked) >= Self.appsRetry {
+            appsAsked = Date()
+            if VRHost.guestSend?("list-vr-apps") == true { appsAsks += 1 }
+        }
         busy = true
         let path = socketPath
+        let apps = appsPending.map(Self.appsRequest)
         Task.detached {
+            // accepted: the host answers with its status (an adapter without an app list answers an error: give up)
+            let appsAccepted = apps.map { VRControl.request($0, path: path) != nil }
             let reply = VRControl.request("status", path: path).flatMap { try? JSONDecoder().decode(Reply.self, from: $0) }
             await MainActor.run {
                 self.busy = false
+                if appsAccepted == true {
+                    self.appsDone = true
+                    self.appsPending = nil
+                }
                 let a = Self.actions(reply, lastSeq: self.lastSeq)
                 self.lastSeq = a.seq
                 if let id = a.start { VRHost.launchInVR(id) }
