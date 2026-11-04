@@ -1,6 +1,6 @@
 # EAC in the SteamOS guest via Valve's FEX compat tool
 
-Run Easy Anti-Cheat games (tested: VRChat) on a steamac Mac by replacing the FEX inside Steam's own FEX compatibility tool
+Prepare a Linux Easy Anti-Cheat runtime on a steamac Mac by replacing FEX inside Steam's own FEX compatibility tool
 (Steam app 3127680) with the patched FEX from [StonkGuy/FEX](https://github.com/StonkGuy/FEX/tree/eac-2610): branch `eac-2610` = FEX-2610 plus the EAC fidelity patches, pinned here to tag
 [`eac-2610.5`](https://github.com/StonkGuy/FEX/releases/tag/eac-2610.5).
 

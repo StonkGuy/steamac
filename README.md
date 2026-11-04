@@ -87,8 +87,21 @@ be turned on and off while a game runs.
 
 EAC runs inside SteamOS under Valve's FEX emulator. This fork's patched FEX passes EAC's checks for VRChat, and for
 Mini Royale (EAC `301`; that game was not played past its account prompt). Results differ from game to game: each title
-ships its own EAC build and checks, so an untested game may or may not work. Today two
-manual steps are required for VRChat; both are planned to become automatic:
+ships its own EAC build and checks, so an untested game may or may not work.
+
+This development version adds **Settings > Advanced > Experimental game support**, off by default.
+It builds the pinned FEX runtime inside the Linux guest in the background. Restart Steam after the build finishes;
+the next start installs the prepared runtime and can repair it after a Steam tool update. The guest command
+`/usr/lib/steamac/steam-fex-eac status` shows setup status. The first build requires an internet connection.
+For installed VRChat, it selects Proton Experimental and adds the EAC launch helper only where the user has not set
+their own tool or launch options. Install Proton Experimental and Proton EasyAntiCheat Runtime in guest Steam first.
+Turning the setting off restores the previous runtime on the next Steam start if its files still match our installation.
+If they were changed by another tool, setup leaves them intact and reports the conflict.
+
+These changes have server-side setup tests. A Mac build, a real protected online session, and performance measurements
+are still required. ARC Raiders and current Call of Duty support are not established by this switch.
+
+The manual path remains available:
 
 1. Install the patched FEX: enable SSH (Settings > Advanced), then run `build-fex.sh` and `install-fex-tool.sh` in the
    guest ([fex-eac/README.md](fex-eac/README.md)).
