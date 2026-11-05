@@ -367,8 +367,13 @@ impl Session {
             }
             (Obj::Source, 1) => {
                 // cancelled: another selection replaced ours.
-                self.sources.remove(&obj);
-                self.wl.request(obj, 1, &[])?; // destroy
+                // KWin can queue more than one cancellation for the same source.
+                // Destroy it once: a second destructor is a fatal protocol error.
+                // Keep Obj::Source until delete_id so queued send events still
+                // consume and close their file descriptors.
+                if self.sources.remove(&obj).is_some() {
+                    self.wl.request(obj, 1, &[])?; // destroy
+                }
             }
             _ => {}
         }
@@ -496,4 +501,59 @@ fn write_out(fd: OwnedFd, mime: &str, c: Arc<Content>) {
             let _ = f.write_all(&d);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source_session() -> (Session, UnixStream) {
+        let (sock, peer) = UnixStream::pair().unwrap();
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut objs = HashMap::new();
+        objs.insert(7, Obj::Source);
+        let mut sources = HashMap::new();
+        sources.insert(7, Arc::new(Content::new(Some(b"old clipboard".to_vec()), None).unwrap()));
+        (Session {
+            wl: Wl { sock, rx: Vec::new(), fds: VecDeque::new(), next: 8 },
+            name: "test".into(), manager: 5, device: 6, objs,
+            offers: HashMap::new(), selection: None, initial: false, sources, tx,
+        }, peer)
+    }
+
+    #[test]
+    fn duplicate_source_cancellation_sends_one_destroy() {
+        let (mut s, mut peer) = source_session();
+        s.dispatch(7, 1, &[]).unwrap();
+        s.dispatch(7, 1, &[]).unwrap();
+        assert!(s.sources.is_empty());
+        // Keep the interface until delete_id so a queued send still consumes its fd.
+        assert!(s.objs.get(&7) == Some(&Obj::Source));
+        let mut destroy = [0u8; 8];
+        peer.read_exact(&mut destroy).unwrap();
+        assert_eq!(u32::from_ne_bytes(destroy[..4].try_into().unwrap()), 7);
+        assert_eq!(u32::from_ne_bytes(destroy[4..].try_into().unwrap()), (8 << 16) | 1);
+        peer.set_nonblocking(true).unwrap();
+        let result = peer.read(&mut destroy);
+        assert!(matches!(result, Err(e) if e.kind() == io::ErrorKind::WouldBlock),
+                "a duplicate cancelled event must not destroy the same source twice");
+        s.dispatch(DISPLAY, 1, &7u32.to_ne_bytes()).unwrap();
+        assert!(!s.objs.contains_key(&7));
+    }
+
+    #[test]
+    fn queued_send_after_cancellation_closes_its_fd() {
+        let (mut s, _peer) = source_session();
+        s.dispatch(7, 1, &[]).unwrap();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        s.wl.fds.push_back(writer.into());
+        let mut mime = ((MIME_TEXT.len() + 1) as u32).to_ne_bytes().to_vec();
+        mime.extend_from_slice(MIME_TEXT.as_bytes());
+        mime.push(0);
+        while mime.len() % 4 != 0 { mime.push(0); }
+        s.dispatch(7, 0, &mime).unwrap();
+        assert!(s.wl.fds.is_empty());
+        reader.set_nonblocking(true).unwrap();
+        assert_eq!(reader.read(&mut [0u8; 1]).unwrap(), 0);
+    }
 }
