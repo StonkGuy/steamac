@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "vd/vd_wire.h"
 
+#include <cstdlib>
+
 #include <algorithm>
 
 namespace vrhost::vd
@@ -131,8 +133,14 @@ std::string setting_changed_payload(const std::string & name, const std::string 
 
 std::vector<uint8_t> video_format_message(const VideoFormat & f)
 {
-	std::vector<uint8_t> out{tag_video_format_old};
-	auto b = bytes_of(f).first(video_format_old_size);
+	// VD 1.34.25 split the format message: VideoFormat (112 bytes, 4 stream slots) under tag 4 and the older
+	// VideoFormatOld (88 bytes, 3 slots) under tag 2. A 1.34.25 client reads a tag-4 format; the old form stays
+	// selectable with STEAMAC_VD_OLD_FORMAT=1 for A/B on older clients.
+	static const bool old_format = std::getenv("STEAMAC_VD_OLD_FORMAT") != nullptr;
+	std::vector<uint8_t> out{old_format ? tag_video_format_old : tag_video_format};
+	auto b = bytes_of(f);
+	if (old_format)
+		b = b.first(video_format_old_size);
 	out.insert(out.end(), b.begin(), b.end());
 	return out;
 }
