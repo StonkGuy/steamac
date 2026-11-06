@@ -24,7 +24,7 @@ inline constexpr uint16_t default_discovery_port = 38850;
 
 // VD-FACT(version): the record carries a System.Version; the headset (not the Streamer) judges it and, if it wants a
 // newer Streamer, sends Msg::update_required, answered with Msg::update_unavailable.
-inline constexpr int streamer_version[4] = {1, 34, 22, 0};
+inline constexpr int streamer_version[4] = {1, 34, 25, 0};
 
 // --- Discovery: VD-FACT(discovery-cipher, connect-now, offer-layout, rsa-padding, reply-layout, record-schema) -------
 // connect now: 17 bytes, NOT encrypted: the record's 16-byte connection id + 1 byte platform.
@@ -170,9 +170,11 @@ enum Feature : uint32_t
 };
 
 // --- Video channel: VD-FACT(video-tags, enum-values, eye-delivery, annexb-default, ssw-cadence) ---------------------
+// 1.34.25 split the format message (VirtualDesktop.Net.VideoFormat / VideoFormatOld): tag 4 carries 4 stream slots
+// (112 bytes, QuaternaryFrameSize/Bounds added), tag 2 the older 3 slots (88 bytes). The Streamer sends the tag-2
+// form to clients that predate the split; a 1.34.25 client did not start decoding on it (see vd_wire.cpp).
 inline constexpr uint8_t tag_frame = 0, tag_slice = 1, tag_video_format_old = 2, tag_subtitle = 3, tag_video_format = 4;
-// The VR producer always sends the older 88-byte format (3 stream slots) under tag 2.
-inline constexpr std::size_t video_format_old_size = 88;
+inline constexpr std::size_t video_format_size = 112, video_format_old_size = 88;
 enum class Source : uint8_t
 {
 	desktop = 0,
