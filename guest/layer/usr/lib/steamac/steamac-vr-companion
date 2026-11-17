@@ -16,5 +16,9 @@ done
 if [[ ! -f $host || $exe -lt 0 ]]; then
     exec "$@"
 fi
-echo "steamac-vr-companion: ${args[$exe]} with its SteamVR driver (svr-driverhost)" >&2
-exec "${args[@]:0:$exe}" "$host" --then "${args[@]:$exe}"
+# Steam discards a game's stderr: keep the driver host's (and the driver's) log lines, one file per
+# application, the previous run's beside it as .old
+log=$here/../log/$(basename "${args[$exe]}" .exe).log
+mkdir -p "${log%/*}" && [[ -f $log ]] && mv -f "$log" "$log.old"
+echo "steamac-vr-companion: ${args[$exe]} with its SteamVR driver (svr-driverhost), log $log" >&2
+exec "${args[@]:0:$exe}" "$host" --then "${args[@]:$exe}" 2>"$log"

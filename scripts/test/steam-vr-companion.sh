@@ -93,9 +93,12 @@ a=$(cksum < "$LC"; cksum < "$CF"); run "steamac.vr=1 steamac.vr_companion=237057
 
 # wrapper
 W=$T/state/tools/steamac-vr-companion
-printf '#!/bin/sh\nfor a; do echo "[$a]"; done\n' > "$T/proton"; chmod +x "$T/proton"
+printf '#!/bin/sh\nfor a; do echo "[$a]"; done\necho "driver: run $$" >&2\n' > "$T/proton"; chmod +x "$T/proton"
 out=$("$W" "$T/proton" waitforexitandrun "/games/Standable/Standable.exe" -x 2>/dev/null | tr -d '\n')
 [[ $out == "[waitforexitandrun][$T/state/tools/svr-driverhost.exe][--then][/games/Standable/Standable.exe][-x]" ]] || fail wrapper "got $out"
+grep -q "^driver: run" "$T/state/log/Standable.log" 2>/dev/null || fail wrapper "driver stderr not in state/log/Standable.log"
+first=$(cat "$T/state/log/Standable.log"); "$W" "$T/proton" waitforexitandrun "/games/Standable/Standable.exe" >/dev/null 2>&1
+[[ $(cat "$T/state/log/Standable.log.old") == "$first" ]] || fail wrapper "previous log not kept as .old"
 mv "$T/state/tools/svr-driverhost.exe" "$T/x.exe"
 out=$("$W" "$T/proton" waitforexitandrun "/games/Standable/Standable.exe" 2>/dev/null | tr -d '\n')
 [[ $out == "[waitforexitandrun][/games/Standable/Standable.exe]" ]] || fail wrapper "without the host: $out"

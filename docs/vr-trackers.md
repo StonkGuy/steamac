@@ -178,6 +178,8 @@ With VR on, the guest then takes care of the rest (`steam-vr-companion`, at Stea
 * When a VR game starts, it starts Standable through Steam.
 * The wrapper runs `svr-driverhost.exe --then Standable.exe` in Standable's Proton session. The driver loads first, then
   the application starts as its child under the same wineserver, so their pipes connect.
+* The driver host's and the driver's log lines go to `~/.local/share/steamac/vr-companion/log/<application>.log`
+  (Steam discards a game's stderr), the previous run's beside it as `.old`.
 * Setting the field back to 0, or turning VR off, puts the launch option and the compatibility tool back.
 
 Then calibrate in Standable, and in the title (VRChat: "Calibrate FBT", T-pose, triggers).
