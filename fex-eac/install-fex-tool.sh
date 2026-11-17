@@ -16,10 +16,14 @@ cur() { sed -n "s/^FEX describe\t//p" "$V/VERSIONS.txt"; }
 new() { sed -n "s/^FEX describe\t//p" "$N/VERSIONS.txt"; }
 need() { for b in $BINS; do [ -s "$1/usr/bin/$b" ] || { echo "$2: $1/usr/bin/$b missing or empty" >&2; exit 1; }; done
          for f in $FILES; do [ -s "$1/$f" ] || { echo "$2: $1/$f missing or empty" >&2; exit 1; }; done; }
+# The backup is the one directory in $B, named after the describe string of the build it holds. That build is not
+# always Valve's (FEX-...): a manually installed patched build has its own describe string, spaces included.
+backup() { n=0; S=; for d in "$B"/*/; do [ -d "$d" ] || continue; n=$((n + 1)); S=${d%/}; done
+           [ $n -le 1 ] || { echo "more than one backup in $B" >&2; exit 1; }; }
 busy() { if pgrep -x FEXServer >/dev/null; then echo "FEXServer running: stop Steam games first (or wait for it to exit)"; exit 1; fi; }
 case "${1:-install}" in
 status) echo "installed: $(cur)"; echo "staged:    $(new)"; for b in $BINS; do sha256sum "$V/usr/bin/$b" | cut -c1-12; done | tr "\n" " "; echo; exit 0;;
-restore) S=$(ls -d "$B"/FEX-* 2>/dev/null | head -1)
+restore) backup
          # No backup means Valve's build was never replaced: an empty S would copy from / into the tool.
          [ -n "$S" ] || { echo "no backup in $B: Valve's build was never replaced, nothing to restore" >&2; exit 1; }
          busy; need "$S" "backup incomplete"
@@ -39,7 +43,7 @@ need "$N" "stage incomplete"; need "$V" "tool incomplete"
 busy
 # Back up only once, while Valve's build is still in place: a later upgrade of the patched build must not
 # overwrite (or add a second) backup with a patched build.
-S=$(ls -d "$B"/FEX-* 2>/dev/null | head -1)
+backup
 if [ -z "$S" ]; then
   S="$B/$(cur)"; mkdir -p "$S/usr/bin"
   for b in $BINS; do cp "$V/usr/bin/$b" "$S/usr/bin/$b"; done; for f in $FILES; do cp "$V/$f" "$S/$f"; done
