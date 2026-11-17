@@ -19,8 +19,11 @@ with this repository's token. Only the last job (`release`) gets `contents: writ
 
 Upstream's in-app installer (Sparkle 2, `SparkleUpdates.swift`) installs an update only if the archive carries an
 EdDSA signature from the key whose public half is in the running app (`SUPublicEDKey`), read from a feed signed
-with the same key (`SURequireSignedFeed`). The Developer ID team is only Sparkle's fallback when that key changes,
-so ad hoc builds update the same way, as long as one key signs every release. This fork never ships upstream's
+with the same key (`SURequireSignedFeed`). In Sparkle 2.10.1's validator (`SUUpdateValidator.m`) the Developer ID
+team is only the fallback when that key changes, and an EdDSA-verified update only needs a valid code signature,
+which an ad hoc one is; so one key has to sign every release. Not verified yet on a real install: that macOS lets
+Sparkle's ad hoc installer replace the ad hoc app, and which permissions (microphone, Input Monitoring) it asks
+for again afterwards. This fork never ships upstream's
 feed or key (`dist.sh` and the app refuse both; `scripts/test/dist-verify.sh` checks the DMG): fxgl's feed would
 replace a fork install with an upstream build.
 

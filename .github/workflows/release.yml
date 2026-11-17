@@ -34,6 +34,11 @@ on:
         description: Existing release to attach the files to (empty = keep them as a workflow artifact only)
         required: false
         default: ''
+      feed_test:
+        description: Build with a throwaway update key and generate (never publish) the update feed
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -380,11 +385,24 @@ jobs:
             echo "=== --selftest-$t"
             "$app" "--selftest-$t"
           done
+      # feed_test: a key made here and dropped with the runner; the DMG and its feed stay workflow
+      # artifacts (a release would hand out an app that only this lost key can update).
+      - name: Throwaway update key (feed_test)
+        if: inputs.feed_test
+        run: |
+          [ -z "$RELEASE_TAG" ] || { echo "::error::feed_test builds are never attached to a release"; exit 1; }
+          openssl=$(brew --prefix openssl@3)/bin/openssl
+          "$openssl" genpkey -algorithm ed25519 -outform DER -out "$RUNNER_TEMP/k.der"
+          "$openssl" pkey -inform DER -in "$RUNNER_TEMP/k.der" -pubout -outform DER -out "$RUNNER_TEMP/p.der"
+          # Sparkle's key file / SUPublicEDKey: base64 of the 32-byte seed / public key (the DER tails)
+          echo "FEED_TEST_PRIVATE_KEY=$(tail -c 32 "$RUNNER_TEMP/k.der" | base64)" >> "$GITHUB_ENV"
+          echo "FEED_TEST_PUBLIC_KEY=$(tail -c 32 "$RUNNER_TEMP/p.der" | base64)" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/k.der" "$RUNNER_TEMP/p.der"
       - name: DMG (ad hoc signature)
         env:
           DIST_SIGN: adhoc
           # this fork's update key (public half); empty: no in-app updates (GitHub release check)
-          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+          SPARKLE_PUBLIC_KEY: ${{ inputs.feed_test && env.FEED_TEST_PUBLIC_KEY || vars.SPARKLE_PUBLIC_KEY }}
         run: host/launcher/dist.sh
       - name: Verify, name, checksum
         run: |
@@ -410,9 +428,10 @@ jobs:
       # The feed SUFeedURL names (dist.sh: the appcast.xml asset of the latest release): one item for
       # this release's DMG, its EdDSA signature and the feed's own signature (SURequireSignedFeed).
       - name: Update feed (appcast.xml)
-        if: env.RELEASE_TAG != '' && vars.SPARKLE_PUBLIC_KEY != ''
+        if: (env.RELEASE_TAG != '' && vars.SPARKLE_PUBLIC_KEY != '') || inputs.feed_test
         env:
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ inputs.feed_test && env.FEED_TEST_PRIVATE_KEY || secrets.SPARKLE_ED_PRIVATE_KEY }}
+          FEED_TAG: ${{ env.RELEASE_TAG || 'feed-test' }}
         run: |
           [ -n "$SPARKLE_ED_PRIVATE_KEY" ] || { echo "::error::SPARKLE_PUBLIC_KEY is set but the secret SPARKLE_ED_PRIVATE_KEY is not: the app expects a feed signed with it"; exit 1; }
           bin=host/launcher/.build/artifacts/sparkle/Sparkle/bin
@@ -422,9 +441,11 @@ jobs:
           feed=$(mktemp -d)
           cp upload/*-adhoc.dmg "$feed/"
           repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
-          "$bin/generate_appcast" --ed-key-file "$key" --maximum-deltas 0             --download-url-prefix "$repo/releases/download/$RELEASE_TAG/"             --link "$repo" --full-release-notes-url "$repo/releases/tag/$RELEASE_TAG" "$feed"
+          "$bin/generate_appcast" --ed-key-file "$key" --maximum-deltas 0 \
+            --download-url-prefix "$repo/releases/download/$FEED_TAG/" \
+            --link "$repo" --full-release-notes-url "$repo/releases/tag/$FEED_TAG" "$feed"
           # generate_appcast signs an item only when the app's SUPublicEDKey is the signing key's public half
-          python3 - "$feed/appcast.xml" "$repo/releases/download/$RELEASE_TAG/$(basename upload/*-adhoc.dmg)" <<'PY'
+          python3 - "$feed/appcast.xml" "$repo/releases/download/$FEED_TAG/$(basename upload/*-adhoc.dmg)" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
           path, url = sys.argv[1:]

@@ -84,7 +84,8 @@ if [[ -n $feed ]]; then
 else
     ok "no in-app update feed (GitHub release check)"
 fi
-want_build="$(pl CFBundleShortVersionString)$(pl SteamacForkRelease >/dev/null && echo ".$(pl SteamacForkRelease)")"
+want_build=$(pl CFBundleShortVersionString || true)
+if fork=$(pl SteamacForkRelease); then want_build+=".$fork"; fi
 if [[ $(pl CFBundleVersion) == "$want_build" ]]; then ok "CFBundleVersion $want_build"; else bad "CFBundleVersion $(pl CFBundleVersion), expected $want_build"; fi
 
 homes=$(LC_ALL=C grep -r -a -o -h -E '/Users/[A-Za-z0-9._-]+' "$APP" 2>/dev/null | sort -u | sed 's|^/Users/||' || true)
