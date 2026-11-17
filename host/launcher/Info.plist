@@ -22,6 +22,8 @@
     </array>
     <key>CFBundleShortVersionString</key>
     <string>1.9.8</string>
+    <key>SteamacForkRelease</key>
+    <string>2</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIconName</key>
