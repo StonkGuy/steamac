@@ -31,9 +31,11 @@ final class LauncherSettings: ObservableObject {
         case virtualPad, padType, dualSensePassthrough, controllerID, additionalPads, swapABXY, stickDeadzone
         // Sound
         case soundEnabled, soundOutputUID, soundVolume, soundMute, soundLatency
+        // Streaming
+        case streamingHost
         // Advanced
-        case cpus, memMiB, sshEnabled, sshPort, network, lanRemotePlay, diskImage, steamosBranch, steamClient, vulkanDriver,
-             graphicsPath, frameLatency, wmtr, wmtrLibrary
+        case cpus, memMiB, sshEnabled, sshPort, network, lanRemotePlay, diskImage, sharedFolder, sharedMount, sharedLibrary,
+             steamosBranch, steamClient, vulkanDriver, graphicsPath, frameLatency, wmtr, wmtrLibrary
         // VR
         case vrEnabled, vrBitrateMbps, vrEyeSize, vrCodec, vrPairOnRequest, vrHeadsetAudio, vrGameAppID
         case vrRenderScale, vrUpscaler, vrSharpness, vrForceSRGB, vrKeyframeInterval, vrTCPOnly, vrVirtualDesktop, vrShowStats
@@ -41,9 +43,10 @@ final class LauncherSettings: ObservableObject {
         var nextStart: Bool {
             switch self {
             case .openFullscreen, .dpiSource, .fixedDPI, .fixedWidthMM, .fixedHeightMM, .refreshRate,
-                 .windowWidth, .windowHeight, .windowSizePreset, .retinaResolution, .renderScale, .soundEnabled, .cpus, .memMiB, .sshEnabled,
-                 .sshPort, .network, .lanRemotePlay,
-                 .diskImage, .steamClient, .followMacTime, .vulkanDriver, .graphicsPath, .wmtr, .wmtrLibrary, .frameLatency, .vrEnabled,
+                 .windowWidth, .windowHeight, .windowSizePreset, .retinaResolution, .metalHUD, .renderScale, .soundEnabled, .cpus,
+                 .memMiB, .sshEnabled, .sshPort, .network, .lanRemotePlay,
+                 .diskImage, .sharedFolder, .sharedMount, .sharedLibrary, .steamClient, .followMacTime, .vulkanDriver, .graphicsPath,
+                 .wmtr, .wmtrLibrary, .frameLatency, .vrEnabled,
                  .vrEyeSize, .vrCodec, .vrPairOnRequest, .vrHeadsetAudio, .vrRenderScale, .vrUpscaler, .vrSharpness,
                  .vrForceSRGB, .vrKeyframeInterval, .vrTCPOnly, .vrVirtualDesktop:
                 return true
@@ -88,6 +91,9 @@ final class LauncherSettings: ObservableObject {
         case xbox360
         case dualSense = "dualsense"
         case dualShock4 = "dualshock4"
+        /// A Steam Controller connected to the Mac goes to SteamOS as itself (HIDPassthrough);
+        /// any other controller drives an Xbox 360 controller.
+        case steamController = "steamcontroller"
         var id: String { rawValue }
     }
 
@@ -323,6 +329,10 @@ final class LauncherSettings: ObservableObject {
         .init(width: 1920, height: 1200, label: "16:10"), .init(width: 2560, height: 1440, label: "QHD, 16:9"),
         .init(width: 2560, height: 1600, label: "16:10"), .init(width: 3440, height: 1440, label: "21:9"),
         .init(width: 3840, height: 2160, label: "4K, 16:9"),
+        .init(width: 1440, height: 960, label: "3:2"), .init(width: 1920, height: 1280, label: "3:2"),
+        .init(width: 2160, height: 1440, label: "3:2"), .init(width: 2400, height: 1600, label: "3:2"),
+        .init(width: 2880, height: 1920, label: "3:2"), .init(width: 3240, height: 2160, label: "3:2"),
+        .init(width: 3840, height: 2560, label: "3:2"),
     ]
     /// `windowSizePreset` values besides "<W>x<H>": the largest size that fits the screen
     /// (re-evaluated at every start) and free W/H.
@@ -400,7 +410,7 @@ final class LauncherSettings: ObservableObject {
     /// The guest display gets the screen's pixel density (backing scale guest pixels per window
     /// point, Options.pixelScale) instead of one pixel per point; next start.
     @Published var retinaResolution = false { didSet { save(.retinaResolution, retinaResolution) } }
-    /// Apple's Metal Performance HUD on the VM window (FPS, frame interval, GPU time, memory); applies now.
+    /// Apple's Metal HUD: enabling loads libMTLHud on the next boot; off hides it now, unloads next boot.
     @Published var metalHUD = false { didSet { save(.metalHUD, metalHUD) } }
     /// MetalFX spatial upscaling of the guest picture to the window's pixel size (Renderer); applies now.
     @Published var superResolution = false { didSet { save(.superResolution, superResolution) } }
@@ -446,8 +456,16 @@ final class LauncherSettings: ObservableObject {
     @Published var network = true { didSet { save(.network, network) } }
     /// Opt-in: exposes Remote Play to the local network, unlike ordinary user-mode NAT.
     @Published var lanRemotePlay = false { didSet { save(.lanRemotePlay, lanRemotePlay) } }
+    /// Opt-in Moonlight host; only the windowed VM process opens its listeners.
+    @Published var streamingHost = false { didSet { save(.streamingHost, streamingHost) } }
     /// "" = default (see AppBundle.defaultDisk()).
     @Published var diskImage = "" { didSet { save(.diskImage, diskImage) } }
+    /// Mac folder exposed to the guest as the virtio-fs device "macshare" (Options.share); "" = none.
+    @Published var sharedFolder = "" { didSet { save(.sharedFolder, sharedFolder) } }
+    /// Where SteamOS mounts it (Options.shareMount; kernel cmdline steamac.share=).
+    @Published var sharedMount = Options.defaultShareMount { didSet { save(.sharedMount, sharedMount) } }
+    /// Register SteamLibrary inside the shared folder on the next start (Options.shareLibrary).
+    @Published var sharedLibrary = true { didSet { save(.sharedLibrary, sharedLibrary) } }
     /// SteamOS update branch "Create New Disk…" installs (atomupd vr/<branch>.json).
     @Published var steamosBranch = "stable" { didSet { save(.steamosBranch, steamosBranch) } }
     /// Steam client of the next start (`steamac.steam_client=`).
@@ -611,7 +629,12 @@ final class LauncherSettings: ObservableObject {
         int(.sshPort, &sshPort)
         bool(.network, &network)
         bool(.lanRemotePlay, &lanRemotePlay)
+        bool(.streamingHost, &streamingHost)
         string(.diskImage, &diskImage)
+        string(.sharedFolder, &sharedFolder)
+        string(.sharedMount, &sharedMount)
+        if !Options.isValidShareMount(sharedMount) { sharedMount = Options.defaultShareMount }
+        bool(.sharedLibrary, &sharedLibrary)
         string(.steamosBranch, &steamosBranch)
         if !DiskCreator.branches.contains(steamosBranch) {
             log("settings: SteamOS branch \(steamosBranch) is not offered; falling back to stable")
@@ -716,7 +739,11 @@ final class LauncherSettings: ObservableObject {
         case .sshPort: guard let i else { return false }; sshPort = i
         case .network: guard let b else { return false }; network = b
         case .lanRemotePlay: guard let b else { return false }; lanRemotePlay = b
+        case .streamingHost: guard let b else { return false }; streamingHost = b
         case .diskImage: diskImage = text == "default" ? "" : text
+        case .sharedFolder: sharedFolder = text == "none" ? "" : text
+        case .sharedMount: guard Options.isValidShareMount(text) else { return false }; sharedMount = text
+        case .sharedLibrary: guard let b else { return false }; sharedLibrary = b
         case .steamosBranch: guard DiskCreator.branches.contains(text) else { return false }; steamosBranch = text
         case .steamClient: guard let v = SteamClient(rawValue: text) else { return false }; steamClient = v
         case .vulkanDriver: guard let v = VulkanDriver(rawValue: text) else { return false }; vulkanDriver = v
@@ -772,7 +799,9 @@ final class LauncherSettings: ObservableObject {
         soundVolume = fresh.soundVolume; soundMute = fresh.soundMute; soundLatency = fresh.soundLatency
         cpus = fresh.cpus; memMiB = fresh.memMiB; sshEnabled = fresh.sshEnabled; sshPort = fresh.sshPort; network = fresh.network
         lanRemotePlay = fresh.lanRemotePlay
-        diskImage = fresh.diskImage; steamosBranch = fresh.steamosBranch; steamClient = fresh.steamClient
+        streamingHost = fresh.streamingHost
+        diskImage = fresh.diskImage; sharedFolder = fresh.sharedFolder; sharedMount = fresh.sharedMount
+        sharedLibrary = fresh.sharedLibrary; steamosBranch = fresh.steamosBranch; steamClient = fresh.steamClient
         vulkanDriver = fresh.vulkanDriver
         wmtr = fresh.wmtr; wmtrLibrary = fresh.wmtrLibrary
         frameLatency = fresh.frameLatency
@@ -811,10 +840,11 @@ final class LauncherSettings: ObservableObject {
             .fixedDPI: dpiSource == .dpi ? fixedDPI : 0,
             .fixedWidthMM: dpiSource == .mm ? fixedWidthMM : 0, .fixedHeightMM: dpiSource == .mm ? fixedHeightMM : 0,
             .refreshRate: refreshRate, .windowWidth: windowWidth, .windowHeight: windowHeight,
-            .windowSizePreset: windowSizePreset, .retinaResolution: retinaResolution,
+            .windowSizePreset: windowSizePreset, .retinaResolution: retinaResolution, .metalHUD: metalHUD,
             .soundEnabled: soundEnabled, .cpus: cpus, .memMiB: memMiB, .sshEnabled: sshEnabled, .sshPort: sshPort,
             .network: network, .lanRemotePlay: lanRemotePlay,
-            .diskImage: diskImage, .steamClient: steamClient.rawValue, .followMacTime: followMacTime,
+            .diskImage: diskImage, .sharedFolder: sharedFolder, .sharedMount: sharedMount, .sharedLibrary: sharedLibrary,
+            .steamClient: steamClient.rawValue, .followMacTime: followMacTime,
             .vulkanDriver: vulkanDriver.rawValue, .wmtr: wmtr, .wmtrLibrary: wmtrLibrary, .frameLatency: frameLatency,
             .vrEnabled: vrEnabled, .vrEyeSize: vrEyeSize, .vrCodec: vrCodec.rawValue,
             .vrPairOnRequest: vrPairOnRequest, .vrHeadsetAudio: vrHeadsetAudio, .vrRenderScale: vrRenderScale,

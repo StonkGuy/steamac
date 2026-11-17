@@ -1,6 +1,7 @@
 import CKrun
 import Darwin
 import Foundation
+import Metal
 
 struct KrunError: Error, CustomStringConvertible {
     let call: String
@@ -35,6 +36,49 @@ final class VM {
     private var displaySize: (Int, Int, Int, Int)   // px w, h, mm w, h
     /// Largest guest display side libkrun's EDID detailed timing can describe.
     static let maxDisplaySide = 4095
+
+    /// A macOS guest can expose a paravirtual Metal GPU but no usable nested Hypervisor API
+    /// (STEAMAC-15: IpaGetMaximum failed before the first guest instruction).
+    struct HostEnvironment {
+        var vmmPresent: Int?
+        var hypervisorSupported: Int?
+        var model: String?
+        var gpu: String?
+
+        static var current: HostEnvironment {
+            HostEnvironment(vmmPresent: integer("kern.hv_vmm_present"),
+                            hypervisorSupported: integer("kern.hv_support"),
+                            model: ReportBundle.sysctl("hw.model"),
+                            gpu: MTLCreateSystemDefaultDevice()?.name)
+        }
+
+        private static func integer(_ name: String) -> Int? {
+            var value: Int32 = 0
+            var size = MemoryLayout<Int32>.size
+            guard sysctlbyname(name, &value, &size, nil, 0) == 0 else { return nil }
+            return Int(value)
+        }
+
+        var isVirtualMachine: Bool {
+            vmmPresent == 1 || model?.lowercased().hasPrefix("virtualmac") == true
+                || gpu?.localizedCaseInsensitiveContains("paravirtual") == true
+        }
+
+        var rejection: String? {
+            if isVirtualMachine {
+                return String(localized: "FX Steam Launcher cannot start SteamOS inside a macOS virtual machine. Nested virtualization is not supported. Run the launcher directly on your Mac, not inside a virtual machine.")
+            }
+            if hypervisorSupported == 0 {
+                return String(localized: "Hardware virtualization is unavailable on this system. FX Steam Launcher needs the macOS Hypervisor framework to start SteamOS. Run the launcher directly on a supported Mac.")
+            }
+            // Older macOS versions may omit a sysctl; absence alone is not a refusal.
+            return nil
+        }
+
+        var diagnostic: String {
+            "kern.hv_vmm_present=\(vmmPresent.map(String.init) ?? "?"), kern.hv_support=\(hypervisorSupported.map(String.init) ?? "?"), hw.model=\(model ?? "?"), GPU=\(gpu ?? "?")"
+        }
+    }
 
     init(options o: Options, display: DisplayBackend, console: Console, progressPort: ProgressPort?,
          clockPort: ClockPort?, sleepPort: SleepPort?, padPorts: [PadPort], clipboardPort: ClipboardPort?,
@@ -84,6 +128,15 @@ final class VM {
             if !d.readOnly { try DiskLock.hold(d.path) }
             try krun("krun_add_disk2(\(d.path))", krun_add_disk2(ctx, id, d.path, STEAMAC_DISK_FORMAT_RAW, d.readOnly))
             log("disk \(id): \(d.path)\(d.readOnly ? " (ro)" : "")")
+        }
+
+        // Shared Mac folder → virtio-fs "macshare" (guest: mount -t virtiofs macshare DIR). Simplified
+        // semantics: the guest sees its own uid/gid on every file instead of the Mac's, so the
+        // steamos user reads and writes the folder without ownership mapping; no DAX window.
+        if let share = o.share {
+            try krun("krun_add_virtiofs4(\(share))",
+                     krun_add_virtiofs4(ctx, Options.shareTag, share, 0, false, UInt32(KRUN_SEMANTICS_LINUX_SIMPLIFIED)))
+            log("share: \(share) → virtio-fs tag \(Options.shareTag)")
         }
 
         // virtio-snd → CoreAudio default output (and default input while the guest records).

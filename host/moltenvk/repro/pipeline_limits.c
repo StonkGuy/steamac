@@ -2,7 +2,9 @@
  * Metal auxiliary slot; buffer lengths must fit without reserving unused helpers.
  * STEAMAC-3A/X: invalid blending on integer targets must return an error, not abort.
  * STEAMAC-57: a legal 32 KiB shared-memory shader must compile at the advertised limit.
- * Usage: pipeline_limits <shader dir> buffers|blend|shared
+ * STEAMAC-83: reject unsupported tessellation+geometry, never emit buffer(255).
+ * STEAMAC-8J: sample-rate projected texture sampling must link on M1.
+ * Usage: pipeline_limits <shader dir> buffers|blend|shared|oversized|tessgeom|projected
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +24,8 @@ static VkShaderModule shader(const char *name) {
 int main(int argc, char **argv) {
     if (argc != 3) return 2;
     dir = argv[1]; int buffers = !strcmp(argv[2], "buffers"), blend = !strcmp(argv[2], "blend");
+    int tessgeom = !strcmp(argv[2], "tessgeom");
+    int projected = !strcmp(argv[2], "projected");
     VkApplicationInfo ai = { VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_1 };
     VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai };
     VkInstance inst; CK(vkCreateInstance(&ici, NULL, &inst));
@@ -30,18 +34,46 @@ int main(int argc, char **argv) {
     float priority = 1;
     VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueCount = 1, .pQueuePriorities = &priority };
     VkPhysicalDeviceFeatures features = { .robustBufferAccess = VK_TRUE };
+    features.tessellationShader = tessgeom;
+    features.geometryShader = tessgeom;
+    features.sampleRateShading = projected;
     VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .pEnabledFeatures = &features };
     CK(vkCreateDevice(pd, &dci, NULL, &dev));
     VkDescriptorSetLayoutBinding bindings[18];
     for (uint32_t i = 0; i < 18; i++) bindings[i] = (VkDescriptorSetLayoutBinding) { i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT };
     if (!buffers) bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    VkDescriptorSetLayoutCreateInfo dsci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = buffers ? 18 : blend ? 0 : 1, .pBindings = bindings };
+    if (projected) bindings[0] = (VkDescriptorSetLayoutBinding) { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT };
+    VkDescriptorSetLayoutCreateInfo dsci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = buffers ? 18 : blend || tessgeom ? 0 : 1, .pBindings = bindings };
     VkDescriptorSetLayout set; CK(vkCreateDescriptorSetLayout(dev, &dsci, NULL, &set));
-    VkPipelineLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = blend ? 0 : 1, .pSetLayouts = &set };
+    VkPipelineLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = blend || tessgeom ? 0 : 1, .pSetLayouts = &set };
     VkPipelineLayout layout; CK(vkCreatePipelineLayout(dev, &lci, NULL, &layout));
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkResult result;
-    if (!buffers && !blend) {
+    if (tessgeom) {
+        VkSubpassDescription sub = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS };
+        VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .subpassCount = 1, .pSubpasses = &sub };
+        VkRenderPass pass; CK(vkCreateRenderPass(dev, &rpci, NULL, &pass));
+        VkPipelineShaderStageCreateInfo stages[] = {
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = shader("sentry-83-tessgeom.vert"), .pName = "main" },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, .module = shader("sentry-83-tessgeom.tesc"), .pName = "main" },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, .module = shader("sentry-83-tessgeom.tese"), .pName = "main" },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_GEOMETRY_BIT, .module = shader("sentry-83-tessgeom.geom"), .pName = "main" }
+        };
+        VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST };
+        VkPipelineTessellationStateCreateInfo ts = { VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO, .patchControlPoints = 3 };
+        VkViewport viewport = { 0, 0, 4, 4, 0, 1 }; VkRect2D scissor = { { 0, 0 }, { 4, 4 } };
+        VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .pViewports = &viewport, .scissorCount = 1, .pScissors = &scissor };
+        VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1 };
+        VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+        VkGraphicsPipelineCreateInfo ci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 4, .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pTessellationState = &ts, .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .layout = layout, .renderPass = pass };
+        result = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &pipeline);
+        int good = result == VK_ERROR_FEATURE_NOT_PRESENT && !pipeline;
+        printf("%s unsupported tessellation+geometry is rejected before Metal compilation: %d\n", good ? "OK" : "FAIL", result);
+        result = good ? VK_SUCCESS : VK_ERROR_UNKNOWN;
+        for (unsigned i = 0; i < 4; i++) vkDestroyShaderModule(dev, stages[i].module, NULL);
+        vkDestroyRenderPass(dev, pass, NULL);
+    } else if (!buffers && !blend && !projected) {
         if (props.limits.maxComputeSharedMemorySize < 32768) { printf("SKIP shared limit %u\n", props.limits.maxComputeSharedMemorySize); return 0; }
         int oversized = !strcmp(argv[2], "oversized");
         VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = layout,
@@ -51,14 +83,15 @@ int main(int argc, char **argv) {
         printf("%s shared %u bytes (advertised %u): %d\n", good ? "OK" : "FAIL", oversized ? 46464 : 32768, props.limits.maxComputeSharedMemorySize, result);
         result = good ? VK_SUCCESS : VK_ERROR_UNKNOWN;
     } else {
-        VkAttachmentDescription att = { .format = VK_FORMAT_R32_UINT, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSampleCountFlagBits samples = projected ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
+        VkAttachmentDescription att = { .format = projected ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R32_UINT, .samples = samples, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
         VkAttachmentReference ref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
         VkSubpassDescription sub = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1, .pColorAttachments = &ref };
         VkRenderPassCreateInfo rpci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &att, .subpassCount = 1, .pSubpasses = &sub };
         VkRenderPass pass; CK(vkCreateRenderPass(dev, &rpci, NULL, &pass));
         VkPipelineShaderStageCreateInfo stages[] = {
-            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = shader(buffers ? "pipeline_buffers.vert" : "msaa.vert"), .pName = "main" },
-            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shader("pipeline_uint.frag"), .pName = "main" }
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = shader(buffers ? "pipeline_buffers.vert" : projected ? "sentry-8j-projected.vert" : "msaa.vert"), .pName = "main" },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shader(projected ? "sentry-8j-projected.frag" : "pipeline_uint.frag"), .pName = "main" }
         };
         VkVertexInputBindingDescription vb[12]; VkVertexInputAttributeDescription va[12];
         for (uint32_t i = 0; i < 12; i++) {
@@ -70,7 +103,7 @@ int main(int argc, char **argv) {
         VkViewport viewport = { 0, 0, 4, 4, 0, 1 }; VkRect2D scissor = { { 0, 0 }, { 4, 4 } };
         VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .pViewports = &viewport, .scissorCount = 1, .pScissors = &scissor };
         VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1 };
-        VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+        VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = samples };
         VkPipelineColorBlendAttachmentState ba = { .blendEnable = blend, .srcColorBlendFactor = VK_BLEND_FACTOR_ONE, .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO, .colorBlendOp = VK_BLEND_OP_ADD, .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 15 };
         VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba };
         VkGraphicsPipelineCreateInfo ci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb, .layout = layout, .renderPass = pass };

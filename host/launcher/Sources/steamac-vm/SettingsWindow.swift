@@ -10,6 +10,8 @@ final class SettingsContext: ObservableObject {
     let settings: LauncherSettings
     /// Live audio controls; nil without a VM.
     let sound: SoundControl?
+    /// Moonlight host; nil outside the windowed VM process.
+    let streamHost: GameStreamHost?
     /// Graceful guest power-off + relaunch with the new settings; nil without a VM.
     var restart: (() -> Void)?
     /// Whether the running VM has the virtual gamepad / a sound device (next-start state).
@@ -17,25 +19,98 @@ final class SettingsContext: ObservableObject {
     var vmHasSound: Bool
     /// The running VM's main disk (nil without a VM).
     let diskPath: String?
+    /// Reclaim sparse steamos.img space via guest fstrim (nil without a running VM).
+    let compactDisk: DiskCompact?
     /// Opens Report a Problem over the Settings window (nil without a VM; set after the window exists).
     @Published var reportProblem: (() -> Void)?
     @Published var restartRequested = false
+    /// HID could not open a Steam Controller / composite device: Settings > Controller shows a warning.
+    @Published var needsInputMonitoring = false
+    var showsInputMonitoringWarning: Bool {
+        needsInputMonitoring && settings.virtualPad && (settings.padType == .auto || settings.padType == .steamController)
+    }
+    /// Asks macOS for Input Monitoring again (and the HID layer starts polling for a grant).
+    var requestInputMonitoring: (() -> Void)?
 
     init(settings: LauncherSettings, sound: SoundControl?, restart: (() -> Void)?, vmHasPad: Bool, vmHasSound: Bool,
-         diskPath: String? = nil) {
+         diskPath: String? = nil, streamHost: GameStreamHost? = nil, compactDisk: DiskCompact? = nil) {
         self.settings = settings
         self.sound = sound
+        self.streamHost = streamHost
         self.restart = restart
         self.vmHasPad = vmHasPad
         self.vmHasSound = vmHasSound
         self.diskPath = diskPath
+        self.compactDisk = compactDisk
+    }
+}
+
+/// Compaction runs while SteamOS is alive. Never enter an AppKit modal loop here: progress
+/// heartbeats and StallMonitor polling both arrive on the main dispatch queue (STEAMAC-8).
+final class DiskCompactAlert: NSObject {
+    private static var standalone: [DiskCompactAlert] = []
+    private let alert: NSAlert
+    private let completion: (NSApplication.ModalResponse) -> Void
+
+    private init(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        self.alert = alert
+        self.completion = completion
+    }
+
+    static func present(_ alert: NSAlert, for parent: NSWindow?,
+                        completion: @escaping (NSApplication.ModalResponse) -> Void = { _ in }) {
+        let presenter = DiskCompactAlert(alert, completion: completion)
+        if let parent, parent.isVisible {
+            alert.beginSheetModal(for: parent) { response in
+                presenter.alert.window.orderOut(nil)
+                presenter.completion(response)
+            }
+        } else {
+            // Match SuspendController's non-modal quit prompt when Settings was closed while
+            // fstrim was running. Retain the presenter until its button dismisses the window.
+            standalone.append(presenter)
+            for button in alert.buttons {
+                button.target = presenter
+                button.action = #selector(buttonClicked)
+            }
+            alert.layout()
+            (alert.window as? NSPanel)?.hidesOnDeactivate = false
+            alert.window.center()
+            alert.window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    @objc private func buttonClicked(_ sender: NSButton) {
+        guard let index = alert.buttons.firstIndex(of: sender) else { return }
+        alert.window.orderOut(nil)
+        Self.standalone.removeAll { $0 === self }
+        completion(NSApplication.ModalResponse(rawValue: NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + index))
+    }
+
+    static func result(_ result: Result<DiskCompact.Outcome, OptionError>) -> NSAlert {
+        let done = NSAlert()
+        done.addButton(withTitle: String(localized: "OK"))
+        switch result {
+        case .success(let o):
+            done.messageText = String(localized: "Disk space reclaimed")
+            let reclaimed = o.reclaimed
+            if reclaimed > 1 << 20 {
+                done.informativeText = String(localized: "Allocated size went from \(DiskCompact.gb(o.beforeAllocated)) to \(DiskCompact.gb(o.afterAllocated)) (about \(DiskCompact.gb(UInt64(reclaimed))) less). APFS clones and snapshots may retain this space on the Mac.")
+            } else {
+                done.informativeText = String(localized: "SteamOS trimmed free blocks. Allocated size is still about \(DiskCompact.gb(o.afterAllocated)); little or nothing changed this time. The image may already be compact.")
+            }
+        case .failure(let error):
+            done.messageText = String(localized: "Could not reclaim disk space")
+            done.informativeText = error.localizedDescription
+        }
+        return done
     }
 }
 
 /// App menu "FX Steam Launcher → Settings…" (Cmd+,): toolbar-style tabs, one SwiftUI form each.
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     enum Tab: Int, CaseIterable {
-        case general, display, mouse, controller, sound, games, vr, advanced
+        case general, display, mouse, controller, sound, streaming, games, vr, advanced
 
         var name: String {
             switch self {
@@ -44,6 +119,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return "mouse"
             case .controller: return "controller"
             case .sound: return "sound"
+            case .streaming: return "streaming"
             case .games: return "games"
             case .vr: return "vr"
             case .advanced: return "advanced"
@@ -57,6 +133,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return String(localized: "Mouse")
             case .controller: return String(localized: "Controller")
             case .sound: return String(localized: "Sound")
+            case .streaming: return String(localized: "Streaming")
             case .games: return String(localized: "Games", comment: "Settings tab: game statistics")
             case .vr: return String(localized: "VR")
             case .advanced: return String(localized: "Advanced")
@@ -70,6 +147,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return "computermouse"
             case .controller: return "gamecontroller"
             case .sound: return "speaker.wave.2"
+            case .streaming: return "antenna.radiowaves.left.and.right"
             case .games: return "chart.bar.xaxis"
             case .vr: return "visionpro"
             case .advanced: return "slider.horizontal.3"
@@ -84,6 +162,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             case .mouse: return 470
             case .controller: return 620
             case .sound: return 440
+            case .streaming: return 560
             case .games: return 620
             case .vr: return 800
             case .advanced: return 720
@@ -95,6 +174,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     let window: NSWindow
     private let tabs: SettingsTabController
     let context: SettingsContext
+    private var subscriptions: [AnyCancellable] = []
 
     init(context: SettingsContext) {
         self.context = context
@@ -119,11 +199,20 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         super.init()
         window.delegate = self
         tabs.didSelect = { [weak self] tab in self?.fit(tab) }
+        for changes in [context.$needsInputMonitoring.map { _ in () }.eraseToAnyPublisher(),
+                        context.settings.$virtualPad.map { _ in () }.eraseToAnyPublisher(),
+                        context.settings.$padType.map { _ in () }.eraseToAnyPublisher()] {
+            subscriptions.append(changes.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] in
+                guard let self, self.tabs.selectedTabViewItemIndex == Tab.controller.rawValue else { return }
+                self.fit(.controller)
+            })
+        }
         fit(.general)
     }
 
     private func fit(_ tab: Tab) {
-        let size = NSSize(width: SettingsWindowController.width, height: tab.height)
+        let height = tab == .controller && context.showsInputMonitoringWarning ? 700 : tab.height
+        let size = NSSize(width: SettingsWindowController.width, height: height)
         let frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
         var f = window.frame
         f.origin.y += f.height - frame.height
@@ -187,6 +276,7 @@ private struct SettingsTabRoot: View {
                 case .mouse: MouseTab()
                 case .controller: ControllerTab()
                 case .sound: SoundTab()
+                case .streaming: StreamingTab()
                 case .games: GamesTab()
                 case .vr: VRTab()
                 case .advanced: AdvancedTab()
@@ -249,6 +339,120 @@ private struct ExperimentalBadge: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
             .overlay(Capsule().strokeBorder(Color.orange.opacity(0.7)))
+    }
+}
+
+private struct StreamingTab: View {
+    @EnvironmentObject var context: SettingsContext
+
+    var body: some View {
+        if let host = context.streamHost {
+            StreamingHostForm(host: host)
+        } else {
+            Form {
+                Section {
+                    Text("Moonlight streaming is available while SteamOS is running in a window. It is unavailable in headless mode or without a running VM.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
+private struct StreamingHostForm: View {
+    @ObservedObject var host: GameStreamHost
+    @EnvironmentObject var settings: LauncherSettings
+    @State private var revokeClient: StreamClient?
+
+    private var status: String {
+        switch host.status {
+        case .off: return String(localized: "Off")
+        case .listening: return String(localized: "Listening as \(StreamPairingPrompt.hostName)")
+        case .failed(let reason): return String(localized: "Failed: \(reason)")
+        case .streaming(let session):
+            let codec = session.codec == .h264 ? "H.264" : "HEVC"
+            return String(localized: "Streaming to \(session.clientName) at \(session.width)×\(session.height)@\(session.fps) \(codec)")
+        }
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: $settings.streamingHost) {
+                    Label2(title: "Enable Moonlight streaming",
+                           detail: String(localized: "Stream SteamOS and its games directly from this Mac. Off by default; only enabled hosts listen on the network."),
+                           now: true)
+                }
+                LabeledContent("Status") { Text(verbatim: status).textSelection(.enabled) }
+                if case .streaming = host.status {
+                    Button("End stream") { host.endSession() }
+                }
+            }
+            Section("Pair a device") {
+                Text("Open Moonlight on your device and select this Mac. Enter the four-digit PIN Moonlight shows in the pairing window on this Mac, then choose SteamOS.")
+                Text("Allow Local Network access when macOS asks. Streaming stops while SteamOS is suspended or asleep and can be started again after it resumes.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Paired clients") {
+                if host.clients.isEmpty {
+                    Text("No paired clients").foregroundStyle(.secondary)
+                }
+                ForEach(host.clients) { client in
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(verbatim: client.name)
+                            Text("Paired \(client.pairedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Revoke", role: .destructive) { revokeClient = client }
+                    }
+                }
+            }
+        }
+        .confirmationDialog("Revoke this client's access?", isPresented: Binding(
+            get: { revokeClient != nil }, set: { if !$0 { revokeClient = nil } }
+        ), titleVisibility: .visible) {
+            Button("Revoke", role: .destructive) {
+                if let client = revokeClient { host.revoke(fingerprint: client.fingerprint) }
+                revokeClient = nil
+            }
+            Button("Cancel", role: .cancel) { revokeClient = nil }
+        } message: {
+            Text("The device must pair again to connect. Its current stream will end.")
+        }
+    }
+}
+
+/// Kept with the Settings views so the launcher's string extraction includes the pairing UI.
+struct StreamPairingView: View {
+    let request: StreamPairingRequest
+    @State private var pin = ""
+    @FocusState private var pinFocused: Bool
+
+    private var validPIN: Bool { pin.utf8.count == 4 && pin.utf8.allSatisfy { (48...57).contains($0) } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Pair Moonlight").font(.headline)
+            Text("Enter the four-digit PIN shown by Moonlight on \(request.clientName).")
+            TextField("PIN", text: $pin)
+                .textFieldStyle(.roundedBorder)
+                .focused($pinFocused)
+                .onChange(of: pin) { _, value in
+                    pin = String(value.filter { $0.isASCII && $0.isNumber }.prefix(4))
+                }
+                .onSubmit { if validPIN { request.submit(pin: pin) } }
+            HStack {
+                Spacer()
+                Button("Cancel") { request.cancel() }.keyboardShortcut(.cancelAction)
+                Button("Pair") { request.submit(pin: pin) }
+                    .keyboardShortcut(.defaultAction).disabled(!validPIN)
+            }
+        }
+        .padding(24)
+        .frame(width: 360)
+        .onAppear { pinFocused = true }
     }
 }
 
@@ -359,7 +563,9 @@ private struct GeneralTab: View {
                 CrashReportsToggle(settings: settings, showsApplies: true)
                 Toggle(isOn: $settings.checkForUpdates) {
                     Label2(title: "Check for updates at startup",
-                           detail: String(localized: "Asks GitHub (api.github.com) for the newest release, at most every 6 hours; only the app version is sent.")
+                           detail: (UpdateChecker.shared.inAppFeedHost.map {
+                                       String(localized: "Asks \($0) for the newest version, at most every 6 hours; only the app version is sent. Updates download and install in the app.")
+                                   } ?? String(localized: "Asks GitHub (api.github.com) for the newest release, at most every 6 hours; only the app version is sent."))
                                + " " + (CrashReporting.buildKind == .development
                                    ? String(localized: "This development build never checks at startup; FX Steam Launcher > Check for Updates… does.")
                                    : String(localized: "FX Steam Launcher > Check for Updates… checks at any time.")),
@@ -514,10 +720,15 @@ private struct DisplayTab: View {
                 }
             }
             Section {
-                Toggle(isOn: $settings.metalHUD) {
+                Toggle(isOn: Binding(get: { settings.metalHUD }, set: { on in
+                    guard !on || MetalHUD.confirmEnable(current: settings.metalHUD, nextDriver: settings.vulkanDriver) else { return }
+                    settings.metalHUD = on
+                })) {
                     Label2(title: "Metal Performance HUD",
-                           detail: String(localized: "Apple's frame-rate overlay in the top-right corner of the window: FPS, frame interval, GPU time, memory (Ctrl+Cmd+P, View menu)."),
-                           now: true)
+                           detail: String(localized: "Apple's frame-rate overlay in the top-right corner of the window: FPS, frame interval, GPU time, memory (Ctrl+Cmd+P, View menu).")
+                               + " " + MetalHUD.restartNote
+                               + (MetalHUD.driver == .kosmickrisp || settings.vulkanDriver == .kosmickrisp ? " " + MetalHUD.kosmicKrispNote : ""),
+                           now: false, key: .metalHUD)
                 }
                 Toggle(isOn: $settings.superResolution) {
                     Label2(title: "MetalFX super resolution",
@@ -627,6 +838,15 @@ private struct ControllerTab: View {
     var body: some View {
         Form {
             Section {
+                if context.showsInputMonitoringWarning {
+                    VStack(alignment: .leading, spacing: 8) {
+                        SizeWarning(text: String(localized: "This controller needs Input Monitoring to pass through as itself. Enable FX Steam Launcher in Mac System Settings › Privacy & Security › Input Monitoring. If access is already enabled but the controller is still unavailable, restart the launcher."))
+                        Button(String(localized: "Mac Input Monitoring Settings…")) {
+                            context.requestInputMonitoring?()
+                            openInputMonitoringSettings()
+                        }
+                    }
+                }
                 Toggle(isOn: $settings.virtualPad) {
                     Label2(title: "Virtual controller",
                            detail: String(localized: "SteamOS gets a gamepad while a controller is connected."),
@@ -637,9 +857,10 @@ private struct ControllerTab: View {
                     Text("Xbox 360 controller").tag(LauncherSettings.PadType.xbox360)
                     Text("DualSense").tag(LauncherSettings.PadType.dualSense)
                     Text("DualShock 4").tag(LauncherSettings.PadType.dualShock4)
+                    Text("Steam Controller").tag(LauncherSettings.PadType.steamController)
                 } label: {
                     Label2(title: "Appears in SteamOS as",
-                           detail: String(localized: "Button glyphs and layout in Steam. Automatic: the same kind as the controller that drives it (DualSense, DualShock 4, else Xbox 360). Buttons, sticks, triggers and rumble (no touchpad, gyro or lightbar unless a DualSense is passed through)."),
+                           detail: String(localized: "Button glyphs and layout in Steam. Automatic: the same kind as the controller that drives it (DualSense, DualShock 4, else Xbox 360); a Steam Controller goes to SteamOS as itself. Steam Controller: only a Steam Controller (Bluetooth or its Puck) is passed through as itself, with trackpads, gyro and back buttons; other controllers appear as Xbox 360. Buttons, sticks, triggers and rumble (no touchpad, gyro or lightbar unless a DualSense is passed through). Automatic also passes generic HID joysticks and gamepads unsupported by macOS through as themselves, on a free HID-capable player. They yield to GameController controllers; multi-axis devices are not matched. Turn off Virtual controller to disable this; configure their layout and calibration in SteamOS."),
                            now: true, key: .padType)
                 }
                 .disabled(!settings.virtualPad)
@@ -914,6 +1135,9 @@ private struct AdvancedTab: View {
     @EnvironmentObject var context: SettingsContext
     @State private var confirmReset = false
     @StateObject private var password = GuestPasswordModel()
+    /// The mount point as typed; saved on submit or focus loss, only when valid (never a prefix of it).
+    @State private var mountText = ""
+    @FocusState private var mountFocused: Bool
     static let maxCPUs = ProcessInfo.processInfo.activeProcessorCount
     static let maxGiB = max(4, Int(ProcessInfo.processInfo.physicalMemory >> 30) - 4)
     static let host = VMSizing.Host.current
@@ -930,10 +1154,24 @@ private struct AdvancedTab: View {
         if !settings.diskImage.isEmpty {
             let ok = AppBundle.isDiskImage(settings.diskImage)
             let path = (settings.diskImage as NSString).abbreviatingWithTildeInPath
-            return (ok ? path : String(localized: "\(path) (not found)"), ok)
+            return (ok ? path : path + "\n" + AppBundle.invalidDiskMessage, ok)
         }
         if let d = AppBundle.defaultDisk() { return (String(localized: "Default: \((d as NSString).abbreviatingWithTildeInPath)"), true) }
         return (String(localized: "Default: none found"), false)
+    }
+
+    /// The shared folder as shown (red when it is not a readable folder, like the disk image).
+    private var shareStatus: (String, Bool) {
+        if settings.sharedFolder.isEmpty { return (String(localized: "None"), true) }
+        let ok = Options.isReadableFolder(settings.sharedFolder)
+        let path = (settings.sharedFolder as NSString).abbreviatingWithTildeInPath
+        return (ok ? path : String(localized: "\(path) (not found)"), ok)
+    }
+
+    private var mountTextValid: Bool { Options.isValidShareMount(mountText) }
+
+    private func commitMount() {
+        if mountTextValid { settings.sharedMount = mountText }
     }
 
     /// The executor library the next start offers (bundled unless chosen) and whether it loads.
@@ -1059,7 +1297,7 @@ private struct AdvancedTab: View {
             }
             Section {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label2(title: "Disk image", detail: String(localized: "SteamOS raw GPT disk, used in place (never copied). If Steam reports not enough space, Grow Disk… adds room for games without recreating it. Free space on the Mac does not automatically increase SteamOS's capacity."),
+                    Label2(title: "Disk image", detail: String(localized: "SteamOS raw GPT disk, used in place (never copied). If Steam reports not enough space, Grow Disk… adds room for games without recreating it. After uninstalling games, Reclaim Disk Space… can reduce the image's allocated size only on APFS (capacity stays the same). Clones and snapshots may retain space on the Mac. Free space on the Mac does not automatically increase SteamOS's capacity."),
                            now: false, key: .diskImage)
                     HStack {
                         Text(verbatim: diskStatus.0)
@@ -1074,6 +1312,49 @@ private struct AdvancedTab: View {
                         Button("Use Existing Disk…") { chooseDisk() }
                         Button("Use Default") { settings.diskImage = "" }.disabled(settings.diskImage.isEmpty)
                     }
+                    HStack {
+                        Spacer()
+                        Button("Reclaim Disk Space…") { reclaimDiskSpace() }
+                            .disabled(context.compactDisk == nil || context.diskPath == nil || context.diskPath != nextDisk)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Label2(title: "Shared folder",
+                           detail: String(localized: "A Mac folder SteamOS reads and writes in place (virtio-fs, no copy), mounted at the path below on every boot. Games stored there load at the Mac disk's speed. Security: virtio-fs does not confine SteamOS to this folder; with a share set, root in SteamOS can potentially read anything your Mac user can. Share only with a SteamOS you trust."),
+                           now: false, key: .sharedFolder)
+                    HStack {
+                        Text(verbatim: shareStatus.0)
+                            .font(.callout).foregroundStyle(shareStatus.1 ? Color.secondary : Color.red)
+                            .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                        Spacer()
+                        Button("Choose Folder…") { chooseSharedFolder() }
+                        Button("None") { settings.sharedFolder = "" }.disabled(settings.sharedFolder.isEmpty)
+                    }
+                    Toggle(isOn: $settings.sharedLibrary) {
+                        Label2(title: "Use as a Steam library",
+                               detail: String(localized: "Creates SteamLibrary in the shared folder on the next start and adds it to Steam once per path, so you can remove it later in Steam. Proton requires symbolic link support: APFS is recommended; exFAT is unsupported. Shares without symbolic link support are not registered automatically."),
+                               now: false, key: .sharedLibrary)
+                    }
+                    .disabled(settings.sharedFolder.isEmpty)
+                    HStack {
+                        Label2(title: "Mount point in SteamOS",
+                               detail: String(localized: "A new subdirectory of /home/steamos/ (letters, digits, / _ . -). Saved when you press Return or leave the field."),
+                               now: false, key: .sharedMount)
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            TextField("", text: $mountText)
+                                .font(.body.monospaced()).frame(width: 260).multilineTextAlignment(.trailing)
+                                .focused($mountFocused)
+                                .onSubmit(commitMount)
+                                .onChange(of: mountFocused) { if !mountFocused { commitMount(); mountText = settings.sharedMount } }
+                                .onChange(of: settings.sharedMount) { if !mountFocused { mountText = settings.sharedMount } }
+                                .onAppear { mountText = settings.sharedMount }
+                            if !mountTextValid {
+                                Text("Not a valid mount point; not saved").font(.caption).foregroundStyle(.red)
+                            }
+                        }
+                    }
+                    .disabled(settings.sharedFolder.isEmpty)
                 }
                 Picker(selection: $settings.steamClient) {
                     ForEach(LauncherSettings.SteamClient.allCases) { Text(verbatim: SteamClientPicker.itemTitle($0)).tag($0) }
@@ -1182,13 +1463,62 @@ private struct AdvancedTab: View {
         }
     }
 
+    private func reclaimDiskSpace() {
+        guard let compact = context.compactDisk, let path = context.diskPath, path == nextDisk else { return }
+        let parent = NSApp.keyWindow
+        if let error = DiskCompact.filesystemError(path) {
+            let alert = NSAlert()
+            alert.messageText = String(localized: "Could not reclaim disk space")
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: String(localized: "OK"))
+            DiskCompactAlert.present(alert, for: parent)
+            return
+        }
+        let before = DiskCompact.allocatedBytes(path).map(DiskCompact.gb) ?? "?"
+        let confirm = NSAlert()
+        confirm.messageText = String(localized: "Reclaim Disk Space")
+        confirm.informativeText = String(localized: "Trim free blocks inside SteamOS to reduce the sparse disk image's allocated size. Games and saves are not deleted. Capacity stays the same. This works only when the image is on APFS; clones and snapshots may retain space on the Mac. Currently \(before) allocated. This can take several minutes.")
+        confirm.addButton(withTitle: String(localized: "Reclaim"))
+        confirm.addButton(withTitle: String(localized: "Cancel"))
+        DiskCompactAlert.present(confirm, for: parent) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let waiting = NSAlert()
+            waiting.messageText = String(localized: "Reclaiming disk space…")
+            waiting.informativeText = String(localized: "SteamOS is trimming free blocks. Keep SteamOS running until this finishes.")
+            if let parent {
+                // Non-blocking: the sheet stays until the guest replies (or times out).
+                waiting.beginSheetModal(for: parent) { _ in }
+            }
+            compact.request(path: path) { result in
+                if let parent {
+                    let sheet = waiting.window
+                    parent.endSheet(sheet)
+                    sheet.orderOut(nil)
+                }
+                DiskCompactAlert.present(DiskCompactAlert.result(result), for: parent)
+            }
+        }
+    }
+
     private func chooseDisk() {
         let panel = NSOpenPanel()
         AppBundle.configureDiskPanel(panel)
         if !settings.diskImage.isEmpty {
             panel.directoryURL = URL(fileURLWithPath: (settings.diskImage as NSString).deletingLastPathComponent)
         }
-        if panel.runModal() == .OK, let url = panel.url { settings.diskImage = url.path }
+        if panel.runModal() == .OK, let url = panel.url, AppBundle.acceptDiskSelection(url.path) {
+            settings.diskImage = url.path
+        }
+    }
+
+    private func chooseSharedFolder() {
+        let panel = NSOpenPanel()
+        panel.title = String(localized: "Choose a folder to share with SteamOS")
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        if !settings.sharedFolder.isEmpty { panel.directoryURL = URL(fileURLWithPath: settings.sharedFolder) }
+        if panel.runModal() == .OK, let url = panel.url { settings.sharedFolder = url.path }
     }
 
     private func chooseWmtrLibrary() {
@@ -1210,6 +1540,17 @@ private struct SizeWarning: View {
     var body: some View {
         Label { Text(verbatim: text) } icon: { Image(systemName: "exclamationmark.triangle") }
             .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// System Settings › Privacy & Security › Input Monitoring (Sequoia URL first, older fallback).
+private func openInputMonitoringSettings() {
+    let candidates = [
+        "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ListenEvent",
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+    ]
+    for s in candidates {
+        if let url = URL(string: s), NSWorkspace.shared.open(url) { return }
     }
 }
 

@@ -34,16 +34,19 @@ fi
 # d3d11, dxgi, d3d10core, winemetal) and the wmtr guest client winemetal.so, staged in /work/out/dxmt by
 # host/dxmt/build.sh. Optional: without it the layer offers only the Vulkan path.
 DXMT=/work/out/dxmt
-if [[ -f $DXMT/x86_64-unix/winemetal.so ]]; then
-    install -d "$ST/usr/lib/steamac/dxmt/x86_64-windows" "$ST/usr/lib/steamac/dxmt/x86_64-unix"
-    for f in d3d11 dxgi d3d10core winemetal; do
-        install -m 0644 "$DXMT/x86_64-windows/$f.dll" "$ST/usr/lib/steamac/dxmt/x86_64-windows/$f.dll"
-    done
-    install -m 0644 "$DXMT/x86_64-unix/winemetal.so" "$ST/usr/lib/steamac/dxmt/x86_64-unix/winemetal.so"
+dxmt_info=ABSENT
+for arch in x86_64 aarch64; do
+    if [[ -f $DXMT/$arch-unix/winemetal.so ]]; then
+        install -d "$ST/usr/lib/steamac/dxmt/$arch-windows" "$ST/usr/lib/steamac/dxmt/$arch-unix"
+        for f in d3d11 dxgi d3d10core winemetal; do
+            install -m 0644 "$DXMT/$arch-windows/$f.dll" "$ST/usr/lib/steamac/dxmt/$arch-windows/$f.dll"
+        done
+        install -m 0644 "$DXMT/$arch-unix/winemetal.so" "$ST/usr/lib/steamac/dxmt/$arch-unix/winemetal.so"
+    fi
+done
+if [[ -d $ST/usr/lib/steamac/dxmt ]]; then
     dxmt_info=$(cd "$DXMT" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
     echo "[layer] included DXMT from $DXMT ($dxmt_info)"
-else
-    dxmt_info=ABSENT
 fi
 
 # VR (steam-vr-path, the launcher's "VR (experimental)"): Proton's vrclient_x64 rebuilt with
@@ -97,6 +100,15 @@ grep -q 'fx-progress-agent pad$' "$ST/usr/lib/systemd/system/fx-pad@.service" \
 # Same binary as systemd-suspend.service's ExecStart: the launcher pauses the VM instead.
 grep -q 'fx-progress-agent sleep suspend$' "$ST/usr/lib/systemd/system/systemd-suspend.service.d/50-steamac-sleep.conf" \
     || { echo "[layer] systemd-suspend.service drop-in (fx-progress-agent sleep) missing" >&2; exit 1; }
+# Reclaim Mac SSD space: path unit watches the agent's request file, oneshot runs fstrim as root.
+[[ -x $ST/usr/lib/steamac/compact-disk ]] \
+    && [[ -f $ST/usr/lib/systemd/system/fx-compact-disk.service \
+          && -f $ST/usr/lib/systemd/system/fx-compact-disk.path ]] \
+    && [[ -L $ST/usr/lib/systemd/system/multi-user.target.wants/fx-compact-disk.path ]] \
+    && grep -q '^ExecStart=/usr/lib/steamac/compact-disk$' "$ST/usr/lib/systemd/system/fx-compact-disk.service" \
+    && grep -q '^PathExists=/home/steamos/.local/share/steamac/compact-request$' \
+        "$ST/usr/lib/systemd/system/fx-compact-disk.path" \
+    || { echo "[layer] fx-compact-disk (compact-disk script / path+service / multi-user wants) missing" >&2; exit 1; }
 
 # Once per boot: drop the boot's clean page cache so free page reporting returns it to the Mac.
 [[ -L $ST/usr/lib/systemd/system/timers.target.wants/steamac-mem-trim.timer ]] \
@@ -116,13 +128,16 @@ for f in usr/bin/splctl usr/lib/rauc/post-install.sh usr/lib/steamac/kernelsetup
          usr/lib/steamac/steam-shader-defaults usr/lib/steamac/steam-client \
          usr/lib/steamac/nested-desktop usr/lib/steamac/steam-gfx-path usr/lib/steamac/steam-vr-path usr/lib/steamac/steam-frame-latency usr/lib/steamac/mem-trim usr/lib/steamac/swap-fallback usr/lib/steamac/steam-ui-gpu \
          usr/lib/steamac/desktop-bin/kwin_wayland_wrapper \
-         usr/lib/steamac/desktop-bin/steamosctl usr/lib/steamos/gamescope-session; do
+         usr/lib/steamac/desktop-bin/steamosctl usr/lib/steamos/gamescope-session \
+         usr/lib/steamac/compact-disk; do
     [[ -x $ST/$f ]] || { echo "[layer] $f missing or not executable" >&2; exit 1; }
     bash -n "$ST/$f"
 done
 # steam-gfx-path's Python helper (Proton Experimental as Steam's default tool while DXMT is on).
 [[ -x $ST/usr/lib/steamac/steam-compat-default ]] \
     || { echo "[layer] usr/lib/steamac/steam-compat-default missing or not executable" >&2; exit 1; }
+[[ -x $ST/usr/lib/steamac/steam-dxmt-arm64ec ]] \
+    || { echo "[layer] usr/lib/steamac/steam-dxmt-arm64ec missing or not executable" >&2; exit 1; }
 [[ -f $ST/usr/lib/systemd/user/steam.service.d/50-steamac.conf ]] \
     || { echo "[layer] steam.service drop-in missing" >&2; exit 1; }
 [[ ! -e $ST/usr/lib/systemd/user/steam.service && ! -e $ST/usr/share/deckard/RUNSTEAM.sh ]] \
@@ -140,6 +155,14 @@ grep -q 'ExecStartPre=-/usr/lib/steamac/steam-vr-path' "$ST/usr/lib/systemd/user
     || { echo "[layer] steam-vr-path (steam.service ExecStartPre) missing" >&2; exit 1; }
 grep -q 'ExecStartPre=-/usr/lib/steamac/steam-frame-latency' "$ST/usr/lib/systemd/user/steam.service.d/50-steamac.conf" \
     || { echo "[layer] steam-frame-latency (steam.service ExecStartPre) missing" >&2; exit 1; }
+
+# Manager drop-ins must survive staging (including the Venus merge). The
+# initramfs mounts this /usr before starting PID 1; no /etc modification needed.
+for manager in system user; do
+    conf=usr/lib/systemd/$manager.conf.d/99-steamac-vcpu-affinity.conf
+    cmp "/src/guest/layer/$conf" "$ST/$conf" \
+        || { echo "[layer] $conf missing or overwritten" >&2; exit 1; }
+done
 
 # layer-release: content hash (excluding itself) so a boot log identifies the layer.
 tree_hash=$(cd "$ST" && find usr -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)

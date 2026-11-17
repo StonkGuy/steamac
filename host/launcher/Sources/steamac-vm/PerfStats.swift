@@ -318,6 +318,8 @@ final class VMMemoryDiagnostics: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var samples: [String] = []
     private let device = MTLCreateSystemDefaultDevice()
+    private let regionDiagnostics = MemoryRegionDiagnostics()
+    private var instrumentation = MetalInstrumentation()
     private typealias VulkanStats = @convention(c) (UnsafeMutablePointer<UInt64>) -> Void
     private let vulkanStats: VulkanStats? = {
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "virgl_steamac_memory_stats") else { return nil }
@@ -344,6 +346,11 @@ final class VMMemoryDiagnostics: @unchecked Sendable {
     }
 
     private func sample() {
+        if let changed = instrumentation.sample() {
+            log("Metal instrumentation loaded: \(changed.tag); dyld images: \(changed.images.isEmpty ? "none" : changed.images.joined(separator: ","))")
+            CrashReporting.metalInstrumentationChanged(changed.tag)
+        }
+        let host = CrashReporting.HostMemory.current()
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
         let result = withUnsafeMutablePointer(to: &info) {
@@ -356,9 +363,15 @@ final class VMMemoryDiagnostics: @unchecked Sendable {
             line += " footprint=\(info.phys_footprint >> 20) resident=\(info.resident_size >> 20)"
                 + " internal=\(info.internal >> 20) compressed=\(info.compressed >> 20)"
                 + " external=\(info.external >> 20) reusable=\(info.reusable >> 20)"
+            if let regions = regionDiagnostics.sample(footprint: info.phys_footprint, hostPressure: host.pressure) {
+                line += " " + regions
+            }
         } else {
             line += " task-info-error=\(result)"
         }
+        var malloc = malloc_statistics_t()
+        malloc_zone_statistics(nil, &malloc)
+        line += " malloc-in-use=\(malloc.size_in_use >> 20) malloc-allocated=\(malloc.size_allocated >> 20)"
         if let device {
             line += " metal-allocated=\(device.currentAllocatedSize >> 20)"
                 + " metal-recommended=\(device.recommendedMaxWorkingSetSize >> 20)"
@@ -371,6 +384,9 @@ final class VMMemoryDiagnostics: @unchecked Sendable {
         } else {
             line += " vkr-stats=unavailable"
         }
+        line += " host-pressure=\(host.pressure) host-available-pct=\(host.availablePercent.map(String.init) ?? "?")"
+            + " host-swap-used=\(host.swapUsed.map { String($0 >> 20) } ?? "?")"
+            + " host-swap-total=\(host.swapTotal.map { String($0 >> 20) } ?? "?")"
         lock.lock()
         if samples.count == 12 { samples.removeFirst() }
         samples.append(line)

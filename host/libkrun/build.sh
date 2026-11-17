@@ -17,10 +17,24 @@
 # vsock timesync is always built). SND on macOS uses the CoreAudio virtio-snd backend from
 # patch 0014 (no PipeWire); its debug knob STEAMAC_SND_DUMP=/path.wav records the playback
 # guest PCM before speaker mapping (patch 0017 detects and routes output speakers).
-# GPU also has the wmtr context type (patch 0018, capset 30) for a host executor library; it
+# GPU also has the wmtr context type (patch 0021, capset 30) for a host executor library; it
 # exists only with STEAMAC_WMTR=1 and a loadable STEAMAC_WMTR_LIB, so by default nothing changes.
-# Patch 0019 logs the block id/path and concrete initialization error behind -EINVAL
-# (STEAMAC-15), so inaccessible, locked and malformed disks are distinguishable.
+# Patches 0018-0030 are this fork's (each header says why; upstream steamac's 0018 is 0021, its
+# 0019 is 0029). Patch 0029 logs the block id/path and concrete initialization error behind
+# -EINVAL (STEAMAC-15), so inaccessible, locked and malformed disks are distinguishable.
+# Patches 0031-0035 are upstream steamac's 0020-0023 and 0025, after this fork's:
+# 0031 adds a DisplayID timing when the legacy EDID clock cannot hold the requested refresh
+# (e.g. 3840x2160 at 240 Hz; legacy modes retain their base EDID), 0032 the required DisplayID
+# 1.3 Display Parameters block. 0033 distinguishes local virtio-net socket bind failures from
+# proxy connect failures, retaining endpoint paths and errno (STEAMAC-82). 0034 exposes a
+# non-realtime guest playback tap for Moonlight, before host volume/mute and physical speaker
+# mapping; unregister waits for pending delivery. 0035 bumps imago to 0.2.6
+# (libkrun/libkrun#980): imago 0.2.3 shrinks a raw image when a discard or write-zeroes reaches
+# its last byte (libkrun/libkrun#949; this fork's 0027 took 0.2.5 for it and has the test).
+# Upstream steamac's 0024 (capture control bounded at 200 ms, HAL/TCC isolated) is not applied:
+# this fork's 0018/0020/0022/0023/0030 rework the same capture and control paths.
+# test/capture-guest.sh checks repeated capture failure/recovery and surviving playback
+# inside a fresh throwaway VM.
 #
 # Output (work/out/host):
 #   lib/libkrun.1.dylib      install_name @rpath/libkrun.1.dylib, ad-hoc signed
@@ -118,6 +132,9 @@ done
 			cargo test -q --features gpu,virgl_renderer --lib -- wmtr)
 	# A discard/write-zeroes at the end of a raw image keeps the disk size (patch 0027).
 	cargo test -q --features blk --lib -- virtio::block
+	# A missing proxy identifies connect (not bind), its endpoint path and errno (patch 0033).
+	RUSTFLAGS="-L native=$out/lib -C link-args=-Wl,-rpath,$out/lib" \
+		cargo test -q --features net --lib -- missing_proxy_reports_connect_operation_and_peer_path
 	# Freed guest memory leaves the VMM's footprint (patch 0026). Runs a guest vCPU, so the
 	# test binary needs the hypervisor entitlement: built, signed, then run.
 	cd "$src"

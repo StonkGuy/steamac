@@ -4,9 +4,12 @@
 # a signed, notarized and stapled DMG with an /Applications link:
 #   work/out/dist/FX Steam Launcher.app
 #   work/out/dist/FX-Steam-Launcher-<CFBundleShortVersionString>.dmg
-# The copy drops the dev-only SteamacBuildOut Info.plist key (this build tree's path). Every nested
-# Mach-O (Frameworks dylibs, helper tools in Resources) is signed before the bundle, so helpers
-# added to bundle.sh later are covered without changes here.
+# The copy drops the dev-only SteamacBuildOut Info.plist key (this build tree's path) and gets the
+# in-app update configuration (SparkleUpdates): SUFeedURL, SUPublicEDKey, SUVerifyUpdateBeforeExtraction
+# and SURequireSignedFeed. Nested code is signed inside-out before the bundle: every loose Mach-O
+# (Frameworks dylibs, helper tools in Resources, Sparkle's Autoupdate), then nested bundles deepest
+# first (Sparkle's Updater.app, Sparkle.framework), so code added to bundle.sh later is covered
+# without changes here. host/launcher/appcast.sh publishes the DMG to the update feed.
 #
 #   host/launcher/dist.sh [--no-notarize] [--no-sentry-upload]
 #
@@ -34,6 +37,15 @@
 #                          signing now, and every shipped Mach-O must pass sentry-cli debug-files check.
 #                          The dSYMs are kept as work/out/dist/FX-Steam-Launcher-<version>-dSYMs (later
 #                          builds replace work/out/dSYMs).
+#   SPARKLE_FEED_URL       the appcast (default: this fork's, the appcast.xml asset of the latest
+#                          StonkGuy/steamac release; upstream's feed is refused)
+#   SPARKLE_PUBLIC_KEY     its EdDSA public key (this fork's update key; default none: no SU* keys, the
+#                          app checks the fork's GitHub releases instead; fxgl's key is refused). A
+#                          notarized build requires its private half in the keychain (generate_keys -p
+#                          prints the keychain's public key), so appcast.sh can sign the release's updates;
+#                          the release workflow signs with the SPARKLE_ED_PRIVATE_KEY secret. Sparkle's
+#                          generate_keys in host/launcher/.build/artifacts/sparkle/Sparkle/bin; restore the
+#                          private key from its offline backup with generate_keys -f FILE.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -109,6 +121,23 @@ if [[ $notarize == 1 ]]; then
 (or set NOTARY_PROFILE, or pass --no-notarize for a local test build)"
 fi
 
+# In-app updates (SparkleUpdates). Fork builds take updates only from this fork's feed, signed with
+# this fork's EdDSA key: fxgl's feed and key would replace a fork install with an upstream build
+# (no patched FEX, no VR path). Without SPARKLE_PUBLIC_KEY the app gets no feed and checks this
+# fork's GitHub releases instead (UpdateChecker; the DMG opens in the browser).
+SPARKLE_BIN="$HERE/.build/artifacts/sparkle/Sparkle/bin"
+FXGL_ED_KEY=ML1BKHcTTwKlVSLtTdMvyk7Fhwg35VN1nUp+o4fezt8=   # upstream's release key: refused
+feed=${SPARKLE_FEED_URL:-https://github.com/StonkGuy/steamac/releases/latest/download/appcast.xml}
+ed_key=${SPARKLE_PUBLIC_KEY:-}
+[[ $ed_key != "$FXGL_ED_KEY" ]] || die "SPARKLE_PUBLIC_KEY is fxgl's release key: a fork build must not take upstream updates"
+[[ $feed != *fxgl.github.io* && $feed != *github.com/fxgl/* ]] || die "SPARKLE_FEED_URL $feed is upstream's feed"
+if [[ $notarize == 1 && -n $ed_key ]]; then
+    keychain_key=$("$SPARKLE_BIN/generate_keys" -p 2>/dev/null || true)
+    [[ $keychain_key == "$ed_key" ]] || die "the keychain's Sparkle key (${keychain_key:-none}) is not $ed_key: appcast.sh could
+not sign this release's updates; import the key backup with $SPARKLE_BIN/generate_keys -f <file>
+(or set SPARKLE_PUBLIC_KEY for another feed)"
+fi
+
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SRC/Contents/Info.plist")
 DMG_NAME="FX-Steam-Launcher-$version.dmg"
 mkdir -p "$DIST"
@@ -128,6 +157,15 @@ ditto "$SRC" "$APP"
 if [[ $notarize == 1 ]]; then
     /usr/libexec/PlistBuddy -c "Add :SteamacDistTeamID string $team" "$APP/Contents/Info.plist"
 fi
+if [[ -n $ed_key ]]; then
+    for entry in "SUFeedURL string $feed" "SUPublicEDKey string $ed_key" \
+                 "SUVerifyUpdateBeforeExtraction bool true" "SURequireSignedFeed bool true"; do
+        /usr/libexec/PlistBuddy -c "Add :$entry" "$APP/Contents/Info.plist"
+    done
+    echo "in-app updates from $feed (EdDSA public key $ed_key)"
+else
+    echo "in-app updates off (no SPARKLE_PUBLIC_KEY): the app checks the StonkGuy/steamac releases"
+fi
 
 if [[ $mode == adhoc ]]; then
     echo "=== signing ad hoc (no Developer ID, not notarized)"
@@ -137,16 +175,27 @@ else
     sign() { codesign --force --timestamp --options runtime --sign "$sign_id" "$@"; }
 fi
 main_exe="$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
+bundles=()      # nested bundles, deepest first
+bundle_exes=()  # their main executables (signed with the bundle)
+while IFS= read -r -d '' b; do
+    bundles+=("$b")
+    case $b in
+        *.framework) bundle_exes+=("$b/Versions/$(readlink "$b/Versions/Current")/$(basename "$b" .framework)") ;;
+        *) bundle_exes+=("$b/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$b/Contents/Info.plist")") ;;
+    esac
+done < <(find "$APP/Contents" -depth -type d \( -name '*.app' -o -name '*.framework' -o -name '*.xpc' \) -print0)
 nested=()
 while IFS= read -r -d '' f; do
     [[ $f == "$main_exe" ]] && continue
+    for e in ${bundle_exes[@]+"${bundle_exes[@]}"}; do [[ $f == "$e" ]] && continue 2; done
     file -b "$f" | grep -q '^Mach-O' && nested+=("$f")
 done < <(find "$APP/Contents" -type f -print0)
 for f in "${nested[@]}"; do sign "$f"; done
+for b in ${bundles[@]+"${bundles[@]}"}; do sign "$b"; done
 sign --entitlements "$ENTITLEMENTS" "$APP"
 
 codesign --verify --deep --strict "$APP"
-for f in "$main_exe" "${nested[@]}"; do
+for f in "$main_exe" "${nested[@]}" ${bundles[@]+"${bundles[@]}"}; do
     info=$(codesign -dv "$f" 2>&1)
     if [[ $mode == adhoc ]]; then
         grep -q '^Signature=adhoc$' <<<"$info" || die "${f#"$APP/"}: not signed ad hoc"
@@ -207,6 +256,7 @@ if [[ $mode == adhoc ]]; then
 elif [[ $notarize != 1 ]]; then
     echo "NOT notarized (--no-notarize): Gatekeeper blocks this DMG once downloaded"
 fi
+[[ -z $ed_key ]] || echo "update feed: the release workflow signs the appcast for $feed (host/launcher/appcast.sh for a local release)"
 
 # Debug files for symbolicated crash reports (CrashReporting.swift). Never a hardcoded token.
 if [[ $sentry_upload == 0 ]]; then

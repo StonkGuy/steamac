@@ -12,16 +12,104 @@ import SwiftUI
 /// that a guest process's GPU teardown is no crash report (LineScanner), and the automatic VM size
 /// (VMSizing) on simulated Macs, the update check's version ordering and release selection,
 /// the Mac time zone and clock format kernel parameters (MacTime), and the clipboard port's frame codec and
-/// concealed-item filter (ClipboardSync).
+/// concealed-item filter (ClipboardSync), plus shared-library preferences and boot arguments.
 enum SettingsSelfTest {
+    /// Use a private preferences domain, like ProvisionSelfTest's disk-selection checks.
+    private static func sharedLibrarySelfCheck() -> [String] {
+        let domain = "es.fxgam.steamac.selftest-share-library-\(UUID().uuidString)"
+        let previousDomain = getenv("STEAMAC_DEFAULTS_DOMAIN").map { String(cString: $0) }
+        setenv("STEAMAC_DEFAULTS_DOMAIN", domain, 1)
+        let settings = LauncherSettings()
+        defer {
+            settings.defaults.removePersistentDomain(forName: domain)
+            if let previousDomain { setenv("STEAMAC_DEFAULTS_DOMAIN", previousDomain, 1) }
+            else { unsetenv("STEAMAC_DEFAULTS_DOMAIN") }
+        }
+        var failures: [String] = []
+        func check(_ ok: Bool, _ name: String) {
+            if !ok { failures.append("shared library: \(name)") }
+        }
+        check(settings.sharedLibrary && Options().shareLibrary, "default is on")
+        check(LauncherSettings.Key.sharedLibrary.nextStart, "key applies on next start")
+        check(settings.set("sharedLibrary", "off") && !settings.sharedLibrary, "debug set off")
+        check(settings.defaults.object(forKey: "sharedLibrary") as? Bool == false, "off is persisted")
+        check(!LauncherSettings().sharedLibrary, "off is loaded")
+        check(!settings.set("sharedLibrary", "invalid") && !settings.sharedLibrary, "invalid debug value rejected")
+        check(settings.set("sharedLibrary", "on") && settings.sharedLibrary, "debug set on")
+        check(LauncherSettings().sharedLibrary, "on is loaded")
+        settings.noteBoot(overrides: [:], autoCapture: nil)
+        check(!settings.restartPending, "initial boot snapshot")
+        settings.sharedLibrary = false
+        check(settings.restartPending, "changing the preference needs a restart")
+        settings.sharedLibrary = true
+        check(!settings.restartPending, "restoring the preference clears restart")
+        settings.noteBoot(overrides: [.sharedLibrary: "--no-share-library"], autoCapture: nil)
+        settings.sharedLibrary = false
+        check(!settings.restartPending, "CLI override is excluded from restart tracking")
+        settings.resetAll()
+        check(settings.sharedLibrary && LauncherSettings().sharedLibrary, "reset restores default")
+        check(settings.defaults.object(forKey: "sharedLibrary") == nil, "reset removes saved key")
+        let folder = NSTemporaryDirectory() + "steamac-share-library-\(UUID().uuidString)"
+        do {
+            try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(atPath: folder) }
+            let boot = folder + "/boot"
+            try Data().write(to: URL(fileURLWithPath: boot))
+            let base = ["steamac-vm", "--kernel", boot, "--disk", boot, "--no-ssh",
+                        "--headless", "--frame-dump", "/dev/null", "--vulkan-driver", "moltenvk"]
+            let cases: [(String, String, Bool, [String], [String], String?)] = [
+                ("no folder", "", true, [], [], nil),
+                ("folder enabled", folder, true, [], ["1"], nil),
+                ("folder disabled", folder, false, [], [], nil),
+                ("missing saved folder", folder + "/missing", true, [], [], nil),
+                ("no share", folder, true, ["--no-share"], [], nil),
+                ("CLI folder", "", true, ["--share", folder], ["1"], nil),
+                ("CLI on", folder, false, ["--share-library"], ["1"], "--share-library"),
+                ("CLI off", folder, true, ["--no-share-library"], [], "--no-share-library"),
+                ("CLI on without folder", "", false, ["--share-library"], [], "--share-library"),
+                ("CLI last on", folder, false, ["--no-share-library", "--share-library"], ["1"], "--share-library"),
+                ("CLI last off", folder, true, ["--share-library", "--no-share-library"], [], "--no-share-library"),
+                ("cmdline off", folder, true, ["--cmdline", "steamac.share_library=0"], ["0"], nil),
+                ("cmdline on", folder, false, ["--cmdline", "steamac.share_library=1"], ["1"], nil),
+            ]
+            for (name, path, enabled, flags, expected, override) in cases {
+                settings.sharedFolder = path
+                settings.sharedLibrary = enabled
+                let (options, overrides) = try Options.resolve(base + flags, settings: settings)
+                let prefix = "steamac.share_library="
+                let values = options.cmdline.split(separator: " ").filter { $0.hasPrefix(prefix) }
+                    .map { String($0.dropFirst(prefix.count)) }
+                check(values == expected, "\(name): boot argument \(values), expected \(expected)")
+                check(overrides[.sharedLibrary] == override, "\(name): CLI override note")
+                check(options.shareLibrary == (override.map { $0 == "--share-library" } ?? enabled),
+                      "\(name): effective option")
+                check(settings.sharedLibrary == enabled && LauncherSettings().sharedLibrary == enabled,
+                      "\(name): one-run override did not change saved preference")
+            }
+            settings.sharedFolder = folder
+            settings.sharedLibrary = true
+            let mount = "/home/steamos/OtherShare"
+            let (options, _) = try Options.resolve(base + ["--cmdline", "steamac.share=\(mount)"], settings: settings)
+            let mounts = options.cmdline.split(separator: " ").filter { $0.hasPrefix("steamac.share=") }
+            check(mounts == [Substring("steamac.share=\(mount)")], "explicit share mount is preserved")
+            check(options.cmdline.split(separator: " ").contains("steamac.share_library=1"),
+                  "library enabled with an explicit share mount")
+        } catch {
+            failures.append("shared library: \(error)")
+        }
+        log("selftest-settings: shared library: \(failures.isEmpty ? "ok" : "FAIL: \(failures.joined(separator: "; "))")")
+        return failures
+    }
+
     static func run(_ o: Options, overrides: [LauncherSettings.Key: String]) -> Never {
         let settings = LauncherSettings.shared
         let profileID = 2147483646
+        let profileTestEnv = "STEAMAC_SELFTEST=\(profileID)"
         let savedProfile = settings.profile(for: profileID)
         let savedName = settings.gameName(profileID)
         settings.setGameName("A Profile self-test", for: profileID)
         settings.setProfile(GameProfile(gfx: "dxmt", driver: LauncherSettings.VulkanDriver.preferred.rawValue,
-                                        env: "DXVK_HUD=fps"), for: profileID)
+                                        env: profileTestEnv), for: profileID)
         settings.noteBoot(overrides: overrides, autoCapture: o.autoCapture)
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
@@ -37,7 +125,28 @@ enum SettingsSelfTest {
         // Crash-report scrubbing: the user, host, computer and Bonjour names never leave the Mac.
         var failures = CrashReporting.scrubSelfCheck() + CrashReporting.scannerSelfCheck() + CrashReporting.exitSelfCheck()
             + VMSizing.selfCheck()
-            + UpdateChecker.selfCheck() + MacTime.selfCheck() + KeyboardLayoutSync.selfCheck() + ClipboardSync.selfCheck() + GameProfile.selfCheck()
+            + UpdateChecker.selfCheck() + MacTime.selfCheck() + Options.shareMountSelfCheck() + KeyboardLayoutSync.selfCheck() + ClipboardSync.selfCheck() + GameProfile.selfCheck()
+            + SteamControllerRouting.selfCheck() + GenericHIDRouting.selfCheck() + PadPort.coalesceSelfCheck()
+            + sharedLibrarySelfCheck()
+        let savedVirtualPad = settings.virtualPad
+        let savedPadType = settings.padType
+        context.needsInputMonitoring = true
+        settings.virtualPad = true
+        for type in [LauncherSettings.PadType.auto, .steamController, .dualSense, .dualShock4, .xbox360] {
+            settings.padType = type
+            let expected = type == .auto || type == .steamController
+            if context.showsInputMonitoringWarning != expected {
+                failures.append("Input Monitoring warning: wrong visibility for \(type)")
+            }
+        }
+        settings.padType = .auto
+        settings.virtualPad = false
+        if context.showsInputMonitoringWarning { failures.append("Input Monitoring warning: passthrough disabled") }
+        settings.virtualPad = true
+        context.needsInputMonitoring = false
+        if context.showsInputMonitoringWarning { failures.append("Input Monitoring warning: permission not needed") }
+        settings.virtualPad = savedVirtualPad
+        settings.padType = savedPadType
         var tabs = SettingsWindowController.Tab.allCases[...]
 
         func capture(_ name: String, _ rep: NSBitmapImageRep?) {
@@ -163,7 +272,58 @@ enum SettingsSelfTest {
             step()
         }
 
-        /// Display tab: open the real window-size popup, check its items (11 presets, Fit to screen,
+        func compactAlerts(then done: @escaping () -> Void) {
+            sw.show(tab: .advanced)
+            let reclaimed = DiskCompact.Outcome(path: "selftest.img", beforeAllocated: 8 << 30,
+                                                afterAllocated: 4 << 30, detail: "trimmed")
+            let unchanged = DiskCompact.Outcome(path: "selftest.img", beforeAllocated: 4 << 30,
+                                                afterAllocated: 4 << 30, detail: "already compact")
+            var cases: [(String, Result<DiskCompact.Outcome, OptionError>, Bool, Int)] = [
+                ("reclaimed sheet", .success(reclaimed), true, 0),
+                ("unchanged sheet", .success(unchanged), true, 0),
+                ("failure sheet", .failure(OptionError("selftest trim failure")), true, 0),
+                ("reclaimed standalone", .success(reclaimed), false, 0),
+                ("failure standalone", .failure(OptionError("selftest trim failure")), false, 0),
+                ("cancel sheet", .success(reclaimed), true, 1),
+                ("cancel standalone", .success(reclaimed), false, 1),
+            ]
+            func nextAlert() {
+                guard !cases.isEmpty else { return done() }
+                let (name, result, sheet, button) = cases.removeFirst()
+                let alert = DiskCompactAlert.result(result)
+                if button == 1 { alert.addButton(withTitle: String(localized: "Cancel")) }
+                let expected = NSApplication.ModalResponse(rawValue: NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + button)
+                var responses: [NSApplication.ModalResponse] = []
+                // A regression to runModal must fail rather than leave this self-test hanging.
+                let watchdog = Timer(timeInterval: 1.5, repeats: false) { _ in
+                    failures.append("compaction \(name): presentation blocked the main queue")
+                    NSApp.modalWindow?.orderOut(nil)
+                    NSApp.abortModal()
+                }
+                RunLoop.main.add(watchdog, forMode: .common)
+                RunLoop.main.add(watchdog, forMode: .modalPanel)
+                DiskCompactAlert.present(alert, for: sheet ? sw.window : nil) { responses.append($0) }
+                watchdog.invalidate()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    let visible = alert.window.isVisible && NSApp.modalWindow == nil
+                        && (!sheet || sw.window.attachedSheet === alert.window)
+                    if !visible || !responses.isEmpty || alert.informativeText.isEmpty {
+                        failures.append("compaction \(name): alert missing, modal or completed before dismissal")
+                    }
+                    log("selftest-settings: compaction \(name): main-queue callback ran while alert remained open: \(visible ? "ok" : "FAIL")")
+                    alert.buttons[button].performClick(nil)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        if responses != [expected] || alert.window.isVisible {
+                            failures.append("compaction \(name): dismissal responses=\(responses.map(\.rawValue)) visible=\(alert.window.isVisible)")
+                        }
+                        nextAlert()
+                    }
+                }
+            }
+            nextAlert()
+        }
+
+        /// Display tab: open the real window-size popup, check its items (every size preset, Fit to screen,
         /// Custom…) → DIR/settings-display-presets.{txt,png}, then reveal "Custom…"
         /// (settings-display-custom.png). The saved window size is restored afterwards.
         func displayPresets(then done: @escaping () -> Void) {
@@ -256,6 +416,67 @@ enum SettingsSelfTest {
             }
         }
 
+        /// Exercise the real SwiftUI field, including clearing and reopening it: an example
+        /// assignment in the empty-field prompt looked like a forced title default (STEAMAC-8X).
+        func profileLaunchOptions(then done: @escaping () -> Void) {
+            func fields(_ view: NSView) -> [NSTextField] {
+                (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields)
+            }
+            // Find the fixture by its unique initial value, not by the user's game-name order.
+            let initialFields = sw.window.contentView.map { fields($0).filter(\.isEditable) } ?? []
+            guard let fieldIndex = initialFields.firstIndex(where: { $0.stringValue == profileTestEnv }) else {
+                failures.append("profiles: launch options fixture field missing")
+                return done()
+            }
+            func launchField() -> NSTextField? {
+                let current = sw.window.contentView.map { fields($0).filter(\.isEditable) } ?? []
+                return current.indices.contains(fieldIndex) ? current[fieldIndex] : nil
+            }
+            var values = ["", "VKD3D_CONFIG=dxr", "", "PROTON_LOG=1", ""]
+            func step() {
+                guard let field = launchField() else {
+                    failures.append("profiles: launch options field missing")
+                    return done()
+                }
+                if field.placeholderString?.contains("VKD3D_CONFIG=dxr") == true {
+                    failures.append("profiles: empty launch options look like a forced DXR assignment")
+                }
+                guard !values.isEmpty else {
+                    sw.show(tab: .general)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        sw.show(tab: .games)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            let reopened = launchField()
+                            if reopened?.stringValue != "" || settings.profile(for: profileID).env != "" {
+                                failures.append("profiles: cleared launch options changed after reopening Games")
+                            }
+                            done()
+                        }
+                    }
+                    return
+                }
+                let value = values.removeFirst()
+                field.selectText(nil)
+                guard let editor = field.currentEditor() as? NSTextView else {
+                    failures.append("profiles: launch options field editor missing")
+                    return done()
+                }
+                editor.selectAll(nil)
+                editor.insertText(value, replacementRange: editor.selectedRange())
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    // The normal domain is Bundle.main's identifier and uses .standard;
+                    // reopening it as a suite is rejected by UserDefaults.
+                    let data = settings.defaults.data(forKey: "profile.\(profileID)")
+                    let stored = data.flatMap { try? JSONDecoder().decode(GameProfile.self, from: $0) }
+                    if settings.profile(for: profileID).env != value || stored?.env != value {
+                        failures.append("profiles: launch options edit did not persist: \(value) (model=\(settings.profile(for: profileID).env), stored=\(stored?.env ?? "<missing>"))")
+                    }
+                    step()
+                }
+            }
+            step()
+        }
+
         func next() {
             guard let tab = tabs.popFirst() else {
                 CreateDiskWindowController.show(settings: settings)
@@ -281,7 +502,7 @@ enum SettingsSelfTest {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                             capture("what-is-sent", SettingsWindowController.snapshot(w))
                             w.orderOut(nil)
-                            displayPresets { advancedCustom { backgroundMute(then: finish) } }
+                            compactAlerts { displayPresets { advancedCustom { backgroundMute(then: finish) } } }
                         }
                     }
                 }
@@ -294,7 +515,8 @@ enum SettingsSelfTest {
                 if tab == .games && popups(in: sw.window.contentView).count < 3 {
                     failures.append("profiles: graphics/driver/rating pickers not rendered")
                 }
-                next()
+                if tab == .games { profileLaunchOptions(then: next) }
+                else { next() }
             }
         }
         DispatchQueue.main.async { app.activate(); next() }

@@ -13,6 +13,153 @@
 #   patches/moltenvk/     applied in order on MoltenVK (git format-patch series)
 #   patches/spirv-cross/  applied in order on SPIRV-Cross, passed to fetchDependencies
 #                         via --spirv-cross-root
+#   Local 1.9.8 follow-up:
+#   MoltenVK 0045 (STEAMAC-76/77): Venus HOST_ALLOCATION optimal 3D images had no
+#   placement heap for 2D aliases (TF2 MVKImageViewPlane::newMTLTexture crash).
+#   volume_views imported clear/readback reproduced SIGSEGV; placement-backed
+#   optimal storage preserves imported/plain dynamic-rendering slice contents.
+#   SPIRV-Cross 0051 (STEAMAC-75): packing outputs by Location alone lost Index=1,
+#   reproducing Metal's missing color(0), index(1) error. sentry-75-dual-source.sh
+#   validates all four plain/packed source combinations and reads blended pixels.
+#   MoltenVK 0046 retains Vulkan blend factors and reflected output indices on
+#   pipeline failure; sentry_75_reflection.cpp checks both indices on those SPVs.
+#   The original 1.9.8 fragment was absent; the 1.9.9 recurrence is covered below.
+#   MoltenVK 0047 (STEAMAC-41): a 173-line object shader lost its middle, bindings
+#   and entry point in bounded diagnostics. Preserve complete small shaders and
+#   failed Metal descriptors; run.sh's link-log checks templates, shader middle
+#   and descriptors. Diagnostic-only: no proven workaround for Apple's compiler.
+#   MoltenVK 0048 (STEAMAC-6V/87/88/2M/81): library compilation bypassed 0047,
+#   while a second compute error prematurely closed the launcher's report. Keep
+#   complete library/pipeline shaders up to 64 KiB / 1536 lines, compute descriptors,
+#   and a single diagnostic stream. Launcher fields retain 128 KiB independently
+#   instead of cutting small vertex shaders and descriptors off at 8000 characters.
+#   Existing pull-model regression shaders still need full source from the new 6V
+#   report; no speculative shader workaround or Apple-compiler workaround is applied.
+#   MoltenVK 0049 (STEAMAC-83/89): combining tessellation and geometry selected
+#   incompatible paths and emitted the unassigned vertex capture slot buffer(255).
+#   Reject this unsupported combination before Metal compilation instead of silently
+#   dropping its required geometry stage. pipeline_limits tessgeom reproduces the
+#   old error with a four-stage, no-fragment layered pass. This is a diagnostic,
+#   not tessellation-to-geometry support or a fix for the separately observed hang.
+#   Local 1.9.10 follow-up:
+#   MoltenVK 0050 / SPIRV-Cross 0052 (STEAMAC-75 recurrence): the complete fragment
+#   writes only the primary color while blend state uses OneMinusSource1Alpha.
+#   Vulkan permits an absent secondary output (undefined value), but Metal rejects
+#   the pipeline. Reflect original Index=1 locations before masking/packing and
+#   choose zero for absent secondary inputs by translating only SRC1 blend factors.
+#   frag_output dual-source checks all four factors, masked Location=1, real packed
+#   and array secondary outputs, GPU pixels, and serialized pipeline-cache reuse.
+#   MoltenVK 0051 / SPIRV-Cross 0053 (STEAMAC-8J): no original shader was retained,
+#   but sample-rate projected sampling reproduces the exact missing
+#   llvm.agx2.sample.itrproj.1xf symbol on M1 Max. On M1 only, use pull-model
+#   interpolation at get_sample_position(sample_id), preserving division and
+#   interpolation positions while avoiding Apple's broken projected-sample fusion.
+#   sentry-8j-projected.sh checks plain/helper/block/array/noperspective/explicit
+#   sample inputs, native interpolation pixels, 1x/4x MSAA and all Metal math modes;
+#   pipeline_limits projected exercises the Vulkan-to-Metal pipeline path.
+#   SPIRV-Cross 0054 (STEAMAC-87/88/2M candidate): flattening a stage interface
+#   block ignored explicit Locations after its first member, turning Locations
+#   0/2 into user(locn0)/user(locn1). Restart the location range at each decorated
+#   member, retaining array/matrix strides and Component sharing. The private
+#   sentry-block-locations.sh regression fails before the patch and passes after:
+#   16 validated vertex/fragment shaders match SPIR-V and all 16 block/standalone
+#   combinations link in Metal. This proves a translator bug, not these events'
+#   root cause: their SPIR-V is absent, 87's repeated identical locations were not
+#   reproduced, and 2M also used tessellation. Keep all three reports unresolved.
+#   SPIRV-Cross 0055 (STEAMAC-41/R): the complete 1.9.12 point-to-quad shaders
+#   reproduce MTLCompilerService SIGSEGV in replacePayloadBufferAccesses on M1 Max;
+#   Metal returns an ICE on macOS 15 or XPC interruption after retries on macOS 27.
+#   Partial stores to object_data uint4 locations trigger it. Use 16-byte-aligned
+#   scalar component slots, preserving the payload ABI and avoiding extra stores.
+#   Both captured pipelines link after this substitution. sentry-mesh-payload.sh
+#   fails before and passes after with the actual emitted payload ABI; geometry's
+#   point-to-quad scalar-varying case checks rendered pixels after the change.
+#   SPIRV-Cross 0056 (#49): Rift Apart's tessellation vertex stage packed POSITION
+#   float3 and TEXCOORD at Component=3 into 16 bytes, while its control stage read
+#   separate members at a 32-byte stride, so pipelines compiled but drew nothing.
+#   Keep captured vertex outputs unpacked and add dummy interface members by
+#   component, including when TCS reads only POSITION. tess_components checks
+#   both signatures and every rendered pixel; device_address covers the game's
+#   uvec2-address atomic helper (already fixed by 0044).
+#   Local 1.9.13 follow-up:
+#   MoltenVK 0052 (STEAMAC-9E/79): an oversized texel-buffer view became a
+#   536346624-wide Metal texture (limit 268435456), despite Vulkan advertising
+#   67108864 elements. Reject excessive resolved counts before uint32 narrowing
+#   and lazy Metal construction. texel_limits reproduces the abort and checks
+#   explicit/WHOLE_SIZE rejection plus legal maximum and partial-texel controls.
+#   SPIRV-Cross 0057 (STEAMAC-57): the fully captured SSAO shared struct's Vulkan
+#   std430 upper bound is 30976 bytes (limit 32768), but MSL float3 padding made
+#   it 46464. Pack non-array vec3 members of non-block Workgroup structs using
+#   existing physical conversions (19360 bytes). Preserve buffer and variable
+#   pointer ABIs; shared-memory regressions exercise all 968 invocations,
+#   helpers, component/whole-struct stores, nested/zeroed arrays and SSBO layouts.
+#   Optimized aggregate conversions into padded SSBO structs initialize physical
+#   padding slots too, preserving both the external offsets and logical fields.
+#   Original SPIR-V was not retained; fixtures reconstruct the captured declaration.
+#   MoltenVK 0053 / SPIRV-Cross 0058 (historical STEAMAC-2M/88, mgsvtpp.exe):
+#   same-type raster float3/float4 mismatches use matching physical widths without
+#   losing written lanes or changing logical types. Cache keys include the adapter.
+#   stage_widths checks pixels and serialized-cache reuse. Current 11-07 events
+#   instead have missing locations or float/uint mismatches and remain unresolved.
+#   SPIRV-Cross 0059 (STEAMAC-A9): a captured user-defined rgb9e5(uint) collided
+#   with metal::rgb9e5<T>, a pixel-type alias missing from reserved function names.
+#   Rename user definitions/calls through the normal path; rgb9e5_helper checks
+#   every decoded channel for zero, ordinary and maximum packed RGB9E5 values.
+#   SPIRV-Cross 0060 (STEAMAC-A2): standalone geometry ClipDistance outputs
+#   bypassed composite lowering, retaining native clipping but omitting
+#   fragment-visible user(clipN) outputs. Reuse the builder's per-EmitVertex copies.
+#   sentry-a2-clip-distance.sh checks plain/block one/two-plane interfaces, native
+#   clipping and user copies, including the native-only option, in MSL 3 and 4.
+#   MoltenVK 0054 (STEAMAC-AD diagnostics): the 112824-byte/1137-line compute
+#   shader exceeded the old 64 KiB source cap, omitting the kernel and preventing
+#   compiler-crash replay. Preserve up to 256 KiB/8192 lines for up to two scrubbed,
+#   hash-deduplicated .metal event attachments per process; Sentry truncates extra
+#   fields at 16 KiB. sentry-ad-capture.sh checks exact recovery and byte/line
+#   boundaries through real failures. No Bodycam compiler workaround is claimed.
+#   MoltenVK 0055 (STEAMAC-AG/G, RDR2): the game creates pipeline-statistics
+#   pools despite pipelineStatisticsQuery=false (invalid VUID-00791 usage).
+#   Keep that feature false, but accept these pools with explicitly zeroed
+#   requested counters and normal reset/completion/availability/copy semantics,
+#   instead of losing an asynchronously created Venus object. Split native
+#   timestamp storage into <=4096-sample Metal buffers (8192 used to request
+#   65536 bytes, above Apple's 32768-byte limit); retain the existing CPU
+#   timestamp fallback when the process-wide counter-buffer budget is exhausted.
+#   MoltenVK 0056 (STEAMAC-AG/G): heap size / height is not a CPU row pitch.
+#   A 4x64 BC1 host import reproduces the exact AGX bytes_per_row assertion;
+#   300x3 RGBA8 produced 2730-byte fractional-texel rows. Use texel/block pitches
+#   for separate image backing copies, retaining heap offsets for aliases, and
+#   never copy a mapped heap texture onto its own opaque tiled memory. LINEAR
+#   3D remains unsupported (as advertised); refusal now retains the descriptor.
+#   sentry_ag checks all counters, chunk-boundary resolves, imported/ordinary
+#   image bytes, host-copy paths, and valid 1D-as-2D/LINEAR controls.
+#   MoltenVK 0057 (STEAMAC-AG/G diagnostics): Story-mode and appid 1859910
+#   reports contain only a generic queue-submit timeout, no shader or encoder
+#   identity; appid 1373880 has a real Metal code-8 OOM (10173 MiB allocated).
+#   Keep encoder status/signposts/shader validation logs even at errors-only
+#   logging, and explain how to enable status/shader capture when absent.
+#   sentry_ag_gpu uses synthetic Metal error records to test the real formatter;
+#   it does not induce a GPU fault or claim to reproduce/fix the Story-mode hang.
+#   SPIRV-Cross 0061 (STEAMAC-AS): Metal has no threadgroup atomic_float. The
+#   captured shader needs atomic stores, loads and float adds, not only stores.
+#   Keep logical float storage; use atomic_uint bitcasts and a CAS loop for FAdd.
+#   Device atomic_float stays native. sentry-as-shared-float.sh fails before and
+#   passes after in MSL 2.4/3/4, checking 512 contended GPU adds, original values,
+#   NaN termination, signed zero, exchange and ordinary shared accesses.
+#   SPIRV-Cross 0062 (STEAMAC-AV, appid 3489700): the object-stage vertex fetch
+#   cast a single packed_half2 to an entire float2[2] input. Recurse through
+#   array elements/matrix columns, fetching each location's own format and binding.
+#   sentry-av-array-input.sh reproduces that error before and checks all three
+#   vertex payloads after, with separate offsets/strides and half/float/normalized/
+#   packed formats, in MSL 3 and 4. Neither report retained original SPIR-V.
+#   STEAMAC-57's new 33024-byte recurrence is NOT the vec3-padding case fixed by
+#   0057: float2[2752] + float[2752] genuinely exceeds the 32768-byte limit.
+#   SPIRV-Cross 0063 (STEAMAC-87/BB, 1.9.14 regression of 8959e4b): sparse
+#   width-link maps were mistaken for complete interfaces by the old Component
+#   naming workaround, dropping _2/_3 and duplicating user(locnN) declarations.
+#   Preserve component suffixes on both raster stages while keeping width lookup
+#   exact. sentry-87-components.sh checks plain/block float2+float2 and float3+float
+#   beside linked widths, pixels, equal-width controls and serialized cache reuse.
+#   The patch-series hash invalidates old MSL caches; no cache schema changes.
 #   Xcode        command line tools + Metal toolchain (built and tested with Xcode 26.3)
 #
 # Build is UTM's (scripts/build_dependencies.sh build_moltenvk): ./fetchDependencies --macos
@@ -293,6 +440,28 @@ mvk_version=$(sed -n 's/.*"api_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1
 	echo "         (STEAMAC-57/41/R/3X: existing reports cannot prove the cause)"
 	echo "  0044 = steamac: Vulkan specialization IDs are translated through SPIRV-Cross's Metal index map,"
 	echo "         retained in serialized pipeline caches; unused IDs cannot alias compact indices (STEAMAC-6A)"
+	echo "  0045 = steamac: optimal images on imported host memory or existing buffers keep their separate"
+	echo "         backing in an image-owned placement heap, so 2D/3D aliases do not dereference a null heap;"
+	echo "         imported and ordinary volume slice render/readback regression (STEAMAC-76/77)"
+	echo "  0046 = steamac: failed graphics pipelines retain static Vulkan blend state and reflected"
+	echo "         dual-source output indices (STEAMAC-75); reflection covers all four packed/plain pairs"
+	echo "  0047 = steamac: failed render/mesh pipelines include their Metal descriptors; shaders up to"
+	echo "         32 KiB/512 lines are complete, including helpers and the middle lost by 0043"
+	echo "         (STEAMAC-41: no proven compiler workaround; diagnostic capture regression)"
+	echo "  0052 = steamac: reject texel-buffer counts above maxTexelBufferElements before"
+	echo "         lazy Metal descriptor creation (STEAMAC-9E/79: width 536346624 > 268435456)"
+	echo "  0053 = steamac: link same-type ordinary vertex/fragment vector widths without losing"
+	echo "         producer lanes, and key/cache the interface adapter (historical STEAMAC-2M/88)"
+	echo "  0054 = steamac: retain failed shader source up to 256 KiB / 8192 lines for bounded"
+	echo "         replayable event attachments (STEAMAC-AD diagnostics, not a compiler workaround)"
+	echo "  0055 = steamac: keep invalid unsupported statistics pools alive with zero counters"
+	echo "         without advertising the feature; chunk native timestamp storage at 4096 samples"
+	echo "         (STEAMAC-AG/G; retain CPU fallback on process-wide counter exhaustion)"
+	echo "  0056 = steamac: use texel/block CPU pitches for separate optimal image backings,"
+	echo "         avoid in-place copies of mapped heap textures; retain rejected LINEAR descriptors"
+	echo "         (STEAMAC-AG/G; 4x64 BC1 AGX assertion and 300x3 RGBA8 pitch regressions)"
+	echo "  0057 = steamac: retain GPU encoder/signpost/shader-log evidence at errors-only logging"
+	echo "         and give opt-in capture instructions (STEAMAC-AG/G diagnostics, no hang fix)"
 	echo "SPIRV-Cross patches (host/moltenvk/patches/spirv-cross):"
 	for p in "$here"/patches/spirv-cross/*.patch; do echo "  $(basename "$p")"; done
 	echo "  0001/0002 = KhronosGroup/SPIRV-Cross 35f52882+da223760 and 0706157e (PR #2666), library only"
@@ -387,6 +556,28 @@ mvk_version=$(sed -n 's/.*"api_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1
 	echo "         thread_scope_subgroup), fixing MSL 3.2 shader compilation (STEAMAC-5C)"
 	echo "  0050 = steamac: pull-model interpolation retains component swizzles and interface members through"
 	echo "         pointer copies and split access chains (STEAMAC-6V: float initialized from float4 centroid result)"
+	echo "  0051 = steamac: component-packed fragment outputs use both Location and Index, preserving"
+	echo "         source 1 and distinct fixups (STEAMAC-75); four validated shaders render expected blend pixels"
+	echo "  0055 = steamac: aligned scalar object/mesh payload slots avoid Apple's partial-vector-store"
+	echo "         compiler crash (STEAMAC-41/R); point-to-quad scalar varying checks pipeline and GPU pixels"
+	echo "  0056 = steamac: vertex outputs for tessellation are not packed by component, like the tessellation control"
+	echo "         shader's inputs (Rift Apart's POSITION/TEXCOORD in one location: 16-byte packed vertices were read"
+	echo "         as 32-byte ones, so the pipelines drew nothing, #49); component-aware dummy members preserve"
+	echo "         the buffer stride even when the next stage reads only POSITION (both tess_components pipelines)"
+	echo "  0057 = steamac: pack non-block Workgroup vec3 fields through physical conversions"
+	echo "         (STEAMAC-57: 30976-byte std430 upper bound became 46464 in Metal; now 19360)"
+	echo "  0058 = steamac: preserve logical shader types while adapting ordinary raster varying"
+	echo "         widths, including arrays/blocks/components (historical STEAMAC-2M/88)"
+	echo "  0059 = steamac: reserve Metal's rgb9e5 pixel-type name for user functions"
+	echo "         (STEAMAC-A9); nested unpacking helpers preserve all decoded channels"
+	echo "  0060 = steamac: emit geometry mesh ClipDistance user(clipN) copies alongside"
+	echo "         native clip_distance arrays (STEAMAC-A2); block/native-only paths preserved"
+	echo "  0061 = steamac: emulate Workgroup float atomic load/store/exchange with uint bits"
+	echo "         and float FAdd with a CAS loop (STEAMAC-AS); device atomic_float unchanged"
+	echo "  0062 = steamac: fetch array/matrix vertex inputs one location at a time"
+	echo "         with each location's binding/offset/format (STEAMAC-AV, half2[2])"
+	echo "  0063 = steamac: preserve vertex/fragment component suffixes with sparse width-link maps"
+	echo "         (STEAMAC-87/BB; 1.9.14 duplicate locnN regression, pixels/cache round trip)"
 	echo
 	echo "Geometry shader emulation limits: no GS instancing (Invocations > 1); B8G8R8A8 and packed"
 	echo "  (2_10_10_10, 11_11_10) vertex formats are not swizzled/unpacked by the object stage; vertex outputs are"

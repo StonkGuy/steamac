@@ -14,8 +14,8 @@ enum DiskCreationFilesystem {
         var errorDescription: String? { localized ?? description }
     }
 
-    /// Includes failures after preflight: a drive can disappear, fill up, or change permissions
-    /// while desync or the disk writer runs. Match errno diagnostics only at their suffix.
+    /// Includes failures after preflight: a drive or cache directory can disappear, fill up,
+    /// or change permissions while desync or the disk writer runs. Match errno only at the suffix.
     static func rejection(_ error: Error) -> Rejection? {
         if let rejection = error as? Rejection { return rejection }
         let e = error as NSError
@@ -30,12 +30,14 @@ enum DiskCreationFilesystem {
                 return rejection(errno: EROFS, detail: "\(error)")
             case NSFileWriteOutOfSpaceError:
                 return rejection(errno: ENOSPC, detail: "\(error)")
+            case NSFileNoSuchFileError, NSFileReadNoSuchFileError:
+                return rejection(errno: ENOENT, detail: "\(error)")
             default: break
             }
         }
         guard error is OptionError else { return nil }
         let detail = "\(error)"
-        for code in [EROFS, EACCES, EPERM, ENOSPC, EDQUOT, ENXIO, ENODEV, EIO] {
+        for code in [EROFS, EACCES, EPERM, ENOSPC, EDQUOT, EFBIG, ENXIO, ENODEV, EIO, ENOENT] {
             if detail.lowercased().hasSuffix(": " + String(cString: strerror(code)).lowercased()) {
                 return rejection(errno: code, detail: detail)
             }
@@ -52,8 +54,12 @@ enum DiskCreationFilesystem {
             advice = String(localized: "There is no permission to write to the disk or download cache. Choose a writable folder or check Finder → Get Info → Sharing & Permissions.")
         case ENOSPC, EDQUOT:
             advice = String(localized: "The volume ran out of space while creating SteamOS. Free some space or choose another volume, then try again.")
+        case EFBIG:
+            advice = String(localized: "The filesystem or its driver cannot create a file as large as the SteamOS disk. Choose an APFS, Mac OS Extended, or exFAT volume; APFS is recommended.")
         case ENXIO, ENODEV, EIO:
             advice = String(localized: "The drive disconnected or reported an I/O error. Check its connection and run Disk Utility First Aid, then try again; use another drive if the error continues.")
+        case ENOENT:
+            advice = String(localized: "A disk-creation file or folder is no longer available. Reconnect the drive and check that the destination and download cache have not been moved or deleted, then try again.")
         default: return nil
         }
         return Rejection("\(advice) (\(detail))", localized: "\(advice)\n\n\(detail)")
@@ -73,7 +79,33 @@ enum DiskCreationFilesystem {
     static func fileDiagnostic(_ path: String) -> String {
         var st = stat()
         guard lstat(path, &st) == 0 else { return "\(path): lstat: \(String(cString: strerror(errno)))" }
-        return "\(path): dev=\(st.st_dev), inode=\(st.st_ino), size=\(st.st_size), allocated=\(st.st_blocks * 512), links=\(st.st_nlink)"
+        let identity = "\(path): dev=\(st.st_dev), inode=\(st.st_ino), mode=\(String(st.st_mode, radix: 8)), size=\(st.st_size), allocated=\(st.st_blocks * 512), links=\(st.st_nlink)"
+        guard st.st_mode & S_IFMT == S_IFDIR else { return identity }
+        return identity + ", name-max=\(pathconf(path, _PC_NAME_MAX)), " + directoryDiagnostic(path)
+    }
+
+    /// Bounded metadata only: a broken cache shard can fail while its parent volume is writable.
+    /// Do not read chunks, enumerate the whole cache, or include unrelated filenames.
+    private static func directoryDiagnostic(_ path: String) -> String {
+        guard let dir = opendir(path) else { return "opendir errno=\(errno)" }
+        defer { closedir(dir) }
+        var entries = 0, temporary = 0, chunks = 0
+        while true {
+            errno = 0
+            guard let entry = readdir(dir) else {
+                return "entries=\(entries), temporary=\(temporary), chunks=\(chunks), readdir errno=\(errno), truncated=false"
+            }
+            let name = withUnsafePointer(to: &entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) { String(cString: $0) }
+            }
+            if name == "." || name == ".." { continue }
+            if entries == 64 {
+                return "entries=\(entries), temporary=\(temporary), chunks=\(chunks), truncated=true"
+            }
+            entries += 1
+            if name.hasPrefix(".tmp-cacnk.") { temporary += 1 }
+            if name.hasSuffix(".cacnk") { chunks += 1 }
+        }
     }
 
     /// Before downloading: reject volumes that cannot hold the disk. Returns whether files
@@ -83,22 +115,37 @@ enum DiskCreationFilesystem {
         guard statfs(directory, &fs) == 0 else {
             throw OptionError("\(directory): \(String(cString: strerror(errno)))")
         }
-        guard fs.f_flags & UInt32(MNT_RDONLY) == 0 else {
-            throw Rejection("\(directory) is on a read-only volume: choose a writable location for the SteamOS disk",
-                            localized: String(localized: "\(directory) is on a read-only volume: choose a writable location for the SteamOS disk"))
-        }
         let type = withUnsafePointer(to: &fs.f_fstypename) {
             $0.withMemoryRebound(to: CChar.self, capacity: Int(MFSTYPENAMELEN)) { String(cString: $0) }
+        }
+        return try preflight(directory: directory, type: type, flags: fs.f_flags,
+                             free: UInt64(fs.f_bavail) * UInt64(fs.f_bsize),
+                             diskBytes: diskBytes, rootfsBytes: rootfsBytes, existingBytes: existingBytes)
+    }
+
+    /// The statfs snapshot is separate so driver names and capacity limits can be regression-tested
+    /// without mounting or allocating a multi-gigabyte disk.
+    static func preflight(directory: String, type: String, flags: UInt32, free: UInt64,
+                          diskBytes: UInt64, rootfsBytes: UInt64, existingBytes: UInt64 = 0) throws -> Bool {
+        guard flags & UInt32(MNT_RDONLY) == 0 else {
+            throw Rejection("\(directory) is on a read-only volume: choose a writable location for the SteamOS disk",
+                            localized: String(localized: "\(directory) is on a read-only volume: choose a writable location for the SteamOS disk"))
         }
         guard type != "msdos" || max(diskBytes, rootfsBytes) <= UInt64(UInt32.max) else {
             throw Rejection("\(directory) is on a FAT32/MS-DOS volume, which cannot store files of 4 GiB or larger. "
                 + "The SteamOS disk and its 10 GiB rootfs exceed this limit: choose an APFS, Mac OS Extended, or exFAT volume",
                 localized: String(localized: "\(directory) is on a FAT32/MS-DOS volume, which cannot store files of 4 GiB or larger. The SteamOS disk and its 10 GiB rootfs exceed this limit: choose an APFS, Mac OS Extended, or exFAT volume"))
         }
+        // Only these filesystems have supported allocation semantics. In particular, do not
+        // assume an unknown driver supports sparse files: ufsd_NTFS accepted the 10 GiB
+        // temporary rootfs but rejected a 92.7 GB ftruncate after an hour's download (8S).
+        guard ["apfs", "hfs", "exfat", "msdos"].contains(type) else {
+            throw Rejection("\(directory) uses the unsupported filesystem \(type). Choose an APFS, Mac OS Extended, or exFAT volume for the SteamOS disk; APFS is recommended.",
+                localized: String(localized: "\(directory) uses the unsupported filesystem \(type). Choose an APFS, Mac OS Extended, or exFAT volume for the SteamOS disk; APFS is recommended."))
+        }
         let dense = type == "exfat"
         if dense {
             let need = diskBytes - min(existingBytes, diskBytes) + rootfsBytes + (1 << 30)
-            let free = UInt64(fs.f_bavail) * UInt64(fs.f_bsize)
             guard free >= need else {
                 let needed = String(format: "%.1f", Double(need) / 1e9)
                 let available = String(format: "%.1f", Double(free) / 1e9)

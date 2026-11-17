@@ -192,6 +192,8 @@ struct ReportContext {
     var guest: GuestLogs?
     /// The VM window's picture (nil without a window).
     var captureScreenshot: ((@escaping (CGImage?) -> Void) -> Void)?
+    /// Main-thread controller state and passive HID inventory, only with launcher logs.
+    var controllerDiagnostics: (() -> String)?
     /// After an unexpected VM exit: what happened ("VM process crashed (SIGABRT)").
     var exitSummary: String?
 }
@@ -233,6 +235,13 @@ final class ReportBundle: @unchecked Sendable {
     @MainActor
     static func collect(context: ReportContext, choices: ReportChoices, status: (String) -> Void) async throws -> ReportBundle {
         let b = try ReportBundle(context: context, choices: choices)
+        if choices.launcherLogs, let diagnostics = context.controllerDiagnostics {
+            b.write("controllers.txt", CrashReporting.scrub(diagnostics()))
+        }
+        if choices.launcherLogs {
+            let window = NSApp.windows.first { $0.contentView is VMView }
+            b.write("game-mode.txt", GameModeDiagnostics.snapshot(window: window))
+        }
         status(choices.launcherLogs ? String(localized: "Collecting launcher logs…") : String(localized: "Collecting system information…"))
         await Task.detached { b.writeHostFiles() }.value
         if choices.screenshot {
@@ -298,6 +307,18 @@ final class ReportBundle: @unchecked Sendable {
             return
         }
         if choices.launcherLogs {
+            write("game-policy.log", ReportBundle.scrub(GameModeDiagnostics.policyLog(in: dir)))
+            if let data = RollingLog.tail(dir: runDir, name: "remote-play-status.txt", maxBytes: 16 << 10) {
+                write("remote-play-status.txt", ReportBundle.scrub(String(decoding: data, as: UTF8.self)))
+            }
+            if FileManager.default.fileExists(atPath: runDir + "/api.sock") {
+                write("gvproxy-forwards.txt", ReportBundle.scrub(Gvproxy.forwardingDiagnostics(runDir: runDir)))
+            } else {
+                notes.append("gvproxy forward API: no socket (network disabled or supervisor exited)")
+            }
+            if let data = RollingLog.tail(dir: runDir, name: "gvproxy.log", maxBytes: 64 << 10) {
+                write("gvproxy.log", ReportBundle.scrub(String(decoding: data, as: UTF8.self)))
+            }
             if let data = RollingLog.tail(dir: runDir, name: RollingLog.launcher.name, maxBytes: ReportBundle.logTail) {
                 write("launcher.log", ReportBundle.scrub(String(decoding: data, as: UTF8.self)))
             } else {
@@ -580,8 +601,8 @@ enum FeedbackSender {
     }
 
     private static func loadItems(_ dir: String) -> [Item] {
-        let order = ["system-info.txt", "settings.txt", "launcher.log", "perf-stall.log", "console.log",
-                     "steamos-logs.tar.gz", "screenshot.png"]
+        let order = ["system-info.txt", "settings.txt", "controllers.txt", "remote-play-status.txt", "gvproxy-forwards.txt",
+                     "gvproxy.log", "launcher.log", "perf-stall.log", "console.log", "steamos-logs.tar.gz", "screenshot.png"]
         let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
             .filter { $0 != "report.json" && !$0.hasPrefix(".") }
             .sorted { (order.firstIndex(of: $0) ?? 99, $0) < (order.firstIndex(of: $1) ?? 99, $1) }

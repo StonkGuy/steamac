@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the steamac-vm launcher (release), sign it with the hypervisor entitlement and
-# install it as work/out/steamac-vm. Also fetches the pinned zstd decoder sources (compiled in),
+# install it as work/out/steamac-vm. Also fetches the pinned zstd decoder, ENet and nanors sources
+# (compiled in; the latter two for the Moonlight streaming host),
 # gvproxy and desync into work/out/host/bin and assembles work/out/FX Steam Launcher.app
 # (bundle.sh; skipped with STEAMAC_NO_BUNDLE=1 or when the kernel/initramfs/layer images are
 # not built yet). Debug symbols for crash reports go to work/out/dSYMs (see dist.sh).
@@ -30,7 +31,8 @@ ls "$KRUN_PREFIX"/lib/libkrun*.dylib >/dev/null 2>&1 || { echo "missing $KRUN_PR
 # build identity crash reports use (CrashReporting): SteamacGitCommit (release name
 # es.fxgam.steamac@<CFBundleShortVersionString>+<commit>), SteamacMVKPatchRevision (MoltenVK
 # MVK_PATCH_REVISION, from $KRUN_PREFIX/MOLTENVK.txt) and SteamacKosmicKrispRevision (patch revision
-# from $KRUN_PREFIX/KOSMICKRISP.txt, when KosmicKrisp is built).
+# from $KRUN_PREFIX/KOSMICKRISP.txt, when KosmicKrisp is built). CFBundleVersion repeats
+# CFBundleShortVersionString: Sparkle orders updates by it (SparkleUpdates; 1.9.10 > 1.9.9).
 PLIST="$HERE/.build/Info.plist"
 mkdir -p "$HERE/.build"
 commit=$(git -C "$ROOT" rev-parse --short=10 HEAD 2>/dev/null || echo unknown)
@@ -50,6 +52,11 @@ cp "$HERE/Info.plist" "$PLIST.new"
 /usr/libexec/PlistBuddy -c "Add :SteamacGitCommit string $commit" "$PLIST.new"
 [[ -z $mvk_rev ]] || /usr/libexec/PlistBuddy -c "Add :SteamacMVKPatchRevision string 0x$mvk_rev" "$PLIST.new"
 [[ -z $kk_rev ]] || /usr/libexec/PlistBuddy -c "Add :SteamacKosmicKrispRevision string 0x$kk_rev" "$PLIST.new"
+version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST.new")
+# This fork: CFBundleVersion is <version>.<SteamacForkRelease> (1.9.15.1 for v1.9.15-eac.1), so
+# Sparkle orders fork releases of one upstream version (UpdateChecker.format shows it as -eac.N).
+fork=$(/usr/libexec/PlistBuddy -c 'Print :SteamacForkRelease' "$PLIST.new" 2>/dev/null || true)
+/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $version${fork:+.$fork}" "$PLIST.new"
 
 SWIFT_FLAGS=(
     -c release
@@ -59,12 +66,15 @@ SWIFT_FLAGS=(
     -Xcc "-I$ROOT/host/vrhost/include"   # vraudio.h (plain C, Apache-2.0 OR GPL-3.0-or-later)
     -Xlinker "-L$KRUN_PREFIX/lib"
     -Xlinker -rpath -Xlinker @executable_path/host/lib
+    -Xlinker -rpath -Xlinker @executable_path/Frameworks
     -Xlinker -rpath -Xlinker "$KRUN_PREFIX/lib"
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST"
     -Xswiftc -emit-localized-strings -Xswiftc -emit-localized-strings-path -Xswiftc "$HERE/.build/stringsdata"
 )
 
 "$HERE/fetch-zstd.sh"
+"$HERE/fetch-enet.sh"
+"$HERE/fetch-nanors.sh"
 BIN="$(swift build "${SWIFT_FLAGS[@]}" --show-bin-path)/steamac-vm"
 # SwiftPM does not track the -sectcreate input: relink when the plist changed.
 if cmp -s "$PLIST.new" "$PLIST"; then
@@ -118,6 +128,11 @@ for lproj in "$HERE/.build/l10n"/*.lproj; do
     rm -rf "$OUT/$(basename "$lproj")"
     cp -R "$lproj" "$OUT/"
 done
+# Sparkle.framework (SwiftPM binary target, linked by every build): the dev binary loads it from
+# work/out/Frameworks; bundle.sh embeds this copy.
+rm -rf "$OUT/Frameworks/Sparkle.framework"
+mkdir -p "$OUT/Frameworks"
+ditto "$(dirname "$BIN")/Sparkle.framework" "$OUT/Frameworks/Sparkle.framework"
 
 "$HERE/fetch-gvproxy.sh"
 "$HERE/fetch-desync.sh"

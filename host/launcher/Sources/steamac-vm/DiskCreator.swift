@@ -126,6 +126,20 @@ final class DiskCreator {
     static var desyncPath: String? { locate("desync", dev: ["host/bin/desync"]) }
     static var caPath: String? { locate("steamdeck-images.pem", dev: ["../../scripts/keys/steamdeck-images.pem"]) }
 
+    /// A bundle URL is injectable so the provisioning self-test can exercise a damaged copy.
+    static func requireDesync(bundleURL: URL? = Bundle.main.bundlePath.hasSuffix(".app") ? Bundle.main.bundleURL : nil) throws -> String {
+        if let bundleURL {
+            let path = bundleURL.appendingPathComponent("Contents/Resources/desync").path
+            let status = AppBundle.ResourceStatus(path: path)
+            guard status.usable else { throw AppBundle.installationFailure(bundleURL: bundleURL, desync: status) }
+            return path
+        }
+        guard let path = desyncPath else {
+            throw OptionError("desync not found in work/out/host/bin/desync: run host/launcher/fetch-desync.sh")
+        }
+        return path
+    }
+
     /// Caller closes the returned descriptor only after all creation work finishes.
     static func acquireCreationLock(cacheRoot: String) throws -> Int32 {
         let lockPath = cacheRoot + "/creation.lock"
@@ -155,7 +169,7 @@ final class DiskCreator {
 
     private func create(_ r: Request) throws -> Result {
         let fm = FileManager.default
-        guard let desync = DiskCreator.desyncPath else { throw OptionError("desync not found (bundle Contents/Resources/desync or work/out/host/bin/desync: host/launcher/fetch-desync.sh)") }
+        let desync = try DiskCreator.requireDesync()
         guard let caPath = DiskCreator.caPath else { throw OptionError("Valve RAUC CA steamdeck-images.pem not found") }
         guard DiskCreator.branches.contains(r.branch) else { throw OptionError("unknown branch \(r.branch) (\(DiskCreator.branches.joined(separator: ", ")))") }
         guard (8...4096).contains(r.homeGiB) else { throw OptionError("home size must be 8..4096 GiB", localized: String(localized: "home size must be 8..4096 GiB")) }
@@ -273,9 +287,11 @@ final class DiskCreator {
             try copyRootfs(tmp, size: rootBytes, into: fd, offsets: [a.firstLBA * 512, b.firstLBA * 512],
                            sha256: manifest.rootfsSHA256)
         } catch let failure as IntegrityFailure {
-            // Distinguish bad extent metadata from actual bad bytes before discarding evidence.
-            let sequential = try rootfsDigest(tmp)
-            log("create-disk: integrity: extent sha256=\(failure.got), sequential sha256=\(sequential), expected=\(manifest.rootfsSHA256); \(DiskCreationFilesystem.diagnostic(directory: dir))")
+            // Compare the bytes consumed by the failed copy with a buffered sequential reread.
+            // Different hashes alone cannot locate unstable reads or incorrect sparse extents.
+            let sequential = failure.readback.sha256
+            log("create-disk: integrity: \(failure), expected=\(manifest.rootfsSHA256); \(DiskCreationFilesystem.diagnostic(directory: dir))")
+            log("create-disk: integrity source: \(DiskCreationFilesystem.fileDiagnostic(tmp)); destination: \(DiskCreationFilesystem.fileDiagnostic(partial))")
             if sequential != manifest.rootfsSHA256 {
                 // A fresh serial, uncached extraction cannot reuse corrupt cache chunks or the
                 // previous output's self-seed, and avoids concurrent filesystem write races.
@@ -295,8 +311,9 @@ final class DiskCreator {
                 try copyRootfs(tmp, size: rootBytes, into: fd, offsets: [a.firstLBA * 512, b.firstLBA * 512],
                                sha256: manifest.rootfsSHA256, sparse: false)
             } catch let retry as IntegrityFailure {
+                log("create-disk: integrity retry: \(retry); source: \(DiskCreationFilesystem.fileDiagnostic(tmp))")
                 try? fm.removeItem(atPath: tmp)
-                throw OptionError("rootfs integrity failed after a serial uncached retry: sha256 \(retry.got) != manifest \(manifest.rootfsSHA256); check the drive with Disk Utility or choose another drive (temporary rootfs and chunk cache deleted)")
+                throw OptionError("rootfs integrity failed after a serial uncached retry: sha256 \(retry.got) != manifest \(manifest.rootfsSHA256); \(retry.readback); check the drive with Disk Utility or choose another drive (temporary rootfs and chunk cache deleted)")
             }
         }
         log("create-disk: rootfs sha256 OK: \(manifest.rootfsSHA256) == manifest; written to rootfs-A (LBA \(a.firstLBA)) and rootfs-B (LBA \(b.firstLBA))")
@@ -379,10 +396,52 @@ final class DiskCreator {
 
     // MARK: metadata
 
+    /// Valve metadata is downloaded before the signed bundle. A portal/proxy response or an
+    /// incomplete body here is an expected download failure, not a Foundation JSON-parser bug.
+    struct MetadataResponseFailure: LocalizedError, CustomStringConvertible {
+        let diagnostic: String
+        var description: String {
+            "Can't download SteamOS information from Valve's servers. The response was empty, incomplete, or invalid. Check your internet connection, sign in to the network if required, or try without a VPN, proxy, or network filter, then try again. Technical details are in the launcher log. (\(diagnostic))"
+        }
+        var errorDescription: String? {
+            String(localized: "Can't download SteamOS information from Valve's servers. The response was empty, incomplete, or invalid. Check your internet connection, sign in to the network if required, or try without a VPN, proxy, or network filter, then try again. Technical details are in the launcher log.")
+        }
+    }
+
     func candidate(branch: String) throws -> Candidate {
         let url = URL(string: DiskCreator.metaURL + branch + ".json")!
-        let data = try fetch(url)
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw OptionError("\(url): not a JSON object") }
+        let result = try fetch(url)
+        return try DiskCreator.candidate(data: result.data, response: result.response, url: url)
+    }
+
+    private static func metadataDiagnostic(data: Data, response: URLResponse?, url: URL, reason: String) -> String {
+        let http = response as? HTTPURLResponse
+        let status = http.map { String($0.statusCode) } ?? "unavailable"
+        let type = http?.value(forHTTPHeaderField: "Content-Type") ?? "(missing)"
+        let prefix = String(reflecting: String(decoding: data.prefix(160), as: UTF8.self))
+        let detail = "\(url): \(reason); HTTP \(status); Content-Type \(String(reflecting: type)); body \(data.count) bytes; first bytes \(prefix)"
+        log("create-disk: metadata response: \(detail)")
+        return detail
+    }
+
+    static func candidate(data: Data, response: URLResponse?, url: URL) throws -> Candidate {
+        let http = response as? HTTPURLResponse
+        func diagnostic(_ reason: String) -> String {
+            metadataDiagnostic(data: data, response: response, url: url, reason: reason)
+        }
+        guard let http, http.statusCode == 200 else {
+            throw MetadataResponseFailure(diagnostic: diagnostic("unexpected HTTP response"))
+        }
+        let object: Any
+        do { object = try JSONSerialization.jsonObject(with: data) }
+        catch {
+            throw MetadataResponseFailure(diagnostic: diagnostic("invalid JSON: \(error)"))
+        }
+        // A valid JSON document with an incompatible schema is not evidence of a network
+        // interruption: retain reporting for upstream metadata/launcher compatibility defects.
+        guard let root = object as? [String: Any] else {
+            throw OptionError(diagnostic("not a JSON object"))
+        }
         var found: [Candidate] = []
         for key in ["minor", "major"] {
             guard let part = root[key] as? [String: Any], let list = part["candidates"] as? [[String: Any]] else { continue }
@@ -394,7 +453,9 @@ final class DiskCreator {
                 found.append(Candidate(buildID: id, version: image["version"] as? String ?? "", updatePath: path, chunksStorePath: store))
             }
         }
-        guard let newest = found.max(by: { $0.buildID < $1.buildID }) else { throw OptionError("\(url): no aarch64 candidate") }
+        guard let newest = found.max(by: { $0.buildID < $1.buildID }) else {
+            throw OptionError(diagnostic("no aarch64 candidate"))
+        }
         return newest
     }
 
@@ -404,13 +465,15 @@ final class DiskCreator {
         lock.lock(); task = t; lock.unlock()
     }
 
-    func fetch(_ url: URL) throws -> Data {
+    func fetch(_ url: URL) throws -> (data: Data, response: URLResponse?) {
         let sem = DispatchSemaphore(value: 0)
-        var result: Swift.Result<Data, Error> = .failure(Cancelled())
+        var result: Swift.Result<(data: Data, response: URLResponse?), Error> = .failure(Cancelled())
         let t = URLSession.shared.dataTask(with: url) { d, resp, err in
-            if let err { result = .failure(err) }
-            else if let code = (resp as? HTTPURLResponse)?.statusCode, code != 200 { result = .failure(OptionError("\(url): HTTP \(code)")) }
-            else { result = .success(d ?? Data()) }
+            if let err {
+                _ = DiskCreator.metadataDiagnostic(data: d ?? Data(), response: resp, url: url, reason: "\(err)")
+                result = .failure(err)
+            }
+            else { result = .success((d ?? Data(), resp)) }
             sem.signal()
         }
         setTask(t)
@@ -508,9 +571,12 @@ final class DiskCreator {
         var lastLogged = -1
         var text = ""
         var recent: [String] = []
+        var lastOutput = ""
+        var outputBytes = 0
         var buf = [UInt8](repeating: 0, count: 8192)
         func handle(_ lines: [String]) {
             for piece in lines {
+                lastOutput = piece
                 if let pct = DiskCreator.percent(in: piece) {
                     let elapsed = max(1, Date().timeIntervalSince(start))
                     let rate = Double(dataBytes) * pct / 100 / elapsed
@@ -540,6 +606,7 @@ final class DiskCreator {
             let n = read(master, &buf, buf.count)
             if n < 0 && errno == EINTR { continue }
             if n <= 0 { break }   // EIO once desync and the pty are gone
+            outputBytes += n
             text += String(decoding: buf[0..<n], as: UTF8.self)
             handle(DiskCreator.terminalLines(&text))
         }
@@ -549,6 +616,15 @@ final class DiskCreator {
         lock.lock(); process = nil; lock.unlock()
         try checkCancel()
         guard p.terminationStatus == 0 else {
+            // STEAMAC-7X had exit 1 with an empty diagnostic after 19 minutes. Do not
+            // infer network/space failure: keep exit reason, received byte count, the
+            // last terminal line (even progress) and current filesystem state.
+            log("create-disk: desync failed: exit \(p.terminationStatus), reason \(p.terminationReason.rawValue), received \(outputBytes) terminal bytes, last line: \(lastOutput.prefix(4096))")
+            log("create-disk: desync failure target: \(DiskCreationFilesystem.diagnostic(directory: (out as NSString).deletingLastPathComponent))"
+                + (cache.map { "; cache: \(DiskCreationFilesystem.diagnostic(directory: $0))" } ?? ""))
+            if let cache, let shard = DiskCreator.failedCacheDirectory(output: recent, cache: cache) {
+                log("create-disk: desync failure cache shard: \(DiskCreationFilesystem.fileDiagnostic(shard)); \(DiskCreationFilesystem.diagnostic(directory: shard))")
+            }
             if cache != nil && DiskCreator.cacheRenameCollision(output: recent) {
                 log("create-disk: cache rename collision; retrying once with one worker and no cache")
                 try? FileManager.default.removeItem(atPath: out)
@@ -571,6 +647,17 @@ final class DiskCreator {
         return pieces.map { BootProgress.stripANSI($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
+    /// Inspect only a desync-generated shard under our cache, even if an error mentions other paths.
+    static func failedCacheDirectory(output: [String], cache: String) -> String? {
+        let pattern = NSRegularExpression.escapedPattern(for: cache) + "/[0-9a-f]{4}/\\.tmp-cacnk\\.[0-9]+"
+        for line in output.reversed() where line.contains("failed to store in local cache: ") {
+            if let range = line.range(of: pattern, options: .regularExpression) {
+                return (String(line[range]) as NSString).deletingLastPathComponent
+            }
+        }
+        return nil
+    }
+
     static func cacheRenameCollision(output: [String]) -> Bool {
         output.contains { $0.contains("failed to store in local cache: rename ")
             && $0.contains(".tmp-cacnk.") && $0.hasSuffix(": file exists") }
@@ -583,6 +670,7 @@ final class DiskCreator {
     static func desyncFailure(status: Int32, output: [String]) -> Error {
         var detail = output.last(where: { $0.hasPrefix("Error: ") }).map { String($0.dropFirst(7)) }
             ?? output.suffix(3).joined(separator: " | ")
+        if detail.isEmpty { detail = "no diagnostic output; check the connection and available disk space, then try again" }
         for pattern in ["[0-9a-f]{4}/[0-9a-f]{64}", "[0-9a-f]{64}"] {
             detail = detail.replacingOccurrences(of: pattern, with: "<chunk>", options: .regularExpression)
         }
@@ -591,9 +679,11 @@ final class DiskCreator {
             return DiskCreationFilesystem.Rejection("the volume ran out of space while downloading SteamOS (\(detail)): free some space and try again; the download resumes where it stopped",
                 localized: String(localized: "the volume ran out of space while downloading SteamOS (\(detail)): free some space and try again; the download resumes where it stopped"))
         }
-        // Go's url.Error ("Get \"https://…\": dial tcp …", timeouts, resets) and server errors
-        // that outlasted --error-retry.
-        if detail.contains("Get \"http") || detail.contains("unexpected status code 5") {
+        // Errors before HTTP headers retain Go's url.Error ("Get https://…"). Body reads return
+        // a bare deadline/EOF wrapped only with the store/chunk URLs (STEAMAC-92).
+        let bodyDownloadFailure = (detail.hasPrefix("http://") || detail.hasPrefix("https://"))
+            && (detail.contains(": context deadline exceeded") || detail.hasSuffix(": unexpected EOF"))
+        if detail.contains("Get \"http") || detail.contains("unexpected status code 5") || bodyDownloadFailure {
             return DiskCreationFilesystem.Rejection("downloading SteamOS failed (\(detail)): check the internet connection and try again; the download resumes where it stopped",
                 localized: String(localized: "downloading SteamOS failed (\(detail)): check the internet connection and try again; the download resumes where it stopped"))
         }
@@ -700,22 +790,87 @@ final class DiskCreator {
         }
         let got = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         guard got == expected else {
-            throw IntegrityFailure(got: got)
+            let readback = try rootfsReadback(path, size: size, comparing: offsets.first.map { (fd: fd, offset: $0) })
+            throw IntegrityFailure(got: got, readback: readback)
         }
     }
 
-    struct IntegrityFailure: Error { let got: String }
+    struct IntegrityFailure: Error, CustomStringConvertible {
+        let got: String
+        let readback: RootfsReadback
+        var description: String { "copy sha256=\(got), \(readback)" }
+    }
 
-    /// Only used after an integrity failure: read all bytes, independently of sparse extents.
-    private func rootfsDigest(_ path: String) throws -> String {
-        let file = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
-        defer { try? file.close() }
-        var hash = SHA256()
-        while let data = try file.read(upToCount: 8 << 20), !data.isEmpty {
-            try checkCancel()
-            hash.update(data: data)
+    struct RootfsBlockMismatch {
+        /// Rootfs-relative offsets, not absolute offsets in the destination disk.
+        let blockOffset: UInt64
+        let byteOffset: UInt64
+        let sourceSHA256: String
+        let copiedSHA256: String
+    }
+
+    struct RootfsReadback: CustomStringConvertible {
+        let sha256: String
+        let compared: Bool
+        let mismatch: RootfsBlockMismatch?
+        var description: String {
+            let detail: String
+            if let mismatch {
+                detail = "first mismatch: 1 MiB block offset=\(mismatch.blockOffset), byte offset=\(mismatch.byteOffset), source block sha256=\(mismatch.sourceSHA256), copied block sha256=\(mismatch.copiedSHA256)"
+            } else {
+                detail = compared ? "first mismatch=none (source vs rootfs-A)" : "copy not compared"
+            }
+            return "sequential sha256=\(sha256), \(detail)"
         }
-        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Failure-only diagnostics: hash every source byte without SEEK_DATA/SEEK_HOLE or
+    /// F_NOCACHE, and locate the first changed 1 MiB block against the copy just written.
+    /// Only the first destination slot is read, and only until a mismatch is found.
+    func rootfsReadback(_ path: String, size: UInt64, comparing copy: (fd: Int32, offset: UInt64)?) throws -> RootfsReadback {
+        let src = open(path, O_RDONLY | O_CLOEXEC)
+        guard src >= 0 else { throw OptionError("readback \(path): \(String(cString: strerror(errno)))") }
+        defer { close(src) }
+        let block = 1 << 20
+        let source = UnsafeMutableRawPointer.allocate(byteCount: block, alignment: 4096)
+        let copied = copy.map { _ in UnsafeMutableRawPointer.allocate(byteCount: block, alignment: 4096) }
+        defer { source.deallocate(); copied?.deallocate() }
+        func readBlock(_ fd: Int32, _ buffer: UnsafeMutableRawPointer, count: Int, offset: UInt64, name: String) throws {
+            var got = 0
+            while got < count {
+                let n = pread(fd, buffer + got, count - got, off_t(offset) + off_t(got))
+                if n < 0 && errno == EINTR { continue }
+                guard n > 0 else {
+                    throw OptionError("readback \(name) at \(offset + UInt64(got)): \(n < 0 ? String(cString: strerror(errno)) : "EOF")")
+                }
+                got += n
+            }
+        }
+        var hash = SHA256()
+        var mismatch: RootfsBlockMismatch?
+        var offset: UInt64 = 0
+        while offset < size {
+            try checkCancel()
+            let n = Int(min(UInt64(block), size - offset))
+            try readBlock(src, source, count: n, offset: offset, name: path)
+            hash.update(bufferPointer: UnsafeRawBufferPointer(start: source, count: n))
+            if mismatch == nil, let copy, let copied {
+                try readBlock(copy.fd, copied, count: n, offset: copy.offset + offset, name: "rootfs-A")
+                if memcmp(source, copied, n) != 0 {
+                    var byte = 0
+                    while source.load(fromByteOffset: byte, as: UInt8.self) == copied.load(fromByteOffset: byte, as: UInt8.self) { byte += 1 }
+                    var sourceHash = SHA256(), copiedHash = SHA256()
+                    sourceHash.update(bufferPointer: UnsafeRawBufferPointer(start: source, count: n))
+                    copiedHash.update(bufferPointer: UnsafeRawBufferPointer(start: copied, count: n))
+                    mismatch = RootfsBlockMismatch(blockOffset: offset, byteOffset: offset + UInt64(byte),
+                        sourceSHA256: sourceHash.finalize().map { String(format: "%02x", $0) }.joined(),
+                        copiedSHA256: copiedHash.finalize().map { String(format: "%02x", $0) }.joined())
+                }
+            }
+            offset += UInt64(n)
+        }
+        return RootfsReadback(sha256: hash.finalize().map { String(format: "%02x", $0) }.joined(),
+                              compared: copy != nil, mismatch: mismatch)
     }
 
     // MARK: disk space

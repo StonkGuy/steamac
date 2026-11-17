@@ -16,6 +16,8 @@ final class Presenter: DisplaySink {
     private(set) var framesShown: UInt64 = 0
     /// Main thread, one-shot: runs after the next guest frame is on screen.
     var onNextFrame: (() -> Void)?
+    /// Streaming observes uploads without replacing the window's one-shot frame callback.
+    var onStreamFrame: (() -> Void)?
 
     init(display: DisplayBackend, renderer: Renderer) {
         self.display = display
@@ -38,6 +40,7 @@ final class Presenter: DisplaySink {
             guard let self, !self.scanout.enabled else { return }
             self.renderer.dropTexture()
             self.view?.redraw()
+            self.onStreamFrame?()
         }
     }
 
@@ -67,6 +70,7 @@ final class Presenter: DisplaySink {
             perf.uploaded(ms: ms)
             stamp.uploadMs = ms
         }
+        onStreamFrame?()
         scanout.release(f)
         framesShown &+= 1
         view?.redraw(stamp: stamp)
@@ -84,6 +88,42 @@ final class VMView: NSView {
     /// Transparent image layer above remoted game layers (DXMT), carrying only the X cursor.
     /// Hidden on the Vulkan path and while the game hides its cursor.
     private let cursorLayer = CALayer()
+    var onStreamChange: (() -> Void)?
+    private var streamLayerPolicies: [CAMetalLayer: Bool] = [:]
+    @objc dynamic var streamCaptureActive = false {
+        didSet { updateStreamLayers() }
+    }
+
+    private func updateStreamLayers() {
+        if streamCaptureActive {
+            for (layer, policy) in streamLayerPolicies where layer.superlayer !== metalLayer {
+                layer.framebufferOnly = policy
+                streamLayerPolicies.removeValue(forKey: layer)
+            }
+            for case let game as CAMetalLayer in metalLayer.sublayers ?? [] {
+                if streamLayerPolicies[game] == nil { streamLayerPolicies[game] = game.framebufferOnly }
+                game.framebufferOnly = false
+            }
+        } else {
+            for (layer, policy) in streamLayerPolicies { layer.framebufferOnly = policy }
+            streamLayerPolicies.removeAll()
+        }
+    }
+
+    /// DXMT can set its own framebuffer policy after a layer was attached during capture.
+    @objc func streamLayerChanged(_ layer: CAMetalLayer, framebufferOnly requested: NSNumber?) {
+        guard layer.superlayer === metalLayer else { return }
+        if let requested {
+            if streamCaptureActive { streamLayerPolicies[layer] = requested.boolValue }
+            layer.framebufferOnly = streamCaptureActive ? false : requested.boolValue
+        }
+        onStreamChange?()
+    }
+
+    var streamCursor: (CGImage, CGRect)? {
+        guard !cursorLayer.isHidden, let glyph = guestCursorGlyph else { return nil }
+        return (glyph.image, cursorLayer.frame)
+    }
     static let cursorLayerName = "steamac.cursor-overlay"
     private struct CursorGlyph {
         let image: CGImage
@@ -179,7 +219,7 @@ final class VMView: NSView {
         wantsLayer = true
         layerContentsRedrawPolicy = .never
         renderer.onFirstOnScreen = { [weak self] in
-            guard let self else { return }
+            guard let self, MetalHUD.loaded else { return }
             self.hudAttached = true
             // "default" first, so that "off" is a change.
             self.metalLayer.developerHUDProperties = ["mode": "default"]
@@ -303,7 +343,7 @@ final class VMView: NSView {
     }
 
     /// The topmost remoted game layer (DXMT): it would cover the guest's cursor.
-    private var activeGameLayer: CAMetalLayer? {
+    var activeGameLayer: CAMetalLayer? {
         (metalLayer.sublayers ?? [])
             .compactMap { $0 as? CAMetalLayer }
             .last { !$0.isHidden }
@@ -342,6 +382,7 @@ final class VMView: NSView {
             cursorLayer.isHidden = true
             CATransaction.commit()
             controller?.refreshHostCursor()
+            onStreamChange?()
             return
         }
         // wmtr uses resizeAspect; map the window-relative hotspot through the actual drawable.
@@ -362,6 +403,7 @@ final class VMView: NSView {
         cursorLayer.isHidden = false
         CATransaction.commit()
         if wasHidden { controller?.refreshHostCursor() }
+        onStreamChange?()
     }
 
     /// `stamp`: the guest flush of a new frame (perf stats), empty for a plain redraw.
@@ -377,6 +419,7 @@ final class VMView: NSView {
     @objc dynamic var gameLayersVisible = false {
         didSet {
             Self.applyGameLayers(visible: gameLayersVisible, in: metalLayer)
+            updateStreamLayers()
             Self.applyHUD(metalHUD, gameVisible: gameLayersVisible, main: metalLayer, mainAttached: hudAttached)
             let tracking = gameLayersVisible && activeGameLayer != nil
             if cursorTracking != tracking {
@@ -389,6 +432,7 @@ final class VMView: NSView {
             }
             controller?.refreshHostCursor()
             updateCursorLayer()
+            if oldValue != gameLayersVisible { onStreamChange?() }
         }
     }
 
@@ -413,7 +457,10 @@ final class VMView: NSView {
     /// One HUD at a time: on the game layer (the lean path's remoted CAMetalLayer) while it is shown,
     /// else on the guest picture. Game layers get "default" before the wanted mode, so that "off" is a
     /// change for a HUD that attached showing; a game layer is visible here only after it presented.
-    static func applyHUD(_ on: Bool, gameVisible: Bool, main: CAMetalLayer, mainAttached: Bool) {
+    /// Nothing without libMTLHud injected at boot (MetalHUD).
+    static func applyHUD(_ on: Bool, gameVisible: Bool, main: CAMetalLayer, mainAttached: Bool,
+                         injected: Bool = MetalHUD.loaded) {
+        guard injected else { return }
         let game = (main.sublayers ?? []).compactMap { $0 as? CAMetalLayer }
         let onGame = on && gameVisible && !game.isEmpty
         if mainAttached { main.developerHUDProperties = ["mode": on && !onGame ? "default" : "off"] }

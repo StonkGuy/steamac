@@ -32,7 +32,7 @@ enum CrashReporting {
     static let summary = String(localized: "Crash reports and rare errors go to the FX Steam Launcher developers (Sentry). No personal data.")
     static let whatIsSent = [
         String(localized: "Crash reports of the launcher and the VM process: crash reason, stack traces, loaded libraries."),
-        String(localized: "A few errors: guest GPU context lost, shader pipeline compile failures (with an excerpt of the failing Metal shader source), libkrun panics, failed disk creation or first-start setup, VM stopped unexpectedly or killed (with the Mac's memory use), SteamOS not responding."),
+        String(localized: "A few errors: guest GPU context lost, shader pipeline compile failures (with failing Metal shader source: up to two scrubbed attachments of 256 KiB per process), libkrun panics, failed disk creation or first-start setup, VM stopped unexpectedly or killed (with the Mac's memory use), SteamOS not responding."),
         String(localized: "The launcher's last ~200 log lines (launcher, MoltenVK, libkrun and virglrenderer messages; home folder paths shortened to ~) and the boot stages."),
         String(localized: "Versions and setup: app, macOS, libkrun/virglrenderer/MoltenVK builds, kernel, SteamOS build, Mac model, GPU, VM CPUs/RAM/display mode, game App IDs."),
         String(localized: "A random install ID (not linked to you) to count affected Macs."),
@@ -47,6 +47,7 @@ enum CrashReporting {
         case rustPanic = "rust-panic"
         case provisionFailed = "provision-failed"
         case diskCreationFailed = "disk-creation-failed"
+        case installationIncomplete = "installation-incomplete"
         case vmExited = "vm-exited-unexpectedly"
         case vmKilled = "vm-killed"
         case notResponding = "steamos-not-responding"
@@ -59,6 +60,7 @@ enum CrashReporting {
             case .rustPanic: return "Rust panic"
             case .provisionFailed: return "SteamOS first-start setup failed"
             case .diskCreationFailed: return "Disk creation failed"
+            case .installationIncomplete: return "App installation is incomplete"
             case .vmExited: return "VM exited unexpectedly"
             case .vmKilled: return "VM process killed"
             case .notResponding: return "SteamOS not responding"
@@ -70,6 +72,7 @@ enum CrashReporting {
         var quietPeriod: TimeInterval {
             switch self {
             case .pipelineCompile: return 30 * 86400   // first occurrence per shader message
+            case .installationIncomplete: return .infinity   // once per installation, not daily
             case .test: return 0
             default: return 86400
             }
@@ -79,6 +82,7 @@ enum CrashReporting {
         var budget: Int {
             switch self {
             case .gpuContextFatal, .vmExited, .vmKilled, .notResponding, .provisionFailed, .diskCreationFailed: return 2
+            case .installationIncomplete: return 1
             default: return 5
             }
         }
@@ -94,13 +98,14 @@ enum CrashReporting {
     nonisolated(unsafe) private static var runOverride: String?
     nonisolated(unsafe) private static var test = false
     nonisolated(unsafe) private static var tags: [String: String] = [:]
-    nonisolated(unsafe) private static var reportedThisProcess: Set<String> = []
+    nonisolated(unsafe) private static var reportedThisProcess: [String: Bool] = [:]
     nonisolated(unsafe) private static var kindCounts: [Kind: Int] = [:]
     nonisolated(unsafe) private static var settingsSubscription: AnyCancellable?
     nonisolated(unsafe) private static var tap: StderrTap?
     /// Supervisor: run dir of the current boot (VM-process tags, user-exit marker).
     nonisolated(unsafe) private static var runDir: String?
     nonisolated(unsafe) private static var lineScanner = LineScanner()
+    nonisolated(unsafe) private static var failedShaderAttachments = FailedShaderAttachments()
     /// The open multi-line message a delayed report was scheduled for (LineScanner.pendingSerial).
     nonisolated(unsafe) private static var scheduledSerial: Int?
     /// Most recent event this process sent (Report a Problem associates its feedback with it).
@@ -349,7 +354,7 @@ enum CrashReporting {
 
     /// VM process: boot settings, kernel version (scanned from the Image in the background).
     private static func vmTags(options: Options) {
-        vmContext([
+        var context = [
             "boot": String(Supervisor.bootNumber),
             "display_mode": options.headless ? "headless"
                 : "\(options.guestSize.0)x\(options.guestSize.1)@\(options.refreshRate) \(options.fullscreen ? "fullscreen" : "windowed")"
@@ -357,7 +362,11 @@ enum CrashReporting {
             "mouse": options.mouseMode.rawValue,
             "network": options.network ? "on" : "off",
             "sound": options.sound ? "on" : "off",
-        ])
+            "metal_cache": MetalCompilerCache.outcome,
+        ]
+        context.merge(MetalHUD.diagnostics(requested: LauncherSettings.shared.metalHUD)) { _, new in new }
+        context["metal_instrumentation"] = MetalInstrumentation.current().tag
+        vmContext(context)
         let kernel = options.kernel
         guard !kernel.isEmpty else { return }
         DispatchQueue.global(qos: .utility).async {
@@ -373,11 +382,25 @@ enum CrashReporting {
             if had && locked({ running }) { SentrySDK.configureScope { $0.removeTag(key: key) } }
         }
         guard role == .vm, let dir = Supervisor.runDir else { return }
-        let keys = ["boot", "display_mode", "kernel", "steamos_build", "layer", "network", "sound", "mouse", "appid"]
+        let keys = ["boot", "display_mode", "kernel", "steamos_build", "layer", "network", "sound", "mouse", "appid", "metal_cache",
+                    "metal_hud", "metal_hud_injected", "metal_hud_requested", "metal_hud_driver", "metal_instrumentation"]
         let snapshot = locked { tags.filter { keys.contains($0.key) } }
         if let data = try? JSONSerialization.data(withJSONObject: snapshot) {
             try? data.write(to: URL(fileURLWithPath: dir + "/sentry-tags.json"), options: .atomic)
         }
+    }
+
+    /// Persist independently of the breadcrumb ring: shader/encoder logs can evict the HUD
+    /// toggle long before a crash (STEAMAC-3). The supervisor copies these tags at report time.
+    static func metalHUDChanged() {
+        guard configured, role == .vm else { return }
+        vmContext(MetalHUD.diagnostics(requested: LauncherSettings.shared.metalHUD))
+    }
+
+    /// The serial VM memory timer observes dyld changes even when the HUD setting did not change.
+    static func metalInstrumentationChanged(_ summary: String) {
+        guard configured, role == .vm else { return }
+        vmContext(["metal_instrumentation": summary])
     }
 
     /// VM process: the game that has the guest's focus (`appid` tag of both processes' events
@@ -506,15 +529,18 @@ enum CrashReporting {
             let pressure = memoryWatch.summary(including: host.pressure)
             let reason = exit.detail == nil ? "unknown" : exit.killedForMemory ? "jetsam" : "not-jetsam"
             let detail = exit.detail.map { " (exit detail 0x\(String($0, radix: 16)))" } ?? ""
-            let lines = [
+            var lines = [
                 killedSummary,
-                "killed by the kernel for memory (jetsam): \(reason == "jetsam" ? "yes" : reason == "unknown" ? "unknown" : "no")\(detail)",
-                "VM memory \(locked { tags["vm_mem_mib"] } ?? "?") MiB; VM process peak footprint "
-                    + (exit.peakFootprint.map(gib) ?? "?"),
-                "host memory after exit: " + host.summary,
+                "kernel memory-kill flag (NOTE_EXIT_MEMORY): \(reason == "jetsam" ? "set" : reason == "unknown" ? "unavailable" : "not set")\(detail)",
+                exit.footprintSummary(vmMemoryMiB: locked { tags["vm_mem_mib"] }),
+                "host memory after exit (may already be reclaimed): " + host.summary,
                 "memory pressure since the VM started: " + pressure.text,
             ]
-            exitTags["kill_reason"] = reason
+            if !exit.killedForMemory {
+                lines.append("SIGKILL source is unknown; an unset memory-kill flag does not rule out memory-related termination.")
+            }
+            exitTags["kill_reason"] = exit.killedForMemory ? "jetsam" : "unknown"
+            exitTags["memory_kill_flag"] = reason == "jetsam" ? "set" : reason == "unknown" ? "unavailable" : "not-set"
             exitTags["memory_pressure"] = host.pressure
             exitTags["memory_pressure_max"] = pressure.maxLevel
             if let pct = host.availablePercent { exitTags["host_mem_available_pct"] = String(pct) }
@@ -536,7 +562,9 @@ enum CrashReporting {
             // carries what Sentry's report of the VM process leaves out: libmalloc's message on a
             // heap corruption trap (STEAMAC-31/13: SIGTRAP in libsystem_malloc under
             // mtl_new_compute_pipeline_state, no message).
-            if signal != 0, let crash = SystemCrashReport.find(pid: exit.pid, timeout: 8) {
+            var capture = ""
+            let crash = signal != 0 ? SystemCrashReport.find(pid: exit.pid, timeout: 8, diagnostics: &capture) : nil
+            if let crash {
                 if let site = crash.site {
                     lines[0] = exitSummary(status: exit.status) + " in " + site + lastError
                     key += " " + site
@@ -544,6 +572,13 @@ enum CrashReporting {
                 }
                 lines += crash.messages
                 extra["macos_crash_report"] = crash.summary
+            }
+            if signal != 0 {
+                extra["macos_crash_report_capture"] = capture
+                log("crash report capture: \(capture)")
+                // Report a Problem attaches this log: with crash reporting off it is the only way the
+                // crash site reaches us (STEAMAC-BC: a SIGSEGV report logged frames=7 but carried none).
+                for line in crash?.summary.components(separatedBy: "\n") ?? [] { log("crash report: \(line)") }
             }
             report(.vmExited, key: key, message: lines.joined(separator: "\n"), tags: exitTags, extra: extra)
         }
@@ -566,7 +601,7 @@ enum CrashReporting {
         report(.notResponding, key: "not-responding", message: "SteamOS not responding (no GPU work for \(Int(diagnostic.idle)) s)",
                tags: ["stall_seconds": String(Int(diagnostic.idle)),
                       "heartbeat_age_seconds": String(Int(diagnostic.heartbeatAge))],
-               extra: ["stall_history": diagnostic.history])
+               extra: ["stall_history": diagnostic.history, "memory_history": diagnostic.memoryHistory, "thread_snapshot": diagnostic.threadSnapshot])
     }
 
     static func provisionFailed(reason: String) {
@@ -577,17 +612,20 @@ enum CrashReporting {
     /// Foundation errors group by domain/code, not NSError's pointers, task UUIDs or URLs.
     /// OptionError has no meaningful numeric code: retain its normalised diagnostic so bugs
     /// such as failed publication and bundle verification do not collapse into one issue.
-    static func diskCreationReport(_ error: Error) -> (key: String, message: String, extra: [String: String])? {
+    static func diskCreationReport(_ error: Error) -> (kind: Kind, key: String, message: String, level: SentryLevel, extra: [String: String])? {
+        if let failure = error as? AppBundle.InstallationFailure {
+            return (.installationIncomplete, "desync", failure.description, .warning, failure.diagnostics)
+        }
         guard DiskCreationFilesystem.rejection(error) == nil, !NetworkFailure.isExpected(error),
               !(error is DiskCreator.Cancelled), !(error is RaucBundle.DevelopmentSignature) else { return nil }
         let e = error as NSError
         let diagnostic = error is OptionError ? normalize("\(error)") : "\(e.domain) \(e.code)"
-        return (diagnostic, "Disk creation failed: \(diagnostic)", ["error_detail": "\(error)"])
+        return (.diskCreationFailed, diagnostic, "Disk creation failed: \(diagnostic)", .error, ["error_detail": "\(error)"])
     }
 
     static func diskCreationFailed(_ error: Error, branch: String) {
         guard let failure = diskCreationReport(error) else { return }
-        report(.diskCreationFailed, key: failure.key, message: failure.message,
+        report(failure.kind, key: failure.key, message: failure.message, level: failure.level,
                tags: ["steamos_branch": branch], extra: failure.extra)
     }
 
@@ -655,19 +693,24 @@ enum CrashReporting {
         guard locked({ running }) else { return }
         // Supervisor: the VM process's Settings window may have turned reporting off meanwhile.
         if role == .launcher { guard settingAllows else { return } }
-        let fingerprint = kind.rawValue + "|" + key
+        // Excerpt-only reports from older releases must not suppress the new
+        // attachment-capable diagnostic for another 30 days; event grouping stays stable.
+        let fingerprint = kind.rawValue + "|" + key + (kind == .pipelineCompile ? "|shader-attachments" : "")
+        let hasSource = kind == .pipelineCompile && LineScanner.hasShaderSource(extra)
         let allowed: Bool = locked {
-            guard !reportedThisProcess.contains(fingerprint), kindCounts[kind, default: 0] < kind.budget,
-                  reportedThisProcess.count < 12 else { return false }
-            reportedThisProcess.insert(fingerprint)
+            guard kindCounts[kind, default: 0] < kind.budget, reportedThisProcess.count < 12,
+                  ReportedStore.claimInProcess(fingerprint, hasSource: hasSource, seen: &reportedThisProcess) else { return false }
             kindCounts[kind, default: 0] += 1
             return true
         }
-        guard allowed, test || ReportedStore.claim(fingerprint, quietPeriod: kind.quietPeriod) else { return }
+        guard allowed, test || ReportedStore.claim(fingerprint, quietPeriod: kind.quietPeriod, hasSource: hasSource) else { return }
         let event = Event(level: kind == .test ? .info : level)
         event.message = SentryMessage(formatted: String(scrub(message).prefix(2000)))
         event.fingerprint = [kind.rawValue, String(key.prefix(200))]
-        if !extra.isEmpty { event.extra = extra.mapValues { String(scrub($0).prefix(8000)) } }
+        if !extra.isEmpty {
+            let limit = kind == .pipelineCompile ? FailedShaderAttachments.extraLimit : 8000
+            event.extra = extra.mapValues { String(scrub($0).prefix(limit)) }
+        }
         if kind == .gpuContextFatal || kind == .vmKilled, let dir = role == .launcher ? runDir : Supervisor.runDir,
            let history = try? String(contentsOfFile: dir + "/gpu-history.txt", encoding: .utf8) {
             var diagnostics = event.extra ?? [:]
@@ -682,7 +725,12 @@ enum CrashReporting {
             t.merge(vm) { old, _ in old }
         }
         let scoped = t.mapValues { String(scrub($0).prefix(200)) }
-        let id = SentrySDK.capture(event: event) { scope in scope.setTags(scoped) }.sentryIdString
+        let attachments = kind == .pipelineCompile ? locked { failedShaderAttachments.claim(extra: extra, scrub: scrub) } : []
+        let id = SentrySDK.capture(event: event) { scope in
+            scope.setTags(scoped)
+            for attachment in attachments { scope.addAttachment(attachment) }
+            if kind == .installationIncomplete { scope.clearBreadcrumbs() }
+        }.sentryIdString
         locked { lastEvent = id }
         if let dir = role == .launcher ? runDir : Supervisor.runDir {
             try? id.write(toFile: dir + "/last-event-id", atomically: true, encoding: .utf8)
@@ -801,6 +849,16 @@ enum CrashReporting {
     /// crash site and libmalloc's message (STEAMAC-31); an app bundle is no disk image (STEAMAC-15).
     static func exitSelfCheck() -> [String] {
         var failures: [String] = []
+        failures += MemoryWatch.selfCheck()
+        let memoryExit = VMExit(status: 128 + SIGKILL, detail: 0, peakFootprint: 6910 << 20)
+        let memoryText = memoryExit.footprintSummary(vmMemoryMiB: "4096", physicalMemory: 8 << 30)
+        if memoryExit.killedForMemory || !memoryText.contains("peak/guest-RAM=1.69x")
+            || !memoryText.contains("peak/host-RAM=0.84x") || !memoryText.contains("not a process limit") {
+            failures.append("kill: peak footprint must include memory beyond configured guest RAM without asserting jetsam")
+        }
+        if !VMExit(status: 128 + SIGKILL).footprintSummary(vmMemoryMiB: nil).contains("peak footprint ?") {
+            failures.append("kill: missing memory evidence must remain unknown")
+        }
         let dir = NSTemporaryDirectory() + "steamac-exit-check-\(getpid())"
         try? FileManager.default.createDirectory(atPath: dir + "/Apps.app/Contents", withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: dir) }
@@ -812,7 +870,7 @@ enum CrashReporting {
         }
         FileManager.default.createFile(atPath: dir + "/steamos.img", contents: Data(count: 512))
         if AppBundle.isDiskImage(dir + "/Apps.app") { failures.append("disk: an app bundle is a disk image") }
-        if !AppBundle.isDiskImage(dir + "/steamos.img") { failures.append("disk: a file is no disk image") }
+        if AppBundle.isDiskImage(dir + "/steamos.img") { failures.append("disk: a file without a SteamOS GPT is a disk image") }
         let header = #"{"app_name":"steamac-vm","bug_type":"309","name":"steamac-vm"}"#
         let body = #"""
             {"pid": 4242, "exception": {"type": "EXC_BREAKPOINT", "signal": "SIGTRAP", "subtype": "Trace/BPT trap: 5"},
@@ -837,6 +895,54 @@ enum CrashReporting {
         if crash?.exception != "EXC_BREAKPOINT SIGTRAP: Trace/BPT trap: 5" || crash?.frames.count != 4
             || crash?.frames.last != "??? + 0x7b" {
             failures.append("crash report: \(crash?.summary ?? "nil")")
+        }
+        var capture = ""
+        if SystemCrashReport.find(pid: 4242, timeout: 0, directory: dir + "/missing", diagnostics: &capture) != nil
+            || !capture.contains("directory error") {
+            failures.append("crash capture: missing report directory is not diagnosed")
+        }
+        capture = ""
+        if SystemCrashReport.find(pid: 4242, timeout: 0, directory: dir, diagnostics: &capture) != nil
+            || !capture.contains("recent=0") || !capture.contains("pid=4242") {
+            failures.append("crash capture: no report after timeout is not diagnosed")
+        }
+        do {
+            let fixture = dir + "/steamac-vm-fixture.ips"
+            try (header + "\n" + body).write(toFile: fixture, atomically: true, encoding: .utf8)
+            capture = ""
+            if SystemCrashReport.find(pid: 4243, timeout: 0, directory: dir, diagnostics: &capture) != nil
+                || !capture.contains("other-pid=1") {
+                failures.append("crash capture: wrong-pid report is not diagnosed")
+            }
+            capture = ""
+            if SystemCrashReport.find(pid: 4242, timeout: 0, directory: dir, diagnostics: &capture)?.site != crash?.site
+                || !capture.contains("found") {
+                failures.append("crash capture: matching report is not captured")
+            }
+            try (header + "\n" + body.prefix(100)).write(toFile: fixture, atomically: true, encoding: .utf8)
+            capture = ""
+            if SystemCrashReport.find(pid: 4242, timeout: 0, directory: dir, diagnostics: &capture) != nil
+                || !capture.contains("incomplete=1") {
+                failures.append("crash capture: incomplete report is not diagnosed")
+            }
+        } catch { failures.append("crash capture fixture: \(error)") }
+        let incomplete = Event(level: .fatal)
+        let native = Exception(value: "Signal 10, Code 1", type: "SIGBUS")
+        native.mechanism = Mechanism(type: "signal")
+        incomplete.exceptions = [native]
+        _ = scrub(event: incomplete)
+        if incomplete.tags?["process"] != role.rawValue || incomplete.tags?["native_crash_context"] != "incomplete" {
+            failures.append("native crash: tagless cached signal lost its cache-process identity")
+        }
+        if incomplete.tags?["device"] != nil || incomplete.tags?["macos"] != nil {
+            failures.append("native crash: current host mislabeled as historical crash host")
+        }
+        let complete = Event(level: .fatal)
+        complete.exceptions = [native]
+        complete.tags = ["process": "vm", "device": "old-device"]
+        _ = scrub(event: complete)
+        if complete.tags?["process"] != "vm" || complete.tags?["native_crash_context"] != nil {
+            failures.append("native crash: existing crash process identity overwritten")
         }
         log("selftest-settings: exit check: force quit, crash report, disk image: "
             + (failures.isEmpty ? "ok" : failures.joined(separator: "; ")))
@@ -868,6 +974,195 @@ enum CrashReporting {
         if scanner.nativeException.first != exception || scanner.nativeException.last?.contains("_NSString_getCString") != true {
             failures.append("scanner: native exception reason or first-throw stack lost")
         }
+        var pipeline = LineScanner()
+        let pipelineLines = ["[mvk-error] VK_ERROR_INITIALIZATION_FAILED: Render pipeline compile failed (Error code 3):",
+                             "Compiler encountered an internal error.",
+                             "[mvk-msl] // Metal pipeline descriptor: alphaToCoverage=0",
+                             "[mvk-msl] // Pipeline failure MSL stage=0 entry=main bytes=4000 lines=140 capture=full"]
+            + (1...140).map { "[mvk-msl] \($0): vertex line \($0)" }
+            + ["[mvk-msl] // Pipeline failure MSL stage=4 entry=main bytes=20 lines=1 capture=full",
+               "[mvk-msl] 1: fragment float4 main() {}",
+               "[mvk-msl] // Vulkan static blend attachment=0 enabled=1",
+               "[mvk-msl] // Failed graphics pipeline stage interfaces",
+               "[mvk-msl] // fragment entry=main",
+               "[mvk-msl] // in location=0",
+               "[mvk-msl] // color-attachment 0 format=80"]
+        let pipelines = pipelineLines.flatMap { pipeline.feed($0) } + pipeline.flushPending()
+        if pipelines.count != 1 || pipelines.first?.extra["msl_stage_0"]?.contains("140: vertex line 140") != true
+            || pipelines.first?.extra["msl_stage_4"]?.contains("fragment float4 main") != true
+            || pipelines.first?.extra["msl_interfaces"]?.contains("color-attachment") != true
+            || pipelines.first?.extra["msl_interfaces"]?.contains("Vulkan static blend") != true
+            || pipelines.first?.extra["msl_interfaces"]?.contains("Metal pipeline descriptor") != true {
+            failures.append("scanner: later shader stages or pipeline interfaces lost after vertex source")
+        }
+        var capped = LineScanner()
+        let large = Array(pipelineLines.prefix(3))
+            + ["[mvk-msl] // Pipeline failure MSL stage=0 entry=main"]
+            + (1...6000).map { "[mvk-msl] \($0): " + String(repeating: "v", count: 80) }
+            + Array(pipelineLines.suffix(7))
+        let bounded = large.flatMap { capped.feed($0) } + capped.flushPending()
+        if bounded.first?.extra.values.contains(where: { $0.count > LineScanner.mslLimit }) != false
+            || bounded.first?.extra["msl_stage_0"]?.contains("1400: ") != true
+            || bounded.first?.extra["msl_stage_4"]?.contains("fragment float4 main") != true {
+            failures.append("scanner: replayable shader source cap lost or crowded out fragment source")
+        }
+        var library = LineScanner()
+        let libraryLines = ["[mvk-error] VK_ERROR_INITIALIZATION_FAILED: Shader library compile failed (Error code 3):",
+                            "program_source:299:11: error: cannot initialize float from float4",
+                            "[mvk-msl] // Library failure MSL bytes=40000 lines=1107 capture=full"]
+            + (1...1107).map { "[mvk-msl] \($0): shader line \($0)" }
+        let libraries = libraryLines.flatMap { library.feed($0) } + library.flushPending()
+        if libraries.count != 1 || libraries.first?.extra["msl_error_context"]?.contains("1107: shader line 1107") != true {
+            failures.append("scanner: full library source lost after 120 lines")
+        }
+        var compute = LineScanner()
+        let computeLines = ["[mvk-error] VK_ERROR_INITIALIZATION_FAILED: Compute pipeline compile failed (Error code 3):",
+                            "Compiler encountered an internal error.",
+                            "[mvk-msl] // Compute pipeline diagnostics: entry=main hash=1 workgroup=64x1x1",
+                            "[mvk-msl] // Metal pipeline descriptor: maxTotalThreadsPerThreadgroup=64",
+                            "[mvk-msl] // Pipeline failure MSL stage=5 entry=main capture=full",
+                            "[mvk-msl] 1: kernel void main0() {}"]
+        let computes = computeLines.flatMap { compute.feed($0) } + compute.flushPending()
+        if computes.count != 1 || computes.first?.extra["msl_stage_5"]?.contains("kernel void") != true {
+            failures.append("scanner: compute diagnostic preamble split the shader report")
+        }
+        var cache = LineScanner()
+        let cacheLines = ["[mvk-error] VK_ERROR_INITIALIZATION_FAILED: Shader library compile failed (Error code 3):",
+                          "error: unable to open output file '/var/folders/steamac-selftest/com.apple.metalfe/306AKY0LJMPLL/monolithic_metal.pcm': 'Operation not permitted'",
+                          "program_source:1:10: fatal error: could not build module 'monolithic_metal'"]
+        let caches = cacheLines.flatMap { cache.feed($0) } + cache.flushPending()
+        if caches.count != 1 || caches.first?.extra["metal_cache_probe"]?.contains("306AKY0LJMPLL") != true {
+            failures.append("scanner: runtime Metal module-cache diagnostics lost")
+        }
+        var interrupted = LineScanner()
+        let interruptedLines = [
+            "[mvk-error] VK_ERROR_INITIALIZATION_FAILED: Shader library compile failed (Error code 3):",
+            "Compilation failed due to an interrupted connection: XPC_ERROR_CONNECTION_INTERRUPTED. This error occurred after multiple retries.",
+            "[mvk-msl] // Library failure MSL bytes=32 lines=1 capture=full",
+            "[mvk-msl] 1: vertex float4 MainVs() { return 0; }",
+        ]
+        let interruptions = interruptedLines.flatMap { interrupted.feed($0) } + interrupted.flushPending()
+        if interruptions.count != 1
+            || interruptions.first?.extra["host_memory"]?.contains("pressure") != true
+            || interruptions.first?.extra["msl_error_context"]?.contains("MainVs") != true {
+            failures.append("scanner: interrupted Metal compiler lost memory pressure or shader context")
+        }
+        var interleaved = LineScanner()
+        let interleavedLines = [
+            "[mvk-error] VK_ERROR_INITIALIZATION_FAILED: Render pipeline compile failed (Error code 2):",
+            "Undefined symbols:", "  llvm.agx2.sample.itrproj.1xf, referenced from: VkMain", ".",
+            "[steamac-vm] no-picture: shown after 5.0 s (black picture 100.0%)",
+            "[mvk-msl] // Metal pipeline descriptor: sampleCount=1",
+            "[steamac-vm] memory: unrelated thread",
+            "[mvk-msl] // Pipeline failure MSL stage=4 entry=VkMain capture=full",
+            "[mvk-msl] 1: fragment float4 VkMain() { return 0.0; }",
+            LineScanner.virglLine("vkr: pipeline 2207 creation failed on host; draws using it will be skipped"),
+        ]
+        let interleavedReports = interleavedLines.flatMap { interleaved.feed($0) } + interleaved.flushPending()
+        if interleavedReports.count != 1
+            || interleavedReports.first?.extra["msl_stage_4"]?.contains("VkMain()") != true
+            || interleavedReports.first?.extra["msl_interfaces"]?.contains("sampleCount=1") != true {
+            failures.append("scanner: interleaved launcher lines closed the Metal report before source")
+        }
+        let source = ["msl_stage_4": "// Pipeline failure MSL stage=4\n1: fragment float4 VkMain() {}"]
+        if LineScanner.hasShaderSource(["msl_stage_4": "// Pipeline failure MSL stage=4"])
+            || !LineScanner.hasShaderSource(source) {
+            failures.append("scanner: source enrichment confused a stage header with shader source")
+        }
+        // STEAMAC-AD: fields are truncated by Sentry at 16 KiB. Reconstruct exact
+        // scrubbed source into bounded, event-scoped attachments without networking.
+        func shaderFixture(bytes: Int) -> String {
+            var lines = Array(repeating: "// shader attachment padding", count: 1137)
+            lines[568] = "kernel void sentryAttachmentMiddle() {}"
+            lines[0] = "// /Users/steamac-attachment-test/private/shader.metal"
+            let padding = bytes - lines.reduce(0) { $0 + $1.utf8.count + 1 }
+            let each = padding / lines.count, extra = padding % lines.count
+            for index in lines.indices { lines[index] += String(repeating: "x", count: each + (index < extra ? 1 : 0)) }
+            return lines.joined(separator: "\n") + "\n"
+        }
+        func shaderExtra(_ source: String, library: Bool = false, full: Bool = true) -> [String: String] {
+            let lines = source.split(separator: "\n", omittingEmptySubsequences: false).dropLast(source.hasSuffix("\n") ? 1 : 0)
+            let header = "// \(library ? "Library failure MSL" : "Pipeline failure MSL stage=5 entry=main0")"
+                + " bytes=\(source.utf8.count) lines=\(lines.count) capture=\(full ? "full" : "excerpt")"
+            var scanner = LineScanner()
+            let log = ["[mvk-error] VK_ERROR_INITIALIZATION_FAILED: \(library ? "Shader library" : "Compute pipeline") compile failed (Error code 2):",
+                       "[mvk-msl] " + header]
+                + lines.enumerated().map { "[mvk-msl] \($0.offset + 1): \($0.element)" }
+            return (log.flatMap { scanner.feed($0) } + scanner.flushPending()).first?.extra ?? [:]
+        }
+        let adSource = shaderFixture(bytes: 112824)
+        var attachments = FailedShaderAttachments()
+        let attached = attachments.claim(extra: shaderExtra(adSource), scrub: scrub)
+        if attached.count != 1 || attached.first?.data != Data(scrub(adSource).utf8)
+            || attached.first?.filename.hasPrefix("shader-") != true
+            || attached.first?.filename.hasSuffix(".metal") != true {
+            failures.append("scanner: AD-sized source did not become a complete scrubbed shader attachment")
+        }
+        if !attachments.claim(extra: shaderExtra(adSource, library: true), scrub: scrub).isEmpty {
+            failures.append("scanner: the same library/pipeline shader attachment was not deduplicated")
+        }
+        let maximum = shaderFixture(bytes: FailedShaderAttachments.sourceLimit)
+        let maxAttachments = attachments.claim(extra: shaderExtra(maximum), scrub: scrub)
+        if maxAttachments.count != 1 || maxAttachments.first?.data != Data(scrub(maximum).utf8)
+            || !attachments.claim(extra: shaderExtra("kernel void thirdShader() {}\n"), scrub: scrub).isEmpty {
+            failures.append("scanner: shader attachment byte limit or two-per-process budget failed")
+        }
+        for invalid in [shaderExtra(adSource, full: false), shaderExtra(shaderFixture(bytes: FailedShaderAttachments.sourceLimit + 1)),
+                        shaderExtra(String(repeating: "\n", count: 8193))] {
+            var rejected = FailedShaderAttachments()
+            if !rejected.claim(extra: invalid, scrub: scrub).isEmpty {
+                failures.append("scanner: excerpt or over-limit shader became a complete-source attachment")
+            }
+        }
+        var malformed = shaderExtra(adSource)
+        malformed["msl_stage_5"] = malformed["msl_stage_5"]?.replacingOccurrences(of: "\n2: ", with: "\n3: ")
+        var incomplete = FailedShaderAttachments()
+        if !incomplete.claim(extra: malformed, scrub: scrub).isEmpty {
+            failures.append("scanner: numbered source with a gap became an attachment")
+        }
+        let noNewline = "kernel void sentryNoFinalNewline() {}"
+        var finalLine = FailedShaderAttachments()
+        if finalLine.claim(extra: shaderExtra(noNewline, library: true), scrub: scrub).first?.data != Data(noNewline.utf8) {
+            failures.append("scanner: library shader without a final newline changed in its attachment")
+        }
+        var processClaims: [String: Bool] = [:]
+        let claimed = [
+            ReportedStore.claimInProcess("shader", hasSource: false, seen: &processClaims),
+            ReportedStore.claimInProcess("shader", hasSource: false, seen: &processClaims),
+            ReportedStore.claimInProcess("shader", hasSource: true, seen: &processClaims),
+            ReportedStore.claimInProcess("shader", hasSource: true, seen: &processClaims),
+            ReportedStore.claimInProcess("shader", hasSource: false, seen: &processClaims),
+        ]
+        if claimed != [true, false, true, false, false] {
+            failures.append("scanner: in-process source enrichment was not limited to once")
+        }
+        let storeRoot = NSTemporaryDirectory() + "steamac-report-store-" + UUID().uuidString
+        let store = storeRoot + "/reported.json"
+        defer { try? FileManager.default.removeItem(atPath: storeRoot) }
+        let claims = [
+            ReportedStore.claim("shader", quietPeriod: 1000, at: store, now: 100),
+            ReportedStore.claim("shader", quietPeriod: 1000, at: store, now: 101),
+            ReportedStore.claim("shader", quietPeriod: 1000, hasSource: true, at: store, now: 102),
+            ReportedStore.claim("shader", quietPeriod: 1000, hasSource: true, at: store, now: 103),
+            ReportedStore.claim("shader", quietPeriod: 1000, at: store, now: 104),
+        ]
+        if claims != [true, false, true, false, false] {
+            failures.append("scanner: persistent source enrichment was not limited to once")
+        }
+        do {
+            guard ReportedStore.claim("installation", quietPeriod: .infinity, at: store, now: 100) else {
+                throw OptionError("first permanent report was suppressed")
+            }
+            guard var entries = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: store))) as? [String: Double] else {
+                throw OptionError("report store is not a timestamp dictionary")
+            }
+            for i in 0..<2100 { entries["prune-\(i)"] = 10_000_000 + Double(i) }
+            try JSONSerialization.data(withJSONObject: entries).write(to: URL(fileURLWithPath: store))
+            guard ReportedStore.claim("prune", quietPeriod: 1000, at: store, now: 10_003_000),
+                  !ReportedStore.claim("installation", quietPeriod: .infinity, at: store, now: 100_000_000) else {
+                throw OptionError("permanent report was lost to age/count pruning")
+            }
+        } catch { failures.append("scanner: permanent report store: \(error)") }
         log("selftest-settings: scanner check: \(LineScanner.teardownSample.count) teardown lines → no report, "
             + "\(LineScanner.fatalSample.count) fatal lines → one report each: "
             + (failures.isEmpty ? "ok" : failures.joined(separator: "; ")))
@@ -910,6 +1205,16 @@ enum CrashReporting {
 
     /// Last line of defence for every event (crash reports from earlier runs included).
     static func scrub(event e: Event) -> Event {
+        // STEAMAC-4: a minimal native signal report can lack the crash-time scope entirely.
+        // Caches are process-role-specific: this identity is safe even when uploading an old
+        // crash. Never backfill host/driver/boot tags from the current run.
+        if e.tags?["process"] == nil, e.threads?.isEmpty != false,
+           e.exceptions?.contains(where: { $0.mechanism?.type == "signal" && $0.stacktrace == nil }) == true {
+            var nativeTags = e.tags ?? [:]
+            nativeTags["process"] = role.rawValue
+            nativeTags["native_crash_context"] = "incomplete"
+            e.tags = nativeTags
+        }
         e.serverName = nil
         if let m = e.message { e.message = SentryMessage(formatted: scrub(m.formatted)) }
         if let u = e.user {
@@ -1030,12 +1335,66 @@ private struct LineScanner {
         var extra: [String: String] = [:]
     }
 
-    /// MoltenVK (patch) logs the source of a shader library that failed to compile after the
-    /// error: the first 40 lines, a "... (N lines total)" line, then "L: text" around each
-    /// error location.
+    /// MoltenVK logs complete bounded small shaders, or excerpts of larger sources,
+    /// after compilation fails. Keep each stage separate from descriptors and interfaces.
     static let mslPrefix = "[mvk-msl] "
+    static let mslLimit = FailedShaderAttachments.recordLimit  // Bounded source + prefixes, at most eight stages.
 
-    private var pending: (kind: CrashReporting.Kind, header: String, lines: [String], msl: [String])?
+    private final class Pending {
+        let kind: CrashReporting.Kind
+        let header: String
+        var lines: [String] = []
+        var msl: [String] = []
+        var mslCount = 0
+        var stage: String?
+        var stages: [String: String] = [:]
+        var interfaces = ""
+        var stageCounts: [String: Int] = [:]
+        var interfaceCount = 0
+
+        init(kind: CrashReporting.Kind, header: String) { self.kind = kind; self.header = header }
+
+        func appendMSL(_ text: String) {
+            if text.hasPrefix("// Metal pipeline descriptor:") || text.hasPrefix("// Vulkan static blend ")
+                || text.hasPrefix("// color-attachment ") {
+                appendInterface(text)
+                return
+            }
+            let prefix = "// Pipeline failure MSL stage="
+            if text.hasPrefix(prefix),
+               let number = Int(text.dropFirst(prefix.count).prefix(while: { $0.isNumber })),
+               (0...63).contains(number), stages.count < 8 || stages[String(number)] != nil {
+                stage = String(number)
+            } else if text.hasPrefix("// Failed graphics pipeline stage interfaces") {
+                stage = nil
+            }
+            // Retain complete attachment candidates independently of short extras.
+            // Maintain counts while appending: rescanning each growing Swift String
+            // for every shader line makes large failure records quadratic.
+            if let stage {
+                let count = stageCounts[stage, default: 0]
+                let addition = String((text + "\n").prefix(max(0, LineScanner.mslLimit - count)))
+                stages[stage, default: ""] += addition
+                stageCounts[stage, default: 0] += addition.count
+            } else if !stages.isEmpty {
+                appendInterface(text)
+            } else if mslCount < LineScanner.mslLimit {
+                let line = String(text.prefix(LineScanner.mslLimit - mslCount))
+                msl.append(line)
+                mslCount += line.count + 1
+            }
+        }
+
+        private func appendInterface(_ text: String) {
+            guard interfaceCount < LineScanner.mslLimit else { return }
+            let addition = String((text + "\n").prefix(LineScanner.mslLimit - interfaceCount))
+            interfaces += addition
+            interfaceCount += addition.count
+        }
+
+        var hasMSL: Bool { !msl.isEmpty || !stages.isEmpty || !interfaces.isEmpty }
+    }
+    private var pending: Pending?
     private var multiSerial: Int?
     /// Newest multi-line message still open; CrashReporting reports it after a pause.
     var pendingSerial: Int? { multiSerial }
@@ -1065,23 +1424,28 @@ private struct LineScanner {
                 nativeException.append(String(line.prefix(500)))
             }
         }
-        if var p = pending {
+        if let p = pending {
             if p.kind == .pipelineCompile && line.hasPrefix(Self.mslPrefix) {
-                if p.msl.count < 120 { p.msl.append(String(line.dropFirst(Self.mslPrefix.count))) }
-                pending = p
+                p.appendMSL(String(line.dropFirst(Self.mslPrefix.count)))
                 return out
             }
             let continuation = !line.hasPrefix("[") && !line.hasPrefix("thread '")
-            if continuation && p.lines.count >= 6 && p.kind == .pipelineCompile && p.msl.isEmpty {
+            if continuation && p.lines.count >= 6 && p.kind == .pipelineCompile && !p.hasMSL {
                 return out   // more compiler output than the report keeps; the source may follow
             }
-            if continuation && p.lines.count < 6 && p.msl.isEmpty && !line.trimmingCharacters(in: .whitespaces).isEmpty {
+            if continuation && p.lines.count < 6 && !p.hasMSL && !line.trimmingCharacters(in: .whitespaces).isEmpty {
                 p.lines.append(line)
-                pending = p
                 if p.kind == .rustPanic { out.append(finish()) }
                 return out
             }
-            out.append(finish())
+            // Other stderr writers can interleave between Metal's error and its MSL.
+            // Keep the report open until its renderer completion, another Metal error,
+            // a real fatal event, or the existing timeout/EOF flush.
+            if p.kind != .pipelineCompile || line.hasPrefix("[mvk-error]") || line.hasPrefix("[mvk-warn]")
+                || line.contains("vkr: pipeline ") && line.contains("creation failed on host") || Self.isGPUFatal(line)
+                || line.hasPrefix("thread '") && line.contains("panicked at") {
+                out.append(finish())
+            }
         }
         if line.hasPrefix("[steamac-vm] error: ") || line.hasPrefix("[steamac-vm] provision failed") {
             lastError = String(line.dropFirst("[steamac-vm] ".count).prefix(300))
@@ -1105,6 +1469,14 @@ private struct LineScanner {
     mutating func flushPending(serial only: Int? = nil) -> [Finding] {
         guard pending != nil, only == nil || only == multiSerial else { return [] }
         return [finish()]
+    }
+
+    static func hasShaderSource(_ extra: [String: String]) -> Bool {
+        extra.contains { key, value in
+            if key == "msl_error_context" { return !value.isEmpty }
+            if key == "msl_source" { return value.contains("#include") || value.contains("using namespace metal;") }
+            return key.hasPrefix("msl_stage_") && value.contains("\n1: ")
+        }
     }
 
     private static func isGPUFatal(_ line: String) -> Bool {
@@ -1172,7 +1544,7 @@ private struct LineScanner {
     private mutating func begin(_ kind: CrashReporting.Kind, _ header: String) {
         serial += 1
         multiSerial = serial
-        pending = (kind, header, [], [])
+        pending = Pending(kind: kind, header: header)
     }
 
     private mutating func finish() -> Finding {
@@ -1193,6 +1565,16 @@ private struct LineScanner {
             let head = p.msl.filter { !isContext($0) }, context = p.msl.filter(isContext)
             if !head.isEmpty { f.extra["msl_source"] = head.joined(separator: "\n") }
             if !context.isEmpty { f.extra["msl_error_context"] = context.joined(separator: "\n") }
+            for (stage, source) in p.stages { f.extra["msl_stage_" + stage] = source }
+            if !p.interfaces.isEmpty { f.extra["msl_interfaces"] = p.interfaces }
+            if let cache = MetalCompilerCache.failureDiagnostics(p.header + "\n" + detail) {
+                f.extra["metal_cache_probe"] = cache
+            }
+            if p.kind == .pipelineCompile && f.message.contains("XPC_ERROR_CONNECTION_INTERRUPTED") {
+                // An interrupted compiler service may have crashed or been killed. Free RAM alone
+                // cannot distinguish pressure from normal compression (STEAMAC-3X).
+                f.extra["host_memory"] = CrashReporting.HostMemory.current().summary
+            }
             return f
         }
     }
@@ -1206,18 +1588,40 @@ private enum ReportedStore {
         NSHomeDirectory() + "/Library/Caches/" + LauncherSettings.defaultDomain + "/sentry/reported.json"
     }
 
+    /// Source-less pipeline reports may be enriched once, without changing their Sentry fingerprint.
+    static func claimInProcess(_ fingerprint: String, hasSource: Bool, seen: inout [String: Bool]) -> Bool {
+        if let previous = seen[fingerprint], previous || !hasSource { return false }
+        seen[fingerprint] = hasSource
+        return true
+    }
+
     /// True (and recorded) unless the fingerprint was reported within `quietPeriod`.
-    static func claim(_ fingerprint: String, quietPeriod: TimeInterval) -> Bool {
+    static func claim(_ fingerprint: String, quietPeriod: TimeInterval, hasSource: Bool = false,
+                      at storePath: String? = nil, now: TimeInterval = Date().timeIntervalSince1970) -> Bool {
         guard quietPeriod > 0 else { return true }
         lock.lock()
         defer { lock.unlock() }
-        let now = Date().timeIntervalSince1970
+        let path = storePath ?? Self.path
         var seen = (FileManager.default.contents(atPath: path)
             .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Double]) ?? [:]
-        if let last = seen[fingerprint], now - last < quietPeriod { return false }
-        seen = seen.filter { now - $0.value < 60 * 86400 }
-        if seen.count > 2000 { seen = Dictionary(uniqueKeysWithValues: seen.sorted { $0.value > $1.value }.prefix(1500).map { ($0.key, $0.value) }) }
-        seen[fingerprint] = now
+        let sourceKey = "msl-source|" + fingerprint
+        let permanentKey = "permanent|" + fingerprint
+        if seen[permanentKey] != nil { return false }
+        if let last = seen[hasSource ? sourceKey : fingerprint], now - last < quietPeriod { return false }
+        seen = seen.filter { $0.key.hasPrefix("permanent|") || now - $0.value < 60 * 86400 }
+        if seen.count > 2000 {
+            let permanent = seen.filter { $0.key.hasPrefix("permanent|") }
+            let recent = seen.filter { !$0.key.hasPrefix("permanent|") }
+                .sorted { $0.value > $1.value }.prefix(max(0, 2000 - permanent.count))
+            seen = permanent
+            for (key, value) in recent { seen[key] = value }
+        }
+        if quietPeriod.isInfinite {
+            seen[permanentKey] = now
+        } else {
+            seen[fingerprint] = now
+            if hasSource { seen[sourceKey] = now }
+        }
         try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: seen) {
             try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
@@ -1330,6 +1734,20 @@ struct VMExit {
     /// The kernel's memorystatus (jetsam) killed it.
     var killedForMemory: Bool { (detail ?? 0) & UInt32(NOTE_EXIT_MEMORY) != 0 }
 
+    func footprintSummary(vmMemoryMiB: String?, physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> String {
+        var text = "VM memory \(vmMemoryMiB ?? "?") MiB; VM process peak footprint "
+            + (peakFootprint.map(CrashReporting.gib) ?? "?")
+        if let peakFootprint {
+            if let vmMemoryMiB, let mib = Double(vmMemoryMiB), mib > 0 {
+                text += String(format: "; peak/guest-RAM=%.2fx", Double(peakFootprint) / (mib * 1_048_576))
+            }
+            if physicalMemory > 0 {
+                text += String(format: "; peak/host-RAM=%.2fx", Double(peakFootprint) / Double(physicalMemory))
+            }
+        }
+        return text + "; guest RAM is not a process limit (GPU/renderer allocations are additional)"
+    }
+
     /// phys_footprint and its lifetime peak of a running or zombie process, bytes.
     static func footprint(pid: pid_t) -> (current: UInt64, peak: UInt64)? {
         var ri = rusage_info_v4()
@@ -1360,21 +1778,50 @@ struct SystemCrashReport {
     static let directory = NSHomeDirectory() + "/Library/Logs/DiagnosticReports"
 
     /// The report of process `pid`, waiting up to `timeout` for ReportCrash to write it.
-    static func find(pid: pid_t, timeout: TimeInterval) -> SystemCrashReport? {
-        guard pid > 0 else { return nil }
-        let deadline = Date().addingTimeInterval(timeout)
+    static func find(pid: pid_t, timeout: TimeInterval, directory: String = directory,
+                     diagnostics: inout String) -> SystemCrashReport? {
+        guard pid > 0 else {
+            diagnostics = "unavailable: invalid pid=\(pid)"
+            return nil
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        let deadline = started + timeout
         while true {
-            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            let names: [String]
+            do { names = try FileManager.default.contentsOfDirectory(atPath: directory) }
+            catch {
+                let e = error as NSError
+                diagnostics = "unavailable: pid=\(pid); directory error \(e.domain) \(e.code)"
+                return nil
+            }
+            var recent = 0, unreadable = 0, incomplete = 0, otherPid = 0
             for name in names where name.hasPrefix("steamac-vm") && name.hasSuffix(".ips") {
                 let path = directory + "/" + name
                 guard let modified = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date,
-                      Date().timeIntervalSince(modified) < 600,
-                      let text = try? String(contentsOfFile: path, encoding: .utf8),
-                      let report = parse(text, pid: pid) else { continue }
-                return report
+                      abs(Date().timeIntervalSince(modified)) < 600 else { continue }
+                recent += 1
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+                    unreadable += 1
+                    continue
+                }
+                if let report = parse(text, pid: pid) {
+                    diagnostics = "found: pid=\(pid); waited=\(String(format: "%.2f", ProcessInfo.processInfo.systemUptime - started))s; frames=\(report.frames.count)"
+                    return report
+                }
+                if let newline = text.firstIndex(of: "\n"),
+                   let body = try? JSONSerialization.jsonObject(with: Data(text[text.index(after: newline)...].utf8)) as? [String: Any],
+                   let reportedPid = body["pid"] as? Int, reportedPid != Int(pid) {
+                    otherPid += 1
+                } else {
+                    incomplete += 1
+                }
             }
-            guard Date() < deadline else { return nil }
-            Thread.sleep(forTimeInterval: 0.25)
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now < deadline else {
+                diagnostics = "unavailable: pid=\(pid); waited=\(String(format: "%.2f", now - started))s; recent=\(recent); unreadable=\(unreadable); incomplete=\(incomplete); other-pid=\(otherPid)"
+                return nil
+            }
+            Thread.sleep(forTimeInterval: min(0.25, deadline - now))
         }
     }
 
@@ -1426,6 +1873,17 @@ extension CrashReporting {
         /// kern.memorystatus_level: memory available to apps, percent.
         var availablePercent: Int?
         var summary: String
+        var swapUsed: UInt64?
+        var swapTotal: UInt64?
+
+        static func pressureRank(_ level: String) -> Int {
+            switch level {
+            case "normal": return 1
+            case "warning": return 2
+            case "critical": return 3
+            default: return 0
+            }
+        }
 
         static func pressureLevel() -> String {
             switch sysctlInt("kern.memorystatus_vm_pressure_level") {
@@ -1455,12 +1913,14 @@ extension CrashReporting {
             }
             var swap = xsw_usage()
             var size = MemoryLayout<xsw_usage>.size
-            if sysctlbyname("vm.swapusage", &swap, &size, nil, 0) == 0 {
+            let hasSwap = sysctlbyname("vm.swapusage", &swap, &size, nil, 0) == 0
+            if hasSwap {
                 parts.append("swap used \(gib(swap.xsu_used)) of \(gib(swap.xsu_total))")
             }
             parts.append("available \(available.map { "\($0) %" } ?? "?")")
             parts.append("pressure \(pressure)")
-            return HostMemory(pressure: pressure, availablePercent: available, summary: parts.joined(separator: ", "))
+            return HostMemory(pressure: pressure, availablePercent: available, summary: parts.joined(separator: ", "),
+                              swapUsed: hasSwap ? swap.xsu_used : nil, swapTotal: hasSwap ? swap.xsu_total : nil)
         }
 
         private static func sysctlInt(_ name: String) -> Int? {
@@ -1482,6 +1942,7 @@ private final class MemoryWatch: @unchecked Sendable {
     private var events: [(at: Date, level: String, footprint: UInt64?)] = []
     private var samples: [(at: Date, text: String)] = []
     private var nextSample = 0
+    private var sampledPeak: (at: Date, level: String, footprint: UInt64)?
 
     func start() {
         guard source == nil else { return }
@@ -1508,6 +1969,7 @@ private final class MemoryWatch: @unchecked Sendable {
             samples.removeAll(keepingCapacity: true)
             samples.reserveCapacity(12)
             nextSample = 0
+            sampledPeak = nil
         }
     }
 
@@ -1535,6 +1997,10 @@ private final class MemoryWatch: @unchecked Sendable {
             if samples.count < 12 { samples.append((at, text)) }
             else { samples[nextSample] = (at, text) }
             nextSample = (nextSample + 1) % 12
+            if CrashReporting.HostMemory.pressureRank(host.pressure)
+                > CrashReporting.HostMemory.pressureRank(sampledPeak?.level ?? "unknown") {
+                sampledPeak = (at, host.pressure, footprint.current)
+            }
         }
     }
 
@@ -1551,19 +2017,37 @@ private final class MemoryWatch: @unchecked Sendable {
         }
     }
 
+    static func selfCheck() -> [String] {
+        let watch = MemoryWatch()
+        // STEAMAC-S 30edebe2: dispatch events only say warning, but pre-exit
+        // sysctl samples caught critical; post-exit warning must not erase it.
+        watch.events = [(Date(), "warning", nil)]
+        watch.sampledPeak = (Date(), "critical", 31 << 30)
+        let summary = watch.summary(including: "normal")
+        if summary.maxLevel != "critical" || !summary.text.contains("sampled critical")
+            || !summary.text.contains("VM 31.0 GiB") {
+            return ["kill: sampled critical pressure lost when no dispatch event arrived"]
+        }
+        return []
+    }
+
     /// "normal at start; warning 5m12s ago (VM 14.2 GiB); critical 40s ago (VM 15.1 GiB)" and the
     /// highest level seen.
     func summary(including currentLevel: String) -> (text: String, maxLevel: String) {
-        let rank = ["normal": 1, "warning": 2, "critical": 3]
+        let rank = CrashReporting.HostMemory.pressureRank
         return lock.withLock {
             let now = Date()
             var max = currentLevel
             var parts: [String] = []
             for (i, e) in events.enumerated() {
-                if rank[e.level, default: 0] > rank[max, default: 0] { max = e.level }
+                if rank(e.level) > rank(max) { max = e.level }
                 let age = Int(now.timeIntervalSince(e.at))
                 let when = i == 0 ? "at start (\(age / 60)m\(age % 60)s ago)" : "\(age / 60)m\(age % 60)s ago"
                 parts.append("\(e.level) \(when)" + (e.footprint.map { " (VM \(CrashReporting.gib($0)))" } ?? ""))
+            }
+            if let peak = sampledPeak, rank(peak.level) > rank(max) {
+                max = peak.level
+                parts.append("sampled \(peak.level) \(Int(now.timeIntervalSince(peak.at))) s ago (VM \(CrashReporting.gib(peak.footprint)))")
             }
             return (parts.isEmpty ? "not watched" : parts.joined(separator: "; "), max)
         }

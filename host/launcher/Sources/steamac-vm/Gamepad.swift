@@ -107,14 +107,20 @@ final class PadPort {
     /// Bytes the pipe has not taken yet, whole lines in order. Beyond `maxPending` (the guest
     /// stopped reading) everything waiting is dropped and lines start clean again.
     private var pending: [UInt8] = []
+    /// One newest input per report ID: a state report must not replace a lizard key-up or
+    /// wireless Disconnect. Ordered commands promote these reports before appending a barrier.
+    private var latest: [UInt8: [UInt8]] = [:]
+    private var latestOrder: [UInt8] = []
+    private var latestBytes = 0
     private static let maxPending = 256 * 1024
     private var writable: DispatchSourceWrite?
     private var writableArmed = false
-    /// Guards `pending`, `writable`/`writableArmed` and their suspend/resume balance: HID input
-    /// reports call `sendLatest` on `hidQueue` while the main thread calls `send` (pad create /
+    /// Guards `pending`, `latest*`, `writable`/`writableArmed` and their suspend/resume balance: HID
+    /// input reports call `sendLatest` on `hidQueue` while the main thread calls `send` (pad create /
     /// remove, hid replies), so access is serialised — an unbalanced source or a torn `pending`
     /// would abort the process (same class as StallMonitor's suspended cancel).
     private var lock = os_unfair_lock()
+    private var reader: DispatchSourceRead?
 
     init(player index: Int = 0) throws {
         name = PadPort.name(player: index)
@@ -128,6 +134,21 @@ final class PadPort {
         _ = fcntl(writeFd, F_SETFL, fcntl(writeFd, F_GETFL) | O_NONBLOCK)
     }
 
+    deinit {
+        // Cancellation owns descriptors, so an in-flight handler cannot read/write a reused fd.
+        if let reader { reader.cancel() } else { Darwin.close(readFd) }
+        if let s = writable {
+            s.setEventHandler {}
+            // libdispatch must never release a suspended source.
+            if !writableArmed { s.resume() }
+            s.cancel()
+        } else {
+            Darwin.close(writeFd)
+        }
+        Darwin.close(guestOutputFd)
+        Darwin.close(guestInputFd)
+    }
+
     /// One host → guest line, after everything queued before it; false if it had to be dropped.
     /// Any thread (main, `hidQueue`).
     @discardableResult
@@ -135,6 +156,9 @@ final class PadPort {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
         let bytes = Array((line + "\n").utf8)
+        // A remove/create or feature reply is a barrier: older input belongs before it,
+        // never after the next device has been created on the same port.
+        promoteLatest()
         if pending.count + bytes.count > PadPort.maxPending {
             pending.removeAll()
             if bytes.count > PadPort.maxPending { return false }
@@ -146,40 +170,74 @@ final class PadPort {
         return true
     }
 
-    /// A line that a newer one replaces (an input report: each carries the whole state): sent
-    /// only if nothing older still waits, so a slow guest gets fewer, current reports.
+    /// Full-state input: replace only an unsent report with the same ID. Commands use send().
     @discardableResult
-    func sendLatest(_ line: String) -> Bool {
+    /// Any thread (main, `hidQueue`).
+    func sendLatest(_ line: String, reportID: UInt8) -> Bool {
+        let bytes = Array((line + "\n").utf8)
+        if bytes.count > PadPort.maxPending { return false }
         os_unfair_lock_lock(&lock)
-        let empty = pending.isEmpty
+        defer { os_unfair_lock_unlock(&lock) }
+        if !pending.isEmpty {
+            let previousSize = latest[reportID]?.count ?? 0
+            guard pending.count + latestBytes - previousSize + bytes.count <= PadPort.maxPending else { return false }
+            if latest.updateValue(bytes, forKey: reportID) != nil {
+                latestOrder.removeAll { $0 == reportID }
+            }
+            latestOrder.append(reportID)
+            latestBytes += bytes.count - previousSize
+            return true
+        }
+        pending = bytes
+        flushLocked()
+        return true
+    }
+
+    private func flush() {
+        os_unfair_lock_lock(&lock)
+        flushLocked()
         os_unfair_lock_unlock(&lock)
-        return empty ? send(line) : false
     }
 
     /// Caller holds `lock`.
     private func flushLocked() {
-        while !pending.isEmpty {
-            let n = pending.withUnsafeBytes { Darwin.write(writeFd, $0.baseAddress, $0.count) }
-            if n > 0 {
-                pending.removeFirst(n)
-            } else if n < 0 && errno == EINTR {
-                continue
-            } else {
-                break
+        while true {
+            while !pending.isEmpty {
+                let n = pending.withUnsafeBytes { Darwin.write(writeFd, $0.baseAddress, $0.count) }
+                if n > 0 {
+                    pending.removeFirst(n)
+                } else if n < 0 && errno == EINTR {
+                    continue
+                } else {
+                    armWritable(true)
+                    return
+                }
             }
+            guard !latest.isEmpty else {
+                armWritable(false)
+                return
+            }
+            promoteLatest()
         }
-        armWritable(!pending.isEmpty)
+    }
+
+    private func promoteLatest() {
+        guard !latest.isEmpty else { return }
+        pending.reserveCapacity(pending.count + latestBytes)
+        for id in latestOrder { pending.append(contentsOf: latest[id]!) }
+        latest.removeAll(keepingCapacity: true)
+        latestOrder.removeAll(keepingCapacity: true)
+        latestBytes = 0
     }
 
     private func armWritable(_ on: Bool) {
-        if writable == nil {
+        // Only create the write source when we need it armed. Creating it for `on: false`
+        // left a never-resumed (suspended) source that crashed in deinit during selftest.
+        if on, writable == nil {
             let s = DispatchSource.makeWriteSource(fileDescriptor: writeFd, queue: .main)
-            s.setEventHandler { [weak self] in
-                guard let self else { return }
-                os_unfair_lock_lock(&self.lock)
-                self.flushLocked()
-                os_unfair_lock_unlock(&self.lock)
-            }
+            s.setEventHandler { [weak self] in self?.flush() }
+            let fd = writeFd
+            s.setCancelHandler { Darwin.close(fd) }
             writable = s
         }
         guard on != writableArmed, let s = writable else { return }
@@ -187,15 +245,20 @@ final class PadPort {
         if on { s.resume() } else { s.suspend() }
     }
 
-    /// Reader thread: every complete line goes to `handler` on the main queue.
+    /// Nonblocking reader; cancellation closes its fd only after the last handler returns.
     func start(_ handler: @escaping (String) -> Void) {
-        let t = Thread { [readFd] in
-            var splitter = LineSplitter()
-            var buf = [UInt8](repeating: 0, count: 512)
+        guard reader == nil else { return }
+        _ = fcntl(readFd, F_SETFL, fcntl(readFd, F_GETFL) | O_NONBLOCK)
+        let source = DispatchSource.makeReadSource(fileDescriptor: readFd,
+                                                   queue: DispatchQueue(label: "steamac.\(name).read"))
+        var splitter = LineSplitter()
+        var buf = [UInt8](repeating: 0, count: 512)
+        source.setEventHandler { [weak self, readFd] in
             while true {
                 let n = Darwin.read(readFd, &buf, buf.count)
                 if n < 0 && errno == EINTR { continue }
-                if n <= 0 { break }
+                if n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) { return }
+                if n <= 0 { self?.reader?.cancel(); return }
                 buf.withUnsafeBytes { p in
                     splitter.feed(UnsafeRawBufferPointer(rebasing: p[0..<n])) { line in
                         let line = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -204,36 +267,78 @@ final class PadPort {
                 }
             }
         }
-        t.name = name
-        t.start()
+        let fd = readFd
+        source.setCancelHandler { Darwin.close(fd) }
+        reader = source
+        source.resume()
     }
+
+    /// Settings selftest: busy input coalesces per ID, with ordered device/command barriers.
+    static func coalesceSelfCheck() -> [String] {
+        var failures: [String] = []
+        var checks = 0
+        func check(_ ok: Bool, _ name: String) {
+            checks += 1
+            if !ok { failures.append("PadPort coalesce: \(name)") }
+        }
+        do {
+            let port = try PadPort(player: 3)
+            port.pending = Array("parked-control\n".utf8)
+            check(port.sendLatest("hid-input 4201", reportID: 0x42), "first report accepted while busy")
+            check(port.sendLatest("hid-input 0100", reportID: 1), "lizard key-up accepted while busy")
+            check(port.sendLatest("hid-input 4600", reportID: 0x46), "Disconnect accepted while busy")
+            check(port.sendLatest("hid-input 4202", reportID: 0x42), "same-ID state replaced while busy")
+            check(port.latest.count == 3, "independent report IDs retained")
+            port.send("remove")
+            port.send("hid-create NEW")
+            _ = fcntl(port.guestInputFd, F_SETFL, fcntl(port.guestInputFd, F_GETFL) | O_NONBLOCK)
+            var got = Data(), buf = [UInt8](repeating: 0, count: 4096)
+            while true {
+                let n = Darwin.read(port.guestInputFd, &buf, buf.count)
+                if n > 0 { got.append(contentsOf: buf[..<n]); continue }
+                if n < 0 && errno == EINTR { continue }
+                break
+            }
+            let lines = String(decoding: got, as: UTF8.self).split(separator: "\n").map(String.init)
+            check(port.pending.isEmpty && port.latest.isEmpty, "flush drained pending and latest")
+            check(lines == ["parked-control", "hid-input 0100", "hid-input 4600", "hid-input 4202",
+                            "remove", "hid-create NEW"], "per-ID latest precedes remove/create in order")
+        } catch {
+            failures.append("PadPort coalesce: setup \(error)")
+        }
+        log("selftest-settings: PadPort coalesce: \(checks) checks, \(failures.isEmpty ? "PASS" : failures.joined(separator: "; "))")
+        return failures
+    }
+
 }
 
 /// One of the guest's gamepads: player `index` + 1, over its own PadPort. Fed from the
 /// GameController.framework extended gamepad GamepadBridge gave it (Xbox, DualSense, DualShock,
-/// MFi, ...), whose actuators play its rumble; player 1 can instead be a DualSense passed through
-/// as itself (HIDPassthrough): its raw reports both ways, so SteamOS drives touchpad, motion
-/// sensors, lights, rumble and triggers itself. The guest's pad comes and goes with the
-/// controller and changes kind with it. Main thread only.
+/// MFi, ...), whose actuators play its rumble; a DualSense (player 1) or a Steam Controller (any
+/// usable player) can instead be passed through as itself (HIDPassthrough): its raw reports both
+/// ways, so SteamOS drives touchpad, motion sensors, lights, rumble and triggers itself. The
+/// guest's pad comes and goes with the controller and changes kind with it. Main thread only.
 private final class PadSlot {
     let index: Int
     private let port: PadPort
     private let settings: LauncherSettings
     /// `--pad` for this run (wins over the setting).
     private let typeOverride: LauncherSettings.PadType?
-    /// The Mac's DualSenses as HID devices (player 1 only: see `wanted`).
+    /// The Mac's supported raw HID controllers.
     private let hid: HIDPassthrough?
     private(set) var controller: GCController?
+    private(set) var remote: GamepadBridge.RemotePad?
+    var remoteRumble: ((_ lowFrequency: UInt16, _ highFrequency: UInt16) -> Void)?
     /// The uinput pad the guest has (created over the port), nil = none.
     private var guestPad: GuestPad?
-    /// The DualSense the guest has as itself (a uhid device), nil = none.
+    /// The controller the guest has as itself (a uhid device), nil = none.
     private var guestHID: HIDPassthrough.Device?
     /// What the guest last got (or, without a uinput pad, the controller's last state).
     private var state = GamepadBridge.PadState()
     /// The guest's service of this port said `hello`: it can create a pad.
     private(set) var serviceReady = false
     /// ... and `caps hid`: it can create a uhid device.
-    private var hidCapable = false
+    private(set) var hidCapable = false
     /// --input-selftest, control `pad on`: a pad even without a controller.
     private var testPad = false
     private var paused = false
@@ -250,6 +355,8 @@ private final class PadSlot {
     var onHello: (() -> Void)?
     /// Whether a DualSense may be passed through now (GamepadBridge).
     var passthroughAllowed: () -> Bool = { true }
+    /// The Steam Controller or generic HID assigned to this player by GamepadBridge.
+    var rawControllerDevice: () -> HIDPassthrough.Device? = { nil }
 
     /// What the guest has (or should have) as its gamepad.
     private enum GuestDevice: Equatable {
@@ -292,10 +399,12 @@ private final class PadSlot {
     func vmPaused(_ paused: Bool) {
         self.paused = paused
         rumble.paused = paused
+        if paused && remote != nil { remoteRumble?(0, 0) }
     }
 
     func hidInput(_ report: UnsafeBufferPointer<UInt8>) {
-        guard guestHID != nil, !paused else { return }
+        guard let device = guestHID, !paused, let first = report.first else { return }
+        let reportID = GenericHIDRouting.reportID(numbered: device.numbered, firstByte: first)
         // Copy the report (the callback's buffer is reused) and encode + write on `hidQueue`, so
         // this 250–1000 Hz path never runs the hex encoding or pipe write on the frame thread.
         // `guestHID`/`paused` are read here on the main thread (never on `hidQueue`): a snapshot
@@ -303,7 +412,7 @@ private final class PadSlot {
         let bytes = Array(report)
         Self.hidQueue.async { [weak self] in
             guard let self else { return }
-            if self.port.sendLatest("hid-input " + HIDPassthrough.hex(bytes)) {
+            if self.port.sendLatest("hid-input " + HIDPassthrough.hex(bytes), reportID: reportID) {
                 self.hidInputs += 1
                 if self.hidInputs == 1 {
                     log("\(self.tag): first input report to SteamOS: id 0x\(String(bytes[0], radix: 16)), \(bytes.count) bytes")
@@ -319,17 +428,22 @@ private final class PadSlot {
             log("\(tag): the guest's pad service is ready")
             serviceReady = true
             hidCapable = false
+            if let d = guestHID { hid?.deactivate(d, owner: self) }
             guestPad = nil
             guestHID = nil
-            hid?.deactivate()
             rumble.set(strong: 0, weak: 0)
             onHello?()
             reconcile()
         } else if w == ["caps", "hid"] {
             hidCapable = true
+            onHello?()
             reconcile()
         } else if w.count == 3, w[0] == "rumble", let strong = UInt16(w[1]), let weak = UInt16(w[2]) {
-            rumble.set(strong: strong, weak: weak)
+            if let remote {
+                if !paused && remote.capabilities & 2 != 0 { remoteRumble?(strong, weak) }
+            } else {
+                rumble.set(strong: strong, weak: weak)
+            }
         } else if w.count == 3, w[0] == "hid-output", let type = HIDPassthrough.ReportType(rawValue: String(w[1])),
                   let data = HIDPassthrough.unhex(w[2]) {
             if let d = guestHID { hid?.setReport(d, type: type, data: data) }
@@ -388,13 +502,20 @@ private final class PadSlot {
         } else {
             log("\(tag): none connected")
         }
-        let before = guestPad
-        reconcile()
-        if let pad = guestPad, pad == before {
+        // GamepadBridge.reconcileAll() after every assignment creates/releases pads: doing it
+        // here per slot would briefly put one Steam Controller on two players while it moves.
+        if let pad = guestPad {
             // Same pad, another controller: release what the previous one held.
             apply(GamepadBridge.rest(pad))
             refresh()
         }
+    }
+
+    func setRemote(_ next: GamepadBridge.RemotePad?) {
+        let changed = remote?.number != next?.number || remote?.kind != next?.kind
+        if changed, let pad = guestPad { apply(GamepadBridge.rest(pad)) }
+        remote = next
+        refresh()
     }
 
     /// What the guest should have: nothing without a controller or with "Virtual controller"
@@ -402,9 +523,20 @@ private final class PadSlot {
     /// is on (and the guest's service takes uhid devices); else a uinput pad of the kind from
     /// "Appears in SteamOS as" (`--pad`), Automatic = the controller's.
     private func wanted() -> (device: GuestDevice, why: String)? {
-        guard settings.virtualPad, controller != nil || testPad else { return nil }
+        guard settings.virtualPad else { return nil }
+        if let remote { return (.pad(remote.kind), "Moonlight controller \(remote.number + 1)") }
+        let type = typeOverride ?? settings.padType
+        // A Steam Controller goes through in Automatic / Steam Controller; a generic HID that
+        // GameController does not publish goes through in Automatic only. Puck slots follow an
+        // unambiguous GameController player; BLE and generic devices reserve free players.
+        if hidCapable, let d = rawControllerDevice(),
+           type == .auto || (type == .steamController && !d.generic) {
+            return (.hid(d), type == .auto ? "automatic, \(d.generic ? "generic HID controller" : "Steam Controller")" : (typeOverride == nil ? "setting" : "--pad"))
+        }
+        guard controller != nil || testPad else { return nil }
         let pad: GuestPad, why: String
-        switch typeOverride ?? settings.padType {
+        switch type {
+        case .steamController: (pad, why) = (.xbox360, "no Steam Controller, another controller")
         case .xbox360: (pad, why) = (.xbox360, typeOverride == nil ? "setting" : "--pad")
         case .dualSense: (pad, why) = (.dualSense, typeOverride == nil ? "setting" : "--pad")
         case .dualShock4: (pad, why) = (.dualShock4, typeOverride == nil ? "setting" : "--pad")
@@ -415,8 +547,8 @@ private final class PadSlot {
         // GameController does not say which HID device a controller is: with several DualSenses
         // connected, the first one found is passed through, and none once two players have one
         // (`passthroughAllowed`: the device could be the other player's).
-        if pad == .dualSense, settings.dualSensePassthrough, hidCapable, passthroughAllowed(),
-           controller?.extendedGamepad is GCDualSenseGamepad, let d = hid?.devices.first {
+        if index == 0, pad == .dualSense, settings.dualSensePassthrough, hidCapable, passthroughAllowed(),
+           controller?.extendedGamepad is GCDualSenseGamepad, let d = hid?.devices.first(where: { !$0.generic && !HIDPassthrough.isSteamController($0) }) {
             return (.hid(d), why)
         }
         return (.pad(pad), why)
@@ -426,19 +558,33 @@ private final class PadSlot {
         guestHID.map { .hid($0) } ?? guestPad.map { .pad($0) }
     }
 
-    /// Create, replace or remove the guest's pad to match `wanted()`.
-    func reconcile() {
+    /// Release the guest's current pad/device when it is no longer what `wanted()` asks for.
+    /// GamepadBridge runs this on every slot before `reconcile()` so a Steam Controller moving to
+    /// a lower player is removed once before the new slot creates it (no two uhid copies).
+    func releaseIfUnwanted() {
         guard serviceReady else { return }
         let want = wanted()
         guard want?.device != current else { return }
         if let old = current {
+            // Input reports of the old device queued on `hidQueue` go before "remove" (PadPort's
+            // barrier order): none can follow it into the next device created on this port.
+            if guestHID != nil { Self.hidQueue.sync {} }
             port.send("remove")
             log("\(tag): removed the \(old.title) from SteamOS")
         }
+        if let d = guestHID { hid?.deactivate(d, owner: self) }
         guestPad = nil
         guestHID = nil
-        hid?.deactivate()
         rumble.set(strong: 0, weak: 0)
+    }
+
+    /// Create the guest's pad to match `wanted()` (call `releaseIfUnwanted()` first when several
+    /// slots may shuffle one HID device between them).
+    func reconcile() {
+        guard serviceReady else { return }
+        let want = wanted()
+        guard want?.device != current else { return }
+        releaseIfUnwanted()
         guard let want else { return }
         switch want.device {
         case .pad(let pad):
@@ -458,14 +604,19 @@ private final class PadSlot {
             }
             guestHID = d
             hidInputs = 0
-            hid?.activate(d)
+            hid?.activate(d, owner: self) { [weak self] report in self?.hidInput(report) }
             log("\(tag): SteamOS sees the \(d.identity.name) itself, passed through (\(want.why))")
         }
     }
 
     /// Swap / deadzone changed, new pad: resend the current state with the current mapping.
     func refresh() {
-        if let pad = controller?.extendedGamepad { update(from: pad) }
+        if let remote {
+            apply(GamepadBridge.read(remote, as: guestPad ?? remote.kind, swapABXY: settings.swapABXY,
+                                     deadzone: Float(settings.stickDeadzone) / 100))
+        } else if let pad = controller?.extendedGamepad {
+            update(from: pad)
+        }
     }
 
     private func update(from pad: GCExtendedGamepad) {
@@ -530,22 +681,239 @@ private final class PadSlot {
         "pad \(index == 0 ? "" : "\(index + 1) ")\(current?.title ?? "none"), service \(serviceReady ? "ready" : "not ready")\(hidCapable ? " (hid)" : ""), "
             + "controller \(controller.map(GamepadBridge.logDisplayName(of:)) ?? "none"), rumble \(rumble.level.strong) \(rumble.level.weak)"
             + ", Home/PS \(GamepadBridge.homeDiagnostic(controller?.extendedGamepad?.buttonHome))"
-            + (hid.map { ", HID DualSenses \($0.devices.count), hid inputs \(hidInputs)" } ?? "")
+            + ", hid inputs \(hidInputs)"
+    }
+}
+
+/// HID routing policy, independent of GameController and IOKit for the settings selftest.
+enum SteamControllerRouting {
+    /// GameController cannot identify which live Puck slot belongs to which controller.
+    static func puckPlayer(_ steamPlayers: [Int], liveSlots: Int) -> Int? {
+        steamPlayers.count == 1 && liveSlots == 1 ? steamPlayers[0] : nil
+    }
+
+    /// BLE reservations stay sticky. Generic reservations stay sticky only while their player
+    /// is free of GameController controllers and the guest can create HID devices there.
+    static func rawPlayers(previous: [UInt64: Int], devices: [UInt64], available: [Int],
+                           genericDevices: [UInt64] = [], hidCapable: [Int] = []) -> [UInt64: Int] {
+        func accepts(_ id: UInt64, _ player: Int) -> Bool {
+            available.contains(player) && (!genericDevices.contains(id) || hidCapable.contains(player))
+        }
+        var next = previous.filter { devices.contains($0.key) && accepts($0.key, $0.value) }
+        for id in devices where next[id] == nil {
+            if let player = available.first(where: { accepts(id, $0) && !next.values.contains($0) }) { next[id] = player }
+        }
+        return next
+    }
+
+    static func selfCheck() -> [String] {
+        var failures: [String] = []
+        var checks = 0
+        func check(_ ok: Bool, _ name: String) {
+            checks += 1
+            if !ok { failures.append("Steam Controller routing: \(name)") }
+        }
+        check(puckPlayer([1], liveSlots: 1) == 1, "one Puck")
+        check(puckPlayer([0, 1], liveSlots: 1) == nil, "two GameController Steam Controllers")
+        check(puckPlayer([0], liveSlots: 2) == nil, "two live Puck slots")
+        check(puckPlayer([], liveSlots: 1) == nil, "no GameController Steam Controller")
+        check(puckPlayer([0], liveSlots: 0) == nil, "no live Puck")
+        let initial = rawPlayers(previous: [:], devices: [10], available: [1, 2, 3])
+        check(initial == [10: 1], "BLE takes lowest free player")
+        let sticky = rawPlayers(previous: initial, devices: [10], available: [0, 1, 2, 3])
+        check(sticky == initial, "player 1 disconnect does not move BLE up")
+        check(!availableControllerPlayer(1, rawPlayers: sticky), "new GameController cannot take raw HID player")
+        check(availableControllerPlayer(0, rawPlayers: sticky), "new GameController may take lower free player")
+        let disconnected = rawPlayers(previous: sticky, devices: [], available: [0, 1, 2, 3])
+        check(disconnected.isEmpty, "BLE disconnect frees player")
+        check(rawPlayers(previous: disconnected, devices: [11], available: [0, 1, 2, 3]) == [11: 0],
+              "BLE reconnect takes lowest free player")
+        check(rawPlayers(previous: sticky, devices: [10], available: []).isEmpty, "unusable players excluded")
+        check(rawPlayers(previous: sticky, devices: [10, 20], available: [0, 1, 2, 3]) == [10: 1, 20: 0],
+              "second BLE does not displace first")
+        check(rawPlayers(previous: [:], devices: [10], available: []).isEmpty, "no free player")
+        check(rawPlayers(previous: [:], devices: [10, 10, 20], available: [0, 1]) == [10: 0, 20: 1],
+              "registry-ID duplicates never take two players")
+        check(rawPlayers(previous: [10: 1, 20: 0], devices: [10], available: [0, 1]) == [10: 1],
+              "generic disconnect frees only its player, BLE stays sticky")
+        let standIn = usbStandIn(devices: [30], controllers: [2])
+        check(standIn?.device == 30 && standIn?.controller == 2, "only the matching USB stand-in is selected")
+        check(usbStandIn(devices: [], controllers: [2]) == nil, "BLE alone never suppresses a GC pad")
+        check(usbStandIn(devices: [30], controllers: []) == nil, "USB without GC keeps its raw reservation")
+        check(usbStandIn(devices: [30, 31], controllers: [2]) == nil, "ambiguous HID identities keep GC")
+        check(usbStandIn(devices: [30], controllers: [1, 2]) == nil, "ambiguous GC identities keep GC")
+        check(isUSBStandIn(vendorName: "Steam Controller", productCategory: "Steam Controller"),
+              "USB Steam Controller publication recognized")
+        check(!isUSBStandIn(vendorName: "Steam Controller Puck", productCategory: "Steam Controller"),
+              "GC Puck stays on its existing co-location path")
+        check(!isUSBStandIn(vendorName: "Xbox Wireless Controller", productCategory: "Xbox One"),
+              "unrelated GC pads stay connected")
+        check(usbHandoffPlayer(current: 2, reserved: nil, available: [0, 2]) == 2,
+              "USB HID takes the stand-in's player rather than lowest free player")
+        check(usbHandoffPlayer(current: nil, reserved: 2, available: [0, 2]) == 2,
+              "late GC publication preserves HID's player")
+        check(usbHandoffPlayer(current: 2, reserved: nil, available: [0]) == nil,
+              "no suppression without a usable HID-capable stand-in player")
+        log("selftest-settings: Steam Controller routing: \(checks) checks, \(failures.isEmpty ? "PASS" : failures.joined(separator: "; "))")
+        return failures
+    }
+
+    static func availableControllerPlayer(_ index: Int, rawPlayers: [UInt64: Int], genericDevices: [UInt64] = []) -> Bool {
+        !rawPlayers.contains { $0.value == index && !genericDevices.contains($0.key) }
+    }
+
+    /// GameController exposes no HID registry identity. Pair only one USB 1302 with one
+    /// non-Puck Steam Controller publication; BLE/Puck and ambiguous setups cannot claim it.
+    static func usbStandIn(devices: [UInt64], controllers: [Int]) -> (device: UInt64, controller: Int)? {
+        guard devices.count == 1, controllers.count == 1 else { return nil }
+        return (devices[0], controllers[0])
+    }
+
+    static func isUSBStandIn(vendorName: String?, productCategory: String) -> Bool {
+        productCategory == "Steam Controller" && vendorName != "Steam Controller Puck"
+    }
+
+    static func usbHandoffPlayer(current: Int?, reserved: Int?, available: [Int]) -> Int? {
+        if let current { return available.contains(current) ? current : nil }
+        if let reserved, available.contains(reserved) { return reserved }
+        return available.first
+    }
+}
+
+/// Generic Desktop HID policy, without IOKit or live GameController state.
+enum GenericHIDRouting {
+    static let usages = [4, 5] // Joystick and Game Pad; Multi-axis (8), e.g. SpaceMouse, is excluded.
+
+    static func enabled(automatic: Bool, virtualPad: Bool) -> Bool {
+        automatic && virtualPad
+    }
+
+    static func accepts(usagePage: Int, usage: Int, knownController: Bool) -> Bool {
+        usagePage == 1 && usages.contains(usage) && !knownController
+    }
+
+    static let publicationGrace: TimeInterval = 2
+    enum Ownership: Equatable { case held, generic, gameController }
+
+    /// There is no public GCController -> IOHIDDevice link. Require advertised HID support
+    /// AND an actually published controller with an exact, case/whitespace-normalized name:
+    /// vendorName or productCategory equals product, manufacturer, or "manufacturer product".
+    /// Do not use substrings or VID-only guesses (unrelated controllers can coexist).
+    static func matchesController(product: String?, manufacturer: String?, vendorName: String?, productCategory: String) -> Bool {
+        func normalized(_ value: String?) -> String {
+            (value ?? "").split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
+        }
+        let product = normalized(product), manufacturer = normalized(manufacturer)
+        let names = [product, manufacturer, [manufacturer, product].filter { !$0.isEmpty }.joined(separator: " ")]
+        return [normalized(vendorName), normalized(productCategory)].contains { name in
+            !name.isEmpty && names.contains(name)
+        }
+    }
+
+    /// GameController publishes asynchronously. Hold supported devices without opening them
+    /// for two seconds, then permit generic HID unless a matching controller really exists.
+    /// The same decision applies on later GC connect/disconnect (including after acceptance).
+    static func ownership(supported: Bool, matchingController: Bool, elapsed: TimeInterval) -> Ownership {
+        guard supported else { return .generic }
+        if matchingController { return .gameController }
+        return elapsed < publicationGrace ? .held : .generic
+    }
+
+    static func reportID(numbered: Bool, firstByte: UInt8) -> UInt8 {
+        numbered ? firstByte : 0
+    }
+
+    static func productName(_ name: String?, fallback: String) -> String {
+        guard let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fallback }
+        return name
+    }
+
+    static func selfCheck() -> [String] {
+        var failures: [String] = []
+        var checks = 0
+        func check(_ ok: Bool, _ name: String) {
+            checks += 1
+            if !ok { failures.append("Generic HID routing: \(name)") }
+        }
+        func accepts(_ page: Int, _ usage: Int, known: Bool = false) -> Bool {
+            Self.accepts(usagePage: page, usage: usage, knownController: known)
+        }
+        check(accepts(1, 5), "DJI / Spektrum gamepad")
+        check(accepts(1, 4), "joystick")
+        check(!accepts(1, 8), "not multi-axis / SpaceMouse")
+        for usage in [1, 2, 6, 7] { check(!accepts(1, usage), "not pointer/mouse/keyboard/keypad \(usage)") }
+        check(!accepts(0x0d, 5), "not digitizer/trackpad")
+        check(!accepts(0xff00, 5), "not vendor-defined/internal collection")
+        check(!accepts(1, 5, known: true), "DualSense/Valve use their existing path")
+        check(ownership(supported: true, matchingController: false, elapsed: 0) == .held, "supported HID waits for publication")
+        check(ownership(supported: true, matchingController: false, elapsed: 1.999) == .held, "full publication grace")
+        check(ownership(supported: true, matchingController: false, elapsed: 2) == .generic, "support alone does not claim HID")
+        check(ownership(supported: true, matchingController: true, elapsed: 1) == .gameController, "publication during grace claims HID")
+        check(ownership(supported: true, matchingController: true, elapsed: 3) == .gameController, "late publication claims HID")
+        check(ownership(supported: true, matchingController: false, elapsed: 3) == .generic, "GC disappearance re-offers HID")
+        check(ownership(supported: false, matchingController: true, elapsed: 0) == .generic, "name alone never claims unsupported HID")
+        func matches(_ vendor: String?, _ category: String = "", product: String? = "C5", manufacturer: String? = "DJI") -> Bool {
+            matchesController(product: product, manufacturer: manufacturer, vendorName: vendor, productCategory: category)
+        }
+        check(matches(" c5\n"), "product match ignores case and surrounding whitespace")
+        check(matches(" dJi "), "manufacturer matches vendorName")
+        check(matches(" DJI \n C5 "), "combined name collapses internal whitespace")
+        check(matches(nil, " c5 "), "productCategory can identify a published controller")
+        check(!matches("C50"), "no product substring match")
+        check(!matches("DJI Other"), "manufacturer prefix alone does not match")
+        check(!matches(nil, "", product: nil, manufacturer: " \n"), "missing/blank names do not match")
+        check(!matches("Xbox Wireless Controller", "Xbox One"), "unrelated published controller does not claim DJI")
+        check(enabled(automatic: true, virtualPad: true), "Automatic permits generic HID")
+        check(!enabled(automatic: true, virtualPad: false), "Virtual controller off excludes generic matching")
+        check(!enabled(automatic: false, virtualPad: true), "explicit pad kinds exclude generic matching")
+        check(reportID(numbered: false, firstByte: 0x81) == 0, "unnumbered payload is not a report ID")
+        check(reportID(numbered: true, firstByte: 0x81) == 0x81, "numbered output preserves report ID")
+        check(productName(nil, fallback: "HID 2ca3:1020") == "HID 2ca3:1020", "missing product name")
+        check(productName("", fallback: "HID 2ca3:1020") == "HID 2ca3:1020", "empty product name")
+        check(productName(" \n", fallback: "HID 2ca3:1020") == "HID 2ca3:1020", "blank product name")
+        check(productName("C5", fallback: "HID 2ca3:1020") == "C5", "preserve actual product name")
+        let initial: [UInt64: Int] = [10: 0]
+        let generic: [UInt64] = [10]
+        check(SteamControllerRouting.availableControllerPlayer(0, rawPlayers: initial, genericDevices: generic),
+              "generic yields player 1 to a newly connected GameController")
+        check(!SteamControllerRouting.availableControllerPlayer(0, rawPlayers: initial),
+              "BLE Steam Controller still blocks new GameController on its sticky player")
+        func routed(previous: [UInt64: Int], available: [Int], capable: [Int], devices: [UInt64] = [10]) -> [UInt64: Int] {
+            SteamControllerRouting.rawPlayers(previous: previous, devices: devices, available: available,
+                                               genericDevices: generic, hidCapable: capable)
+        }
+        check(routed(previous: initial, available: [1, 2, 3], capable: [0, 1, 2, 3]) == [10: 1],
+              "generic moves to lowest free player after GameController takes player 1")
+        check(routed(previous: initial, available: [], capable: [0]).isEmpty,
+              "single-player generic releases reservation when GameController connects")
+        check(routed(previous: [10: 1], available: [0, 1, 2], capable: [0, 1, 2]) == [10: 1],
+              "generic remains sticky when a lower player becomes free")
+        check(routed(previous: initial, available: [0, 1], capable: []).isEmpty,
+              "old guest without caps hid gets no generic reservation")
+        check(routed(previous: initial, available: [0, 1, 2], capable: [2]) == [10: 2],
+              "generic skips players whose service lacks HID support")
+        check(routed(previous: [10: 0, 20: 1], available: [1, 2], capable: [1, 2], devices: [10, 20]) == [10: 2, 20: 1],
+              "generic moves without displacing a sticky BLE Steam Controller")
+        check(routed(previous: [10: 2], available: [0, 1, 2], capable: [0, 1, 2], devices: []).isEmpty,
+              "generic disconnect frees its reservation")
+        log("selftest-settings: generic HID routing: \(checks) checks, \(failures.isEmpty ? "PASS" : failures.joined(separator: "; "))")
+        return failures
     }
 }
 
 /// Feeds the guest's gamepads (GuestPad over PadPort, one PadSlot per player) from the Mac's
-/// GameController.framework controllers, or passes a DualSense through as itself (player 1).
-/// Settings > Controller picks which controller is player 1 (first connected by default), whether
-/// SteamOS gets a pad and what kind ("Appears in SteamOS as"; Automatic = the controller's own
-/// kind), whether a DualSense is passed through, swaps A/B and X/Y for Nintendo-style layouts and
-/// applies a radial stick deadzone, all while the VM runs.
+/// GameController.framework controllers, or passes a DualSense (player 1) / Steam Controller
+/// (any usable player) through as itself. Settings > Controller picks which controller is player
+/// 1 (first connected by default), whether SteamOS gets a pad and what kind ("Appears in SteamOS
+/// as"; Automatic = the controller's own kind), whether a DualSense is passed through, swaps A/B
+/// and X/Y for Nintendo-style layouts and applies a radial stick deadzone, all while the VM runs.
 ///
 /// Further controllers are players 2…`maxPads` ("Additional controllers"), each on a port of its
 /// own (`fx.pad2`, …) once the guest's service of that port said `hello`: a guest layer without
 /// those services keeps the one pad, driven as before. A player keeps their controller until it
 /// disconnects (the others do not move up), and a reconnected controller takes the first free
-/// player.
+/// player. A Steam Controller on a free usable player is passed through the same way (Puck slot
+/// → that player's GameController controller when unambiguous; Bluetooth LE → sticky free player).
 final class GamepadBridge {
     /// Players at most: one PadPort each.
     static let maxPads = 4
@@ -555,7 +923,15 @@ final class GamepadBridge {
 
     private let slots: [PadSlot]
     private let settings: LauncherSettings
+    private let typeOverride: LauncherSettings.PadType?
     private let hid: HIDPassthrough
+    /// BLE/USB and generic HID devices share sticky reservations.
+    private var rawPlayers: [UInt64: Int] = [:]
+    private var usbStandInDevice: UInt64?
+    private var localPlayersBeforeStream: (controllers: [GCController?], raw: [UInt64: Int])?
+    private var remotePads: [UInt16: RemotePad] = [:]
+    private var remotePlayers: [UInt16: Int] = [:]
+    private var remoteRumble: ((_ controller: UInt16, _ lowFrequency: UInt16, _ highFrequency: UInt16) -> Void)?
     private var observers: [NSObjectProtocol] = []
     private var subscriptions: [AnyCancellable] = []
     /// While the VM is paused (suspended, guest asleep): called before anything is sent, with
@@ -563,10 +939,120 @@ final class GamepadBridge {
     var intercept: ((_ buttonPressed: Bool) -> Bool)? {
         didSet { for s in slots { s.intercept = intercept } }
     }
+    /// Settings > Controller: Input Monitoring is required for a matched Steam Controller / composite HID device.
+    var onInputMonitoringNeeded: ((Bool) -> Void)? {
+        didSet {
+            hid.onPermissionNeededChange = onInputMonitoringNeeded
+            onInputMonitoringNeeded?(hid.needsInputMonitoring)
+        }
+    }
+
+    /// Settings > Controller button: ask macOS again and reopen HID once granted.
+    func requestInputMonitoring() {
+        hid.requestInputMonitoring()
+    }
 
     struct PadState: Equatable {
         var buttons: [UInt16: Bool] = [:]
         var axes: [UInt16: Int32] = [:]
+    }
+
+    struct RemotePad: Equatable {
+        let number: UInt16
+        var kind: GuestPad = .xbox360
+        var capabilities: UInt16 = 3
+        var supportedButtons: UInt32 = 0xffff
+        var buttons: UInt32 = 0
+        var leftTrigger: UInt8 = 0
+        var rightTrigger: UInt8 = 0
+        var leftX: Int16 = 0
+        var leftY: Int16 = 0
+        var rightX: Int16 = 0
+        var rightY: Int16 = 0
+    }
+
+    /// Moonlight's controllers (by controller number). They take the first usable players ahead of
+    /// the Mac's controllers and keep them while present (sticky). Removing the last remote pad
+    /// restores pre-stream local players; newly connected controllers fill the remaining players.
+    func setRemotePads(_ pads: [UInt16: RemotePad],
+                       rumble: @escaping (_ controller: UInt16, _ lowFrequency: UInt16, _ highFrequency: UInt16) -> Void) {
+        remoteRumble = rumble
+        if !pads.isEmpty && localPlayersBeforeStream == nil { saveLocalPlayers() }
+        let topologyChanged = remotePads.count != pads.count
+            || pads.contains { remotePads[$0.key]?.kind != $0.value.kind }
+        remotePads = pads
+        if pads.isEmpty { restoreLocalPlayers(connected: GamepadBridge.connected) }
+        if topologyChanged {
+            assignControllers()
+        } else {
+            for (number, player) in remotePlayers { slots[player].setRemote(pads[number]) }
+        }
+    }
+
+    func removeRemotePads() {
+        remotePads.removeAll()
+        restoreLocalPlayers(connected: GamepadBridge.connected)
+        assignControllers()
+        remoteRumble = nil
+    }
+
+    private func saveLocalPlayers() {
+        localPlayersBeforeStream = (slots.map(\.controller), rawPlayers)
+    }
+
+    private func restoreLocalPlayers(connected: [GCController]) {
+        guard let saved = localPlayersBeforeStream else { return }
+        localPlayersBeforeStream = nil
+        remotePlayers.removeAll()
+        // Clear displaced owners before restoring: a controller has only one profile callback.
+        for slot in slots { slot.setRemote(nil); slot.remoteRumble = nil }
+        for slot in slots { slot.setController(nil) }
+        rawPlayers = saved.raw
+        for (i, controller) in saved.controllers.enumerated() where usable(i) {
+            if let controller, connected.contains(where: { $0 === controller }) {
+                slots[i].setController(controller)
+            }
+        }
+        // assignControllers() filters disconnected HID reservations and fills free players with
+        // controllers connected during the stream, without retaining their temporary player.
+    }
+
+    static func remoteRestorationSelfCheck() -> [String] {
+        var failures: [String] = []
+        do {
+            let ports = try [PadPort(), PadPort(player: 1)]
+            let bridge = GamepadBridge(ports: ports, settings: LauncherSettings.shared, typeOverride: nil)
+            let original = GCController.withExtendedGamepad()
+            let newcomer = GCController.withExtendedGamepad()
+            bridge.slots[0].setController(original)
+            bridge.rawPlayers = [10: 1]
+            bridge.saveLocalPlayers()
+            bridge.slots[0].setController(nil)
+            bridge.slots[1].setController(original)
+            bridge.rawPlayers = [10: 0, 20: 1]
+            bridge.restoreLocalPlayers(connected: [original, newcomer])
+            if bridge.slots[0].controller !== original || bridge.slots[1].controller != nil {
+                failures.append("input: restore Mac controller to pre-stream player")
+            }
+            if bridge.rawPlayers != [10: 1] {
+                failures.append("input: restore pre-stream raw HID reservations")
+            }
+            bridge.saveLocalPlayers()
+            bridge.slots[0].setController(nil)
+            bridge.slots[1].setController(newcomer)
+            bridge.restoreLocalPlayers(connected: [newcomer])
+            if bridge.slots.contains(where: { $0.controller != nil }) {
+                failures.append("input: disconnected pre-stream controllers are not restored")
+            }
+            bridge.slots[0].setController(newcomer)
+            bridge.restoreLocalPlayers(connected: [newcomer])
+            if bridge.slots[0].controller !== newcomer {
+                failures.append("input: no-stream restoration leaves local players unchanged")
+            }
+        } catch {
+            failures.append("input: remote restoration test ports: \(error)")
+        }
+        return failures
     }
 
     static let axisCodes: [UInt16] = GuestPad.axes.map(\.code)
@@ -576,8 +1062,9 @@ final class GamepadBridge {
         let hid = HIDPassthrough()
         self.hid = hid
         self.settings = settings
+        self.typeOverride = typeOverride
         slots = ports.enumerated().map { i, port in
-            PadSlot(index: i, port: port, settings: settings, typeOverride: typeOverride, hid: i == 0 ? hid : nil)
+            PadSlot(index: i, port: port, settings: settings, typeOverride: typeOverride, hid: hid)
         }
     }
 
@@ -590,6 +1077,14 @@ final class GamepadBridge {
     /// Settings identifier of a controller: "<vendorName>|<productCategory>".
     static func identifier(of c: GCController) -> String {
         "\(c.vendorName ?? "?")|\(c.productCategory)"
+    }
+
+    /// The Steam Controller as GameController shows it: the Puck is "Steam Controller Puck
+    /// (Steam Controller)" (all its slots are one GameController controller); a controller on
+    /// Bluetooth LE is not shown at all. GameController does not expose HID vendor/product, so
+    /// it is matched by vendorName / productCategory.
+    static func isSteamController(_ c: GCController) -> Bool {
+        c.vendorName == "Steam Controller Puck" || c.productCategory == "Steam Controller"
     }
 
     static func displayName(of c: GCController) -> String {
@@ -615,15 +1110,22 @@ final class GamepadBridge {
         GCController.controllers().filter { $0.extendedGamepad != nil }
     }
 
+    /// Guest focus from `fx.progress`: Desktop Mode changes Puck-slot liveness (lizard reports).
+    func setGuestFocus(_ focus: GuestFocus) {
+        hid.desktopFocus = (focus == .desktop)
+    }
+
     func start() {
         GCController.shouldMonitorBackgroundEvents = true
         let nc = NotificationCenter.default
         observers.append(nc.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] n in
             if let c = n.object as? GCController { log("gamepad connected: \(c.vendorName ?? "?") (\(c.productCategory))") }
+            self?.hid.gameControllersChanged()
             self?.assignControllers()
         })
         observers.append(nc.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] n in
             if let c = n.object as? GCController { log("gamepad disconnected: \(c.vendorName ?? "?")") }
+            self?.hid.gameControllersChanged()
             self?.assignControllers()
         })
         observers.append(nc.addObserver(forName: .GCControllerDidBecomeCurrent, object: nil, queue: .main) { [weak self] _ in
@@ -633,10 +1135,18 @@ final class GamepadBridge {
         for p in [settings.$controllerID.map { _ in () }.eraseToAnyPublisher(), settings.$additionalPads.map { _ in () }.eraseToAnyPublisher()] {
             subscriptions.append(p.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] in self?.assignControllers() })
         }
+        for p in [settings.$padType.map { _ in () }.eraseToAnyPublisher(), settings.$virtualPad.map { _ in () }.eraseToAnyPublisher()] {
+            subscriptions.append(p.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] _ in
+                guard let self else { return }
+                self.hid.matchSteamControllers = self.matchesValveControllers
+                self.hid.matchGenericControllers = self.matchesGenericControllers
+                self.assignControllers()
+            })
+        }
         for p in [settings.$virtualPad.map { _ in () }.eraseToAnyPublisher(), settings.$padType.map { _ in () }.eraseToAnyPublisher(),
                   settings.$dualSensePassthrough.map { _ in () }.eraseToAnyPublisher()] {
             subscriptions.append(p.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] in
-                for s in self?.slots ?? [] { s.reconcile() }
+                self?.reconcileAll()
             })
         }
         for p in [settings.$swapABXY.map { _ in () }.eraseToAnyPublisher(), settings.$stickDeadzone.map { _ in () }.eraseToAnyPublisher()] {
@@ -652,8 +1162,19 @@ final class GamepadBridge {
         slots[0].passthroughAllowed = { [weak self] in
             !(self?.slots.dropFirst().contains { $0.controller?.extendedGamepad is GCDualSenseGamepad } ?? false)
         }
-        hid.onChange = { [weak self] in self?.slots[0].reconcile() }
-        hid.onInput = { [weak self] report in self?.slots[0].hidInput(report) }
+        // Each player's raw controller: an unambiguous Puck slot follows GameController,
+        // while BLE and generic devices keep their reserved players.
+        for s in slots {
+            let playerIndex = s.index
+            s.rawControllerDevice = { [weak self] in self?.assignedRawDevice(for: playerIndex) }
+        }
+        hid.matchSteamControllers = matchesValveControllers
+        hid.matchGenericControllers = matchesGenericControllers
+        hid.onChange = { [weak self] in
+            self?.assignControllers()
+        }
+        // Give already-connected GameController controllers players before discovering raw HID.
+        assignControllers()
         hid.start()
         GCController.startWirelessControllerDiscovery(completionHandler: nil)
         assignControllers()
@@ -670,27 +1191,125 @@ final class GamepadBridge {
         i == 0 || (settings.additionalPads && slots[i].serviceReady)
     }
 
+    /// Whether Valve's Steam Controllers are matched (and passed through as themselves).
+    private var matchesValveControllers: Bool {
+        let t = typeOverride ?? settings.padType
+        return t == .auto || t == .steamController
+    }
+
+    private var matchesGenericControllers: Bool {
+        GenericHIDRouting.enabled(automatic: (typeOverride ?? settings.padType) == .auto, virtualPad: settings.virtualPad)
+    }
+
+    /// Reconcile raw HID reservations only on topology/settings changes, never while querying a slot.
+    private func updateRawPlayers() {
+        // USB/BLE remain reserved while matched; Puck keeps its existing GC co-location.
+        let hasUSBPublication = GamepadBridge.connected.contains {
+            SteamControllerRouting.isUSBStandIn(vendorName: $0.vendorName, productCategory: $0.productCategory)
+        }
+        let devices = hid.devices.filter {
+            if $0.generic { return matchesGenericControllers }
+            guard matchesValveControllers, HIDPassthrough.isSteamController($0), $0.puckSlot == nil else { return false }
+            if HIDPassthrough.isUSBSteamController($0), hasUSBPublication {
+                return usbStandInDevice == $0.registryID
+            }
+            return true
+        }.map(\.registryID)
+        let available = slots.indices.filter { usable($0) && slots[$0].controller == nil && slots[$0].remote == nil }
+        rawPlayers = SteamControllerRouting.rawPlayers(previous: rawPlayers, devices: devices, available: available,
+            genericDevices: hid.devices.filter(\.generic).map(\.registryID),
+            hidCapable: slots.indices.filter { slots[$0].hidCapable })
+    }
+
+    /// A Puck slot is safe only with exactly one GameController Steam Controller and one live
+    /// Puck slot; ambiguous setups retain their GameController/uinput pads. BLE/generic reserve players.
+    private func assignedRawDevice(for index: Int) -> HIDPassthrough.Device? {
+        guard usable(index), slots[index].remote == nil else { return nil }
+        let steamPlayers = matchesValveControllers
+            ? slots.indices.filter { slots[$0].controller.map(GamepadBridge.isSteamController) ?? false } : []
+        let livePuckSlots = hid.devices.filter { $0.puckSlot != nil && HIDPassthrough.isLiveSteamController($0) }
+        if SteamControllerRouting.puckPlayer(steamPlayers, liveSlots: livePuckSlots.count) == index {
+            return livePuckSlots.first
+        }
+        return hid.devices.first { rawPlayers[$0.registryID] == index }
+    }
+
+    /// Release then create across every slot so one Steam Controller moving between players never
+    /// briefly exists twice in the guest, and the old slot cannot clear the new slot's handler.
+    private func reconcileAll() {
+        updateRawPlayers()
+        for s in slots { s.releaseIfUnwanted() }
+        for s in slots { s.reconcile() }
+    }
+
     /// Give the players their controllers. One player: the controller chosen in Settings, else
     /// the first connected (the chosen one is not connected: fall back to it as well). Several:
     /// everybody keeps theirs while it is connected, the chosen one is player 1 when it is there,
     /// and free players get the remaining controllers in connection order.
     private func assignControllers() {
-        let candidates = GamepadBridge.connected
+        let connected = GamepadBridge.connected
+        var candidates = connected
+        // Moonlight controllers come first: the remote player is the one using SteamOS during a
+        // stream (with one usable player, a Mac controller waits until the stream ends).
+        remotePlayers = remotePlayers.filter { remotePads[$0.key] != nil && usable($0.value) }
+        for number in remotePads.keys.sorted() where remotePlayers[number] == nil {
+            if let player = slots.indices.first(where: { usable($0) && !remotePlayers.values.contains($0) }) {
+                remotePlayers[number] = player
+            }
+        }
+        for slot in slots {
+            let number = remotePlayers.first { $0.value == slot.index }?.key
+            slot.setRemote(number.flatMap { remotePads[$0] })
+            slot.remoteRumble = { [weak self] low, high in
+                if let number { self?.remoteRumble?(number, low, high) }
+            }
+        }
+        usbStandInDevice = nil
+        let usbDevices = hid.devices.filter(HIDPassthrough.isUSBSteamController).map(\.registryID)
+        let usbPublications = connected.indices.filter {
+            SteamControllerRouting.isUSBStandIn(vendorName: connected[$0].vendorName,
+                                                productCategory: connected[$0].productCategory)
+        }
+        if matchesValveControllers, settings.virtualPad,
+           let match = SteamControllerRouting.usbStandIn(devices: usbDevices, controllers: usbPublications) {
+            let standIn = connected[match.controller]
+            let current = slots.first { $0.controller === standIn }?.index
+            let available = slots.indices.filter { i in
+                usable(i) && slots[i].hidCapable && slots[i].remote == nil
+                    && (slots[i].controller == nil || slots[i].controller === standIn)
+                    && !rawPlayers.contains { $0.key != match.device && $0.value == i }
+            }
+            if let player = SteamControllerRouting.usbHandoffPlayer(
+                current: current, reserved: rawPlayers[match.device], available: available) {
+                // Transfer the existing player before assigning other GC controllers. Only this
+                // publication is removed, and only while its HID can actually own that player.
+                for slot in slots where slot.controller === standIn { slot.setController(nil) }
+                rawPlayers[match.device] = player
+                usbStandInDevice = match.device
+                candidates.removeAll { $0 === standIn }
+            }
+        }
+        updateRawPlayers()
+        let genericDevices = hid.devices.filter(\.generic).map(\.registryID)
+        func available(_ index: Int) -> Bool {
+            !remotePlayers.values.contains(index)
+                && SteamControllerRouting.availableControllerPlayer(index, rawPlayers: rawPlayers, genericDevices: genericDevices)
+        }
         let chosen = settings.controllerID.isEmpty ? nil
             : candidates.first { GamepadBridge.identifier(of: $0) == settings.controllerID }
         var next = [GCController?](repeating: nil, count: slots.count)
         if !slots.indices.dropFirst().contains(where: usable) {
-            next[0] = chosen ?? candidates.first
+            if available(0) { next[0] = chosen ?? candidates.first }
         } else {
-            for (i, s) in slots.enumerated() where usable(i) {
+            for (i, s) in slots.enumerated() where usable(i) && available(i) {
                 if let c = s.controller, candidates.contains(where: { $0 === c }) { next[i] = c }
             }
             // Two controllers of one model have the same identifier: player 1 keeps a matching one.
-            if let chosen, next[0].map(GamepadBridge.identifier(of:)) != settings.controllerID {
+            if let chosen, available(0), next[0].map(GamepadBridge.identifier(of:)) != settings.controllerID {
                 if let j = next.firstIndex(where: { $0 === chosen }) { next[j] = next[0] }
                 next[0] = chosen
             }
-            for i in slots.indices where usable(i) && next[i] == nil {
+            for i in slots.indices where usable(i) && available(i) && next[i] == nil {
                 next[i] = candidates.first { c in !next.contains { $0 === c } }
             }
         }
@@ -700,8 +1319,8 @@ final class GamepadBridge {
             s.setController(nil)
         }
         for (i, s) in slots.enumerated() { s.setController(next[i]) }
-        // Whether player 1's DualSense is passed through depends on the others' controllers.
-        slots[0].reconcile()
+        // Preserve raw HID reservations while filling free players, then route every HID kind.
+        reconcileAll()
         let players = Dictionary(uniqueKeysWithValues: slots.compactMap { s in s.controller.map { (ObjectIdentifier($0), s.index + 1) } })
         if players != GamepadBridge.players {
             GamepadBridge.players = players
@@ -762,11 +1381,56 @@ final class GamepadBridge {
         return s
     }
 
+    static func read(_ p: RemotePad, as pad: GuestPad, swapABXY: Bool, deadzone: Float) -> PadState {
+        var s = rest(pad)
+        let flags = p.buttons & p.supportedButtons
+        func down(_ bit: UInt32) -> Bool { flags & bit != 0 }
+        s.buttons[BTN.SOUTH] = down(swapABXY ? 0x2000 : 0x1000)
+        s.buttons[BTN.EAST] = down(swapABXY ? 0x1000 : 0x2000)
+        s.buttons[pad.sony ? BTN.WEST : BTN.NORTH] = down(swapABXY ? 0x8000 : 0x4000)
+        s.buttons[pad.sony ? BTN.NORTH : BTN.WEST] = down(swapABXY ? 0x4000 : 0x8000)
+        for (code, bit): (UInt16, UInt32) in [(BTN.TL, 0x100), (BTN.TR, 0x200), (BTN.SELECT, 0x20),
+                                            (BTN.START, 0x10), (BTN.MODE, 0x400),
+                                            (BTN.THUMBL, 0x40), (BTN.THUMBR, 0x80)] {
+            s.buttons[code] = down(bit)
+        }
+        if pad.sony {
+            s.buttons[BTN.TL2] = p.leftTrigger > 0
+            s.buttons[BTN.TR2] = p.rightTrigger > 0
+        }
+        let l = deadzoned(max(-1, Float(p.leftX) / 32767), max(-1, Float(p.leftY) / 32767), deadzone)
+        let r = deadzoned(max(-1, Float(p.rightX) / 32767), max(-1, Float(p.rightY) / 32767), deadzone)
+        s.axes[ABS.X] = axis(l.0); s.axes[ABS.Y] = -axis(l.1)
+        s.axes[ABS.RX] = axis(r.0); s.axes[ABS.RY] = -axis(r.1)
+        s.axes[ABS.Z] = Int32(p.leftTrigger); s.axes[ABS.RZ] = Int32(p.rightTrigger)
+        s.axes[ABS.HAT0X] = down(4) ? -1 : (down(8) ? 1 : 0)
+        s.axes[ABS.HAT0Y] = down(1) ? -1 : (down(2) ? 1 : 0)
+        return s
+    }
+
     /// --input-selftest: pads for players 1 and 2 even without controllers (player 2 if the guest
     /// serves its port), each presses/releases A and pushes the left stick right, then returns to
     /// rest.
     func injectTestSequence() {
         for s in slots.prefix(2) where s.index == 0 || s.serviceReady { s.injectTestSequence() }
+    }
+
+    /// Shared by `pad state` and the opt-in launcher-log attachment. Main thread only.
+    func diagnosticLines() -> [String] {
+        var lines = ["Controller settings: pad=\((typeOverride ?? settings.padType).rawValue), "
+            + "virtual=\(settings.virtualPad), DualSense passthrough=\(settings.dualSensePassthrough), "
+            + "stick deadzone=\(settings.stickDeadzone)% (uinput only)"]
+        for s in slots where s.index == 0 || s.serviceReady || s.controller != nil { lines.append(s.stateLine) }
+        let steam = hid.devices.filter(HIDPassthrough.isSteamController).count
+        let generic = hid.devices.filter(\.generic).count
+        lines.append("HID DualSenses \(hid.devices.count - steam - generic), Steam Controllers \(steam), generic controllers \(generic)")
+        for d in hid.devices where d.generic {
+            let player = rawPlayers[d.registryID].map { String($0 + 1) } ?? "none (no usable free player)"
+            lines.append(String(format: "generic HID %04x:%04x", d.identity.vendor, d.identity.product)
+                + " \(d.identity.name), registry \(d.registryID), player \(player)")
+        }
+        lines += hid.diagnosticLines()
+        return lines
     }
 
     /// --control-fifo `pad on|off|test [<player>]`, `pad state` (DebugControl).
@@ -780,7 +1444,7 @@ final class GamepadBridge {
         case "test":
             slot.injectTestSequence()
         case "state":
-            for s in slots where s.index == 0 || s.serviceReady || s.controller != nil { log("control: \(s.stateLine)") }
+            for line in diagnosticLines() { log("control: \(line)") }
         default:
             log(usage)
         }

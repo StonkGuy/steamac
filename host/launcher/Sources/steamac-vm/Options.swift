@@ -26,6 +26,47 @@ struct Options {
     /// the guest then abandons PCM_START, PipeWire is killed by systemd and games freeze (VRChat).
     var cmdline = "console=hvc0 loglevel=4 rootwait virtio_snd.msg_timeout_ms=10000"
     var disks: [DiskSpec] = []
+    /// --share DIR / Settings > Advanced "Shared folder": a Mac folder exposed to the guest as the
+    /// virtio-fs device tagged `Options.shareTag` (VM.init). nil = no share.
+    var share: String?
+    static let shareTag = "macshare"
+    /// --share-mount PATH / Settings > Advanced "Mount point in SteamOS": where the guest mounts the share
+    /// (kernel cmdline steamac.share=PATH; the initramfs creates a runtime mount unit for it).
+    var shareMount = Options.defaultShareMount
+    /// Register SteamLibrary inside the share once per guest path (`steamac.share_library=1`).
+    var shareLibrary = true
+    static let defaultShareMount = "/home/steamos/MacShare"
+    static func isReadableFolder(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+            && FileManager.default.isReadableFile(atPath: path)
+    }
+    /// A subdirectory of the writable home, never the home itself.
+    static let shareMountRoots = ["/home/steamos/"]
+    /// The same check as the initramfs ("shared folder" section): a subdirectory of
+    /// `shareMountRoots`, no empty, "." or ".." components, only [A-Za-z0-9/_.-].
+    static func isValidShareMount(_ p: String) -> Bool {
+        guard shareMountRoots.contains(where: { p.hasPrefix($0) && p.count > $0.count }),
+              !p.hasSuffix("/"),
+              p.unicodeScalars.allSatisfy({ $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "/_.-".unicodeScalars.contains($0)) })
+        else { return false }
+        return !p.split(separator: "/", omittingEmptySubsequences: false).dropFirst().contains { $0.isEmpty || $0 == "." || $0 == ".." }
+    }
+
+    /// --selftest-settings: the validator agrees with the initramfs on what it accepts.
+    static func shareMountSelfCheck() -> [String] {
+        var failures: [String] = []
+        for good in ["/home/steamos/MacShare", "/home/steamos/Games/Mac-1", "/home/steamos/.cache"] where !isValidShareMount(good) {
+            failures.append("share mount: \(good) rejected")
+        }
+        for bad in ["", "/", "/home", "/home/steamos", "/home/steamos/", "/mnt", "/mnt/mac", "/media/mac", "/usr/mac", "/etc", "/home/steamos//x",
+                    "/home/steamos/../x", "/home/steamos/./x", "/home/steamos/My Games", "~/Games", "/home/steamos/x/",
+                    "/home/steamos/é", "/home/steamos/a:b", "/home/steamosx"] where isValidShareMount(bad) {
+            failures.append("share mount: \(bad) accepted")
+        }
+        log("selftest-settings: share mount: \(failures.isEmpty ? "ok" : "FAIL: \(failures.joined(separator: "; "))")")
+        return failures
+    }
     /// Settings > Advanced, --cpus / --mem, else automatic for this Mac (VMSizing; applySettings).
     var cpus = VMSizing.autoCPUs(.current)
     var memMiB = VMSizing.autoMemMiB(.current)
@@ -66,6 +107,7 @@ struct Options {
     var network = true
     var lanRemotePlay = false
     var selftestRemotePlay = false
+    var selftestStream = false
     var selftestPointer = false
     var selftestGameLayers = false
     var sound = true
@@ -165,11 +207,12 @@ struct Options {
     var explicit: Set<String> = []
 
     static let usage = """
-    usage: steamac-vm --kernel PATH [--initrd PATH] [--cmdline STR] --disk PATH[:ro] ...
+    usage: steamac-vm --kernel PATH [--initrd PATH] [--cmdline STR] --disk PATH[:ro] ... [--share DIR [--share-mount PATH] | --no-share]
+                      [--share-library | --no-share-library]
                       [--cpus N] [--mem MiB] [--display WxH] [--refresh HZ] [--headless]
                       [--log FILE] [--no-net] [--no-sound] [--ssh-port PORT | --no-ssh] [--shm-mib MiB]
                       [--gpu-flags HEX] [--gvproxy PATH] [--frame-dump PNG]
-                      [--mouse auto|tablet|capture] [--no-gamepad] [--pad auto|xbox360|dualsense|dualshock4]
+                      [--mouse auto|tablet|capture] [--no-gamepad] [--pad auto|xbox360|dualsense|dualshock4|steamcontroller]
                       [--krun-log-level 0-5] [--perf-stats]
                       [--no-crash-reports] [--steam-client frame|deck|deckbeta]
                       [--vulkan-driver moltenvk|kosmickrisp] [--wmtr-lib PATH | --no-wmtr]
@@ -184,6 +227,7 @@ struct Options {
            steamac-vm --selftest-settings [--selftest-out DIR]
            steamac-vm --selftest-provision [--reference-disk IMG]
            steamac-vm --selftest-remote-play
+           steamac-vm --selftest-stream
            steamac-vm --selftest-metal-cache
            steamac-vm --selftest-game-layers
            steamac-vm --selftest-l10n
@@ -206,6 +250,18 @@ struct Options {
                            virtio_snd.msg_timeout_ms=10000"; fsck.repair=yes, steamac.ssh/steam_client/tz
                            are added unless STR sets them)
       --disk PATH[:ro]     raw virtio-blk disk; repeatable, order = vda, vdb, ...
+      --share DIR          expose the Mac folder DIR to SteamOS as the virtio-fs device tagged "macshare"
+                           (default: Settings > Advanced "Shared folder", none unless chosen). virtio-fs does
+                           not confine the guest to DIR: root in SteamOS may reach what this Mac user can read
+      --share-mount PATH   where SteamOS mounts the shared folder (default: Settings > Advanced "Mount point in
+                           SteamOS", /home/steamos/MacShare): a subdirectory of /home/steamos/;
+                           kernel cmdline steamac.share=PATH, the initramfs creates a mount unit for it on every boot
+      --no-share           no shared folder this run
+      --share-library      create SteamLibrary in the shared folder on next start and register it in Steam
+                           once per path (default: Settings > Advanced "Use as a Steam library", on).
+                           Proton requires symbolic links: APFS recommended, exFAT unsupported;
+                           automatic registration skips shares without symbolic link support
+      --no-share-library   do not create or register a shared Steam library this run
       --cpus N             vCPUs (default: Settings > Advanced, automatic = this Mac's performance
                            cores, 2..8)
       --mem MiB            guest RAM (default: Settings > Advanced, automatic = half this Mac's RAM,
@@ -251,10 +307,13 @@ struct Options {
                            controller", which applies while the VM runs)
       --pad TYPE           what the virtual gamepad is in SteamOS this run (default: Settings >
                            Controller): auto: the same kind as the controller that drives it
-                           (DualSense, DualShock 4, else Xbox 360); xbox360: Microsoft X-Box 360 pad
-                           (xpad); dualsense, dualshock4: Sony pad as the Linux hid-playstation /
-                           hid-sony drivers expose it (PlayStation button glyphs in Steam). Any
-                           connected controller drives it; its rumble plays on that controller.
+                           (DualSense, DualShock 4, else Xbox 360), with a Steam Controller passed
+                           through as itself; steamcontroller: a Steam Controller goes to SteamOS
+                           as itself, any other controller drives an
+                           Xbox 360 pad; xbox360: Microsoft X-Box 360 pad (xpad); dualsense,
+                           dualshock4: Sony pad as the Linux hid-playstation / hid-sony drivers
+                           expose it (PlayStation button glyphs in Steam). Any connected
+                           controller drives it; its rumble plays on that controller.
                            Further controllers are players 2-4 with a pad each (auto: of
                            its own controller's kind; Settings > Controller "Additional
                            controllers").
@@ -324,9 +383,11 @@ struct Options {
 
     Updates (Settings > General "Check for updates at startup", on; never in the dev launcher
     work/out/steamac-vm): the first boot asks api.github.com for the latest StonkGuy/steamac release, at
-    most every 6 h; menu FX Steam Launcher > Check for Updates… checks at any time. Test hooks:
-    STEAMAC_UPDATE_URL (release JSON, http(s):// or file://; also enables the dev launcher's startup
-    check), STEAMAC_FAKE_VERSION (the version this launcher compares as)
+    most every 6 h; menu FX Steam Launcher > Check for Updates… checks at any time. Builds made with
+    this fork's update key (dist.sh SPARKLE_PUBLIC_KEY) download and install the update in the app
+    instead (Sparkle, this fork's feed only). Test hooks: STEAMAC_UPDATE_URL (release JSON, http(s)://
+    or file://; also enables the dev launcher's startup check), STEAMAC_FAKE_VERSION (the version this
+    launcher compares as), STEAMAC_UPDATE_FEED (another Sparkle appcast)
 
     Diagnostics:
       --perf-stats         every 5 s log frame pacing (also STEAMAC_PERF_STATS=1): guest flush and
@@ -371,7 +432,7 @@ struct Options {
                            stats dump PNG (game statistics question window)
 
     Window keys: Ctrl+Cmd+F fullscreen, Ctrl+Cmd+G capture/release the mouse, Ctrl+Option release,
-    Ctrl+Cmd+P Metal Performance HUD on/off (Settings > Display).
+    Ctrl+Cmd+P Metal Performance HUD on/off (Settings > Display; enabling requires a VM restart).
     Closing the window (or SIGINT/SIGTERM) presses the guest power key; a second request force-quits.
     Console: hvc0 <-> this terminal (raw mode when stdin is a TTY; Ctrl+] twice force-quits).
     """
@@ -405,6 +466,11 @@ struct Options {
                 if p.hasSuffix(":ro") { ro = true; p.removeLast(3) }
                 else if p.hasSuffix(":rw") { p.removeLast(3) }
                 o.disks.append(DiskSpec(path: p, readOnly: ro))
+            case "--share": o.share = try value(a)
+            case "--no-share": o.share = nil
+            case "--share-mount": o.shareMount = try value(a)
+            case "--share-library": o.shareLibrary = true
+            case "--no-share-library": o.shareLibrary = false
             case "--cpus": o.cpus = try int(a)
             case "--mem": o.memMiB = try int(a)
             case "--display":
@@ -500,7 +566,7 @@ struct Options {
             case "--pad":
                 let v = try value(a)
                 guard let t = LauncherSettings.PadType(rawValue: v) else {
-                    throw OptionError("--pad: auto, xbox360, dualsense or dualshock4")
+                    throw OptionError("--pad: auto, xbox360, dualsense, dualshock4 or steamcontroller")
                 }
                 o.padType = t
             case "--krun-log-level": o.krunLogLevel = UInt32(clamping: try int(a))
@@ -520,6 +586,7 @@ struct Options {
             case "--selftest-pill": o.selftestPill = true
             case "--selftest-settings": o.selftestSettings = true
             case "--selftest-remote-play": o.selftestRemotePlay = true
+            case "--selftest-stream": o.selftestStream = true
             case "--selftest-provision": o.selftestProvision = true
             case "--selftest-metal-cache": o.selftestMetalCache = true
             case "--selftest-game-layers": o.selftestGameLayers = true
@@ -582,8 +649,8 @@ struct Options {
 
     var isSelftest: Bool {
         selftestDisplay || selftestOverlay || selftestStall || selftestPill || selftestSettings || selftestProvision || selftestRemotePlay
-            || selftestMetalCache || selftestPointer || selftestGameLayers || selftestVR || selftestL10n || createDisk != nil
-            || growDisk != nil
+            || selftestMetalCache || selftestPointer || selftestGameLayers || selftestVR || selftestL10n || selftestStream
+            || createDisk != nil || growDisk != nil
             || showSSHPassword != nil
     }
 
@@ -622,6 +689,8 @@ struct Options {
             // only written when on; absent is the default (off), so an explicit =0 needs no key
             if let a = Options.frameLatencyArg(o.frameLatency) { add(a.key, a.value) }
             if let a = Options.vrArg(o.vr && VRHost.unavailableReason(o) == nil) { add(a.key, a.value) }
+            add("steamac.share", o.share == nil ? nil : o.shareMount)
+            add("steamac.share_library", o.share != nil && o.shareLibrary ? "1" : nil)
             if o.macTime {
                 add("steamac.tz", MacTime.zone)
                 add("steamac.clock24", MacTime.clock24.map { $0 ? "1" : "0" })
@@ -698,6 +767,30 @@ struct Options {
         vrRenderScale = s.vrRenderScale; vrUpscaler = s.vrUpscaler; vrSharpness = s.vrSharpness; vrForceSRGB = s.vrForceSRGB
         vrKeyframeInterval = s.vrKeyframeInterval; vrTCPOnly = s.vrTCPOnly; vrVirtualDesktop = s.vrVirtualDesktop
         if given("--no-sound") { ov[.soundEnabled] = "--no-sound" } else { sound = s.soundEnabled }
+        if given("--share") || given("--no-share") {
+            ov[.sharedFolder] = share.map { "--share \($0)" } ?? "--no-share"
+        } else {
+            // Like the DXMT library: a folder that is gone (external drive unplugged, renamed)
+            // must not stop the launcher; boot without the share and say so.
+            share = nil
+            if !s.sharedFolder.isEmpty {
+                if Options.isReadableFolder(s.sharedFolder) {
+                    share = s.sharedFolder
+                } else if !isSelftest {
+                    log("shared folder \(s.sharedFolder): not a readable folder; booting without the share")
+                }
+            }
+        }
+        if given("--share-mount") {
+            ov[.sharedMount] = "--share-mount \(shareMount)"
+        } else {
+            shareMount = Options.isValidShareMount(s.sharedMount) ? s.sharedMount : Options.defaultShareMount
+        }
+        if given("--share-library") || given("--no-share-library") {
+            ov[.sharedLibrary] = shareLibrary ? "--share-library" : "--no-share-library"
+        } else {
+            shareLibrary = s.sharedLibrary
+        }
         if given("--no-gamepad") { ov[.virtualPad] = "--no-gamepad" }
         if let padType { ov[.padType] = "--pad \(padType.rawValue)" }
         if given("--refresh") { ov[.refreshRate] = "--refresh \(refreshRate)" } else { refreshRate = min(240, max(24, s.refreshRate)) }
@@ -763,6 +856,12 @@ struct Options {
             }
         }
         if disks.count > 26 { throw OptionError("at most 26 disks") }
+        if let share {
+            guard Options.isReadableFolder(share) else { throw OptionError("--share: not a readable folder: \(share)") }
+            guard Options.isValidShareMount(shareMount) else {
+                throw OptionError("--share-mount: a subdirectory of \(Options.shareMountRoots.joined(separator: ", ")), no . or .. components, characters A-Z a-z 0-9 / _ . - only: \(shareMount)")
+            }
+        }
     }
 }
 

@@ -74,6 +74,48 @@ static const uint32_t call_params_size[WMTR_NCALLS] = {
 }
 @end
 
+static pthread_mutex_t stream_capture_lock = PTHREAD_MUTEX_INITIALIZER;
+static wmtr_stream_capture_callback stream_capture_callback;
+static void *stream_capture_userdata;
+static atomic_bool stream_capture_active;
+
+__attribute__((visibility("default"))) void
+wmtr_stream_capture_set(wmtr_stream_capture_callback callback, void *userdata) {
+  pthread_mutex_lock(&stream_capture_lock);
+  stream_capture_callback = callback;
+  stream_capture_userdata = userdata;
+  atomic_store_explicit(&stream_capture_active, callback != NULL, memory_order_relaxed);
+  pthread_mutex_unlock(&stream_capture_lock);
+}
+
+static void stream_capture_present(id<MTLCommandBuffer> cb, id drawable) {
+  if (!atomic_load_explicit(&stream_capture_active, memory_order_relaxed)) return;
+  pthread_mutex_lock(&stream_capture_lock);
+  if (stream_capture_callback)
+    stream_capture_callback(stream_capture_userdata, (void *)cb, (void *)drawable);
+  pthread_mutex_unlock(&stream_capture_lock);
+}
+
+@protocol WMTRStreamLayerObserver
+- (void)streamLayerChanged:(CAMetalLayer *)layer framebufferOnly:(NSNumber *)requested;
+@end
+
+static void stream_capture_layer_changed(uint16_t call, uint8_t *params) {
+  CAMetalLayer *layer = (CAMetalLayer *)((struct unixcall_generic_obj_noret *)params)->handle;
+  NSNumber *requested = nil;
+  if (call == 70) {
+    const struct WMTLayerProps *props = ((struct unixcall_generic_obj_constptr_noret *)params)->arg.ptr;
+    requested = @(props->framebuffer_only);
+  }
+  void (^notify)(void) = ^{
+    id view = layer.superlayer.delegate;
+    if ([view respondsToSelector:@selector(streamLayerChanged:framebufferOnly:)])
+      [(id<WMTRStreamLayerObserver>)view streamLayerChanged:layer framebufferOnly:requested];
+  };
+  if ([NSThread isMainThread]) notify();
+  else dispatch_sync(dispatch_get_main_queue(), notify);
+}
+
 struct pool_state;
 /* open_encoder: an encoder (calls 30/31/32/129) whose endEncoding (33) has not run yet */
 struct object_entry { uint64_t value; uint32_t refs, pool_refs; uint8_t plain, open_encoder; };
@@ -105,10 +147,13 @@ struct wmtr_host {
   uint64_t *views;
   uint32_t n_views, cap_views;
   _Atomic uint64_t n_req, n_sync, n_bytes, n_worker, n_sleep;
+  _Atomic uint32_t missing_drawable_logs; /* nextDrawable runs on the blocking worker */
+  uint32_t nil_present_logs; /* present calls run only on the executor */
   /* client-assigned encoder handles (WMTR_F_CLIENT_HANDLE): entry (handle % WMTR_HANDLE_SLOTS) */
   struct wmtr_handle { _Atomic uint64_t id; _Atomic uint64_t obj; } *handles;
   pthread_mutex_t object_lock;
   struct object_entry *objects;
+  uint32_t object_capacity, object_count;
   struct pool_state *pools;
 #ifdef WMTR_TESTING
   int strict_objects;
@@ -971,6 +1016,18 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     (void)mem_field;
     return host_new_buffer(h, p, arena_ref);
   }
+  case 47: case 48: /* nextDrawable may return nil (timeout, zero size or unavailable layer). */
+    if (!((struct unixcall_generic_obj_obj_noret *)params)->arg) {
+      /* DXMT does not check acquisition failure. Skip presentation, not the command buffer's
+       * remaining work/commit, and do not count/capture a frame that cannot reach the screen. */
+      if (h->nil_present_logs < 4) {
+        h->nil_present_logs++;
+        LOG(0, "call %u slot %u: nil drawable; skipping presentation%s\n", call, r->h.slot,
+            h->nil_present_logs == 4 ? " (further nil presentations suppressed for this context)" : "");
+      }
+      return STATUS_SUCCESS;
+    }
+    break;
   case 72: { /* CreateMetalViewFromHWND */
     struct unixcall_create_metal_view_from_hwnd *p = (void *)params;
     if (!h->ops->create_view) return STATUS_UNSUCCESSFUL;
@@ -1074,10 +1131,21 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)((struct unixcall_generic_obj_obj_noret *)params)->handle;
     if (frames_out()) frame_record_on_completion(cb); /* record when the frame is done */
     layer_policy_on_present(cb, (id)((struct unixcall_generic_obj_obj_noret *)params)->arg);
+    stream_capture_present(cb, (id)((struct unixcall_generic_obj_obj_noret *)params)->arg);
     double duration = call == 48 ? ((struct unixcall_generic_obj_obj_double_noret *)params)->arg1 : 0;
     trace_drawable_present((id)((struct unixcall_generic_obj_obj_noret *)params)->arg, duration);
   }
   NTSTATUS st = f(params);
+  if (st == STATUS_SUCCESS && call == 67 && !((struct unixcall_generic_obj_obj_ret *)params)->ret &&
+      atomic_load_explicit(&h->missing_drawable_logs, memory_order_relaxed) < 4 &&
+      atomic_fetch_add_explicit(&h->missing_drawable_logs, 1, memory_order_relaxed) < 4) {
+    CAMetalLayer *layer = (CAMetalLayer *)((struct unixcall_generic_obj_obj_ret *)params)->handle;
+    CGSize size = layer.drawableSize;
+    LOG(0, "nextDrawable returned nil: layer=%llx size=%.0fx%.0f hidden=%d attached=%d timeout=%d"
+        " (logged at most 4 times per context)\n", (unsigned long long)(uintptr_t)layer,
+        size.width, size.height, layer.hidden, layer.superlayer != nil, layer.allowsNextDrawableTimeout);
+  }
+  if (st == STATUS_SUCCESS && (call == 70 || call == 93)) stream_capture_layer_changed(call, params);
   keep_autoreleased(h, r->h.slot, call, params);
   return st;
 }
@@ -1408,7 +1476,8 @@ wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   h->slots = (struct wmtr_slot *)((uint8_t *)ring + WMTR_SLOTS_OFFSET);
   h->ops = ops; h->ctx = ctx;
   h->handles = calloc(WMTR_HANDLE_SLOTS, sizeof *h->handles);
-  h->objects = calloc(WMTR_HANDLE_SLOTS, sizeof *h->objects);
+  h->object_capacity = WMTR_HANDLE_SLOTS;
+  h->objects = calloc(h->object_capacity, sizeof *h->objects);
   h->pools = calloc(1, sizeof *h->pools);
   pthread_mutex_init(&h->pools->lock, NULL);
   pthread_mutexattr_t recursive;
@@ -1518,7 +1587,7 @@ wmtr_host_destroy(struct wmtr_host *h) {
       if (obj) { object_drop(h, (uint64_t)obj, 1); [obj release]; }
     }
   }
-  if (object_checks(h)) for (uint32_t i = 0; i < WMTR_HANDLE_SLOTS; i++) {
+  if (object_checks(h)) for (uint32_t i = 0; i < h->object_capacity; i++) {
     struct object_entry *e = &h->objects[i];
     if (!e->value || e->value == UINT64_MAX) continue;
     if (e->plain) {

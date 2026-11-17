@@ -3,8 +3,8 @@
 #   make server   wmtr-server (arm64): standalone executor for the two-process prototype
 #   make client-macos  winemetal.so (x86_64 Mach-O): client unixlib for macOS Wine (socket transport)
 #   make test     build and run tests/wmtr_loopback
-# Linux (x86-64 build box, CC=gcc):
-#   make client-linux  winemetal.so (x86-64 ELF): guest client unixlib (virtio-gpu transport), glibc <= 2.14 symbols
+# Linux (CC=gcc; x86-64 or AArch64):
+#   make client-linux  winemetal.so: guest client unixlib (virtio-gpu transport)
 #   make test-linux    build and run tests/wmtr_ntdll_test against it
 #   make guest-tests   static wmtr_ping_static / wmtr_wait_test for the VM guest (run there under FEX)
 # Inputs: DXMT source at the pinned revision (DXMT=), its native build dir with libairconv.a (DXMT_BUILD=),
@@ -79,7 +79,7 @@ $(OUT)/wmtr_present_test: tests/wmtr_present_test.m $(OUT)/libwmtr_host.dylib
 # DXMT's own guest API (winemetal_thunks.c) over the wmtr client into the production libwmtr_host
 $(OUT)/wmtr_dxmt_test: tests/wmtr_dxmt_test.m tests/dxmt-shim/wineunixlib.h src/wmtr_client.c include/*.h src/*.inc $(OUT)/libwmtr_host.dylib
 	$(CC) -Itests/dxmt-shim $(CFLAGS) -DNDEBUG -o $@ tests/wmtr_dxmt_test.m src/wmtr_client.c $(DXMT)/src/winemetal/winemetal_thunks.c \
-	  -L$(OUT) -lwmtr_host -Wl,-rpath,@executable_path -framework Foundation -framework Metal
+	  -L$(OUT) -lwmtr_host -Wl,-rpath,@executable_path -framework Foundation -framework Metal -framework QuartzCore
 $(OUT)/dxmt_test.metallib: tests/dxmt_test.metal | $(OUT)
 	xcrun -sdk macosx metal -o $@ $<
 $(OUT)/wmtr_loopback: tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_objects.h src/wmtr_objects.inc src/wmtr_object_cmds.inc src/wmtr_vr.m src/wmtr_client.c include/*.h | $(OUT)
@@ -87,21 +87,24 @@ $(OUT)/wmtr_loopback: tests/wmtr_loopback.m src/wmtr_host.m src/wmtr_objects.h s
 
 # -mtls-dialect=gnu: newer GCC defaults to TLS descriptors, which need GLIBC_ABI_GNU2_TLS (absent in the
 # Steam Runtime's and the FEX rootfs's glibc), so the unixlib would not load
-LINUX_CFLAGS = -O2 -g -Wall -Wno-unused-function -mtls-dialect=gnu $(INC) -include include/wmtr_glibc_compat.h
-client-linux: $(OUT)/x86_64-linux/winemetal.so
-$(OUT)/x86_64-linux/winemetal.so: src/wmtr_client.c src/transport_virtgpu.c include/*.h src/*.inc
-	mkdir -p $(OUT)/x86_64-linux
+LINUX_ARCH ?= $(firstword $(subst -, ,$(shell $(CC) -dumpmachine)))
+LINUX_TLS = $(if $(filter aarch64,$(LINUX_ARCH)),trad,gnu)
+LINUX_OUT = $(OUT)/$(LINUX_ARCH)-linux
+LINUX_CFLAGS = -O2 -g -Wall -Wno-unused-function -mtls-dialect=$(LINUX_TLS) $(INC) -include include/wmtr_glibc_compat.h
+client-linux: $(LINUX_OUT)/winemetal.so
+$(LINUX_OUT)/winemetal.so: src/wmtr_client.c src/transport_virtgpu.c include/*.h src/*.inc
+	mkdir -p $(LINUX_OUT)
 	$(CC) $(LINUX_CFLAGS) -shared -fPIC -o $@ src/wmtr_client.c src/transport_virtgpu.c -lpthread -ldl
-# guest-only test programs (static, run in the VM under FEX: they need the wmtr virtio-gpu context)
+# guest-only test programs (static, x86-64 only: run in the VM under FEX, they need the wmtr virtio-gpu context)
 guest-tests: $(OUT)/x86_64-linux/wmtr_ping_static $(OUT)/x86_64-linux/wmtr_wait_test
 $(OUT)/x86_64-linux/wmtr_%: tests/wmtr_%.c src/wmtr_client.c src/transport_virtgpu.c include/*.h src/*.inc
 	mkdir -p $(OUT)/x86_64-linux
 	$(CC) -O2 -Wall -Wno-unused-function $(INC) -static -pthread -o $@ $< src/wmtr_client.c src/transport_virtgpu.c
-test-linux: $(OUT)/x86_64-linux/winemetal.so
-	mkdir -p $(OUT)/x86_64-linux/standin
-	$(CC) -shared -fPIC -o $(OUT)/x86_64-linux/standin/ntdll.so tests/ntdll_standin.c
-	$(CC) -O2 -o $(OUT)/x86_64-linux/wmtr_ntdll_test tests/wmtr_ntdll_test.c -ldl
-	./$(OUT)/x86_64-linux/wmtr_ntdll_test $(abspath $(OUT))/x86_64-linux/standin/ntdll.so $(abspath $(OUT))/x86_64-linux/winemetal.so
+test-linux: $(LINUX_OUT)/winemetal.so
+	mkdir -p $(LINUX_OUT)/standin
+	$(CC) -shared -fPIC -o $(LINUX_OUT)/standin/ntdll.so tests/ntdll_standin.c
+	$(CC) -O2 -o $(LINUX_OUT)/wmtr_ntdll_test tests/wmtr_ntdll_test.c -ldl
+	./$(LINUX_OUT)/wmtr_ntdll_test $(abspath $(LINUX_OUT))/standin/ntdll.so $(abspath $(LINUX_OUT))/winemetal.so
 	@# loads in the Steam Runtime (sniper, glibc 2.31): no newer glibc version, no TLS-descriptor ABI requirement
 	@if readelf -V $< | grep -E 'GLIBC_ABI_|GLIBC_2\.(3[2-9]|[4-9][0-9])'; then echo "FAIL: glibc requirement too new"; exit 1; fi
 	@echo "glibc requirements: ok"
@@ -117,12 +120,19 @@ dxmt-payload:
 	if [ -f $(DXMT_PE)/d3d12.dll ]; then install -m 644 $(DXMT_PE)/d3d12.dll $(PAYLOAD)/x86_64-windows/d3d12.dll; fi
 	install -m 644 $(OUT)/x86_64-linux/winemetal.so $(PAYLOAD)/x86_64-unix/winemetal.so
 
+DXMT_ARM64EC_PE ?= ../work/out/dxmt-arm64ec/aarch64-windows
+dxmt-payload-arm64ec:
+	install -d $(PAYLOAD)/aarch64-windows $(PAYLOAD)/aarch64-unix
+	for f in d3d11 dxgi d3d10core winemetal; do install -m 644 $(DXMT_ARM64EC_PE)/$$f.dll $(PAYLOAD)/aarch64-windows/$$f.dll; done
+	install -m 644 $(OUT)/aarch64-linux/winemetal.so $(PAYLOAD)/aarch64-unix/winemetal.so
+
 # the launcher bundle picks the host library up from libkrun's prefix (host/launcher/bundle.sh)
 PREFIX ?= ../work/out/host
 install: $(OUT)/libwmtr_host.dylib
 	install -d $(PREFIX)/lib
-	install -m 755 $< $(PREFIX)/lib/libwmtr_host.dylib
+	@tmp=$$(mktemp "$(PREFIX)/lib/.libwmtr_host.XXXXXX"); \
+	  install -m 755 $< "$$tmp" && mv -f "$$tmp" "$(PREFIX)/lib/libwmtr_host.dylib"
 
 clean:
 	rm -rf $(OUT)
-.PHONY: all host server client-macos client-linux guest-tests test test-linux install dxmt-payload clean
+.PHONY: all host server client-macos client-linux guest-tests test test-linux install dxmt-payload dxmt-payload-arm64ec clean

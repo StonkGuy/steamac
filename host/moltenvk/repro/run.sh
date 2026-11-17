@@ -7,6 +7,12 @@
 #                                                         KosmicKrisp through the Khronos loader
 #                                                         (Homebrew vulkan-loader, test only: steamac
 #                                                         opens the driver without a loader)
+#   REPRO_CASE=shared_image ...                         only the #58 sharing test (either driver)
+#                                                       MoltenVK OPTIMAL imports skip automatically
+#                                                       (known Metal row-pitch validation abort);
+#                                                       LINEAR remains a sharing control.
+#   REPRO_CASE=sentry-94-uploads ...                    compressed mip upload + sync stress only
+#   REPRO_CASE=sentry-g-brackets ...                    deep KK control flow + ALU control only
 # 1. gamescope_cs.c: fetches gamescope 3.16.28 (pinned), compiles src/shaders/cs_*.comp with
 #    glslang like gamescope's meson build (glslangValidator -V) and creates every pipeline
 #    variant; cs_composite_blit must write the expected pixels from s_samplers[0] and from
@@ -24,6 +30,10 @@
 #    cleared depth/stencil values.
 # 4. linear_pitch.c: LINEAR image with VkImageDrmFormatModifierExplicitCreateInfoEXT rowPitch
 #    (virglrenderer dma-buf imports): layouts, memory size and pixel data use that pitch.
+#    sentry_ag.c (STEAMAC-AG/G, MoltenVK): RDR2's invalid statistics pools keep
+#    the feature disabled but return deterministic zero counters with availability;
+#    8192 timestamps sample and resolve across Metal's 4096-entry buffer limit.
+#    Mapped/imported and host-copy 1D/2D images check CPU pitches and every byte.
 # 5. xfb.c: transform feedback captured by geometry shaders (DXVK stream-output style without
 #    position and with rasterizer discard, strips with varying vertex counts, lines, 2 buffers,
 #    buffer offsets/sizes, counter buffers), buffer contents checked; transform feedback queries
@@ -47,7 +57,9 @@
 #    packed vertex formats (10-10-10-2, RG11B10F, RGB9E5, BGRA8) through geometry shader emulation read their values
 #    (American Truck Simulator's 2_10_10_10 normals failed pipeline creation under zink's provoking-vertex geometry shader).
 # 11. device_address.c: atomics on vector components behind buffer device addresses (vkd3d-proton's
-#    scalar-layout uvec3 counter, std430 uvec4 with a dynamic component, ivec2), values read back.
+#    scalar-layout uvec3 counter, std430 uvec4 with a dynamic component, ivec2), values read back; an atomic
+#    through an address held as a uvec2 and bitcast to a pointer in a helper (dxil-spirv's
+#    RobustPhysicalAtomicCounter, Ratchet & Clank: Rift Apart, #49: the MSL took the address of the cast).
 # 12. queries.c: occlusion query results copied from a later command buffer, one copy per query with
 #    availability and wait (Venus' query feedback): availability of queries other than 0; a timestamp pool of 8192;
 #    48 one-query timestamp pools on two devices (more than Metal's 32 counter heaps per process, which every guest
@@ -69,6 +81,9 @@
 #    views of 12-byte structured buffers; KosmicKrisp crashed in vkCreateBufferView, STEAMAC-2Z: skipped where the formats
 #    have no uniform texel buffer feature, MoltenVK) and on KosmicKrisp a view of a format without texel buffer features
 #    reading as a null descriptor.
+#    texel_limits.c (MoltenVK, STEAMAC-9E/79): the captured 536346624-wide view and
+#    explicit/WHOLE_SIZE advertised-limit+1 views fail creation before Metal; legal
+#    maximum-width and partial-final-texel views still update descriptors.
 # 14. multi_entry.c: modules with vertex, fragment and compute entry points (shaders/multi_entry/ linked with
 #    spirv-link, SPIR-V 1.0 and 1.6) whose compute entry point has workgroup variables (one zero-initialized):
 #    the vertex/fragment pipeline draws, the compute pipeline counts in workgroup memory.
@@ -88,7 +103,8 @@
 #    inline array<T, 1000000> and program, ~100 MB per pipeline).
 # 17. msl_helpers.c: fragment helpers with an OpKill-only block, directly and through a nested caller
 #    (STEAMAC-1Q): discard left-half pixels, render right-half colors, suppress writes after discard;
-#    a compute helper named log10(float) (STEAMAC-1R), its implementation's values read back.
+#    user helpers named log10(float) (STEAMAC-1R) and rgb9e5(uint) (STEAMAC-A9)
+#    preserve their own implementations, checking all decoded RGB9E5 channels.
 #    a graphics link failure with a missing varying (STEAMAC-2M/41) must retain reflected stage diagnostics.
 #    texture_helpers.c (STEAMAC-3W): robust sampling through a sampler2D helper with an immutable YCbCr
 #    conversion must compile, and sampling a null descriptor must return four zeros.
@@ -96,6 +112,7 @@
 #    output to R32_SINT failed in Metal): signedness changes, a padded scalar, location 1 next to a matching output,
 #    an output array indexed dynamically, float to R32_UINT and ivec4 to RGBA8_UNORM (bits checked on MoltenVK only),
 #    two outputs packed into one location's components; every pipeline must be created and write the output's bits.
+#    MoltenVK also checks absent/real dual-source blend outputs, pixels and pipeline-cache roundtrips (STEAMAC-75).
 # 19. device_lost.c (KosmicKrisp only): a device loss must be printed on stderr (STEAMAC-G: a release build lost
 #    the device silently and Venus only logged "vkQueueSubmit resulted in CS error"); the runtime's queue-loss
 #    path (a timeline signal of value 0) stands in for a failed Metal command buffer, which can't be provoked.
@@ -104,6 +121,9 @@
 #    shm_open failed): at a Finder launch's soft RLIMIT_NOFILE of 256 they run out of fds within 256 / 3 allocations,
 #    the driver never failing; at the limit steamac-vm raises itself to, 8192 live ones, 20000 free + allocate rounds and
 #    8192 live plain allocations of that type succeed, and every fd is closed after the frees.
+# shared_image.c (#58): two devices import independent mappings of the same exported shm fd,
+#    as virglrenderer's macOS dma-buf emulation does. OPTIMAL and LINEAR, plain and dedicated,
+#    A->B and B->A clears/readbacks must share every pixel (no native Vulkan OPAQUE_FD on Metal).
 # 21. sparse.c (KosmicKrisp only): vkd3d-proton's Tiled Resources Tier 2 feature gate, standard 2D tiles and
 #    per-layer mip tails, strict unbound image/buffer reads and shader residency, minimum-LOD clamps,
 #    binary/timeline sparse bind ordering, page relocation and image/plain-buffer aliases; vkd3d-proton's remap stress
@@ -114,9 +134,10 @@
 #    gathers reaching or passing the last level (NEAREST and LINEAR mip), through samplers clamping the LOD and through
 #    views with baseMipLevel > 0 (also fetches, explicit-LOD samples through a MIN reduction sampler and imageLoad of
 #    storage views of levels > 0: Metal reported the image's level lod instead of base + lod); gathers whose footprint
-#    crosses into an unbound tile (Metal reported them resident); a D32 sparse depth attachment with unbound tiles
-#    (depth tests read 0 and writes are dropped across render passes; within one render pass tile memory keeps them,
-#    printed as INFO: Tiled Resources Tier 2 allows it); R32/R8 sampler MIN/MAX reduction over bilinear footprints and
+#    crosses into an unbound tile (Metal reported them resident); a D32 sparse depth attachment with unbound tiles,
+#    plain and MUTABLE_FORMAT (depth tests read 0 and writes are dropped across render passes; within one render pass
+#    tile memory keeps them, printed as INFO: Tiled Resources Tier 2 allows it), and a buffer-to-image copy into it
+#    (the bound tile reads the copy back; #51: on Apple10 its clears and depth writes were lost); R32/R8 sampler MIN/MAX reduction over bilinear footprints and
 #    adjacent mip levels, with weighted-average controls, through immutable samplers, update-after-bind sets that get
 #    the reduction sampler after recording (replayed at submission, and one-time-submit) and sets rewritten before a
 #    resubmission; then (sparse minmax-log, MESA_KK_DEBUG=minmax) where KosmicKrisp emulates MIN/MAX (before Apple10),
@@ -168,13 +189,25 @@
 #    R64_UINT storage images, with the CPU recomputing every texel from the same mix() and the same
 #    coordinate mapping, plus a single-invocation pipeline that checks the returned (fetch) value
 #    exactly when uncontended.
-# All three print the capability they need and skip when the driver does not advertise it, so an honest
+# 28. tess_components.c: two tessellation pipelines whose vertex shader writes POSITION (float3) one component at a
+#    time next to TEXCOORD in the same location (dxil-spirv's packing, Ratchet & Clank: Rift Apart, #49). The
+#    pipeline must compile (component stores to the captured outputs, SPIRV-Cross 0042) and draw: the vertex stage
+#    packed both into one 16-byte vector while the control stage read them as two members (32 bytes), so patches
+#    took their corners from the wrong vertices and nothing was drawn (SPIRV-Cross 0056). The second control
+#    shader reads only POSITION; dummy padding must retain the unused TEXCOORD's stride. Every pixel checked.
+#    stage_widths.c (MoltenVK, historical STEAMAC-2M/88): ordinary raster vector
+#    widths retain written lanes, zero absent ones, and preserve logical shader
+#    values across plain/component/array/block interfaces and cache round trips.
+#    sentry-87-components.sh (MoltenVK, STEAMAC-87/BB): split location components
+#    retain distinct vertex/fragment user names beside a width-linked varying,
+#    including interface blocks, float3+float, and serialized-cache reversal.
+# 25-27 print the capability they need and skip when the driver does not advertise it, so an honest
 # driver stays green; when it is advertised, the values must be right. REPRO_FORCE=1 skips the
 # capability check and makes the pipeline fail to compile, reproducing the game's failure on the host.
-# image_views.c (KosmicKrisp only; STEAMAC-62/64/3): empty and out-of-bounds
-# image-view slice ranges (explicit, REMAINING_ARRAY_LAYERS, 3D slices, narrowed
-# counts) and incompatible RGBA8 -> R8 views fail cleanly before Metal; valid
-# remaining-layer and 3D-slice controls still create.
+# image_views.c (KosmicKrisp only; STEAMAC-62/64/3/G): single-layer non-array
+# 2D slice overflow is recovered and checked by clear/readback. Other invalid
+# ranges (empty, REMAINING_ARRAY_LAYERS, 3D slices, narrowed counts) and formats
+# still fail before Metal; valid remaining-layer and 3D-slice controls create.
 # nir_cache.c (KosmicKrisp only; STEAMAC-6M/6K): corrupted precompiled NIR,
 # checksum corruption, missing checksum and legacy entries must be cache misses
 # before nir_deserialize; an unmodified control and every rebuilt pipeline dispatch
@@ -186,6 +219,15 @@
 # encoder_shapes.c (KosmicKrisp only; STEAMAC-74/73): with MESA_KK_DEBUG=shapes (Apple9+ logs without it) each
 # render encoder shape is logged once per thread: 100 shapes over 30 frames must log exactly the lines of one frame
 # (0073's direct-mapped cache logged 2275 render shape lines), and 300 shapes stop at 256 with one note.
+# sentry-ah-no-vertex.c (KosmicKrisp only; STEAMAC-AH): a graphics pipeline without a vertex shader (fragment
+# shader only) must fail creation instead of faulting the process (the bind dereferenced the missing vertex
+# shader); a vertex + fragment control draws every pixel green.
+# sentry-bj-destroyed-view.c (KosmicKrisp only, REPRO_CASE=sentry-bj; STEAMAC-BJ/BK): a render pass with a live
+# view clears to green without a log line; one whose framebuffer view was destroyed must be named ("not alive")
+# before Mesa's common vkCmdBeginRenderPass dereferences it (the fault itself remains: invalid application use).
+# sentry-bn-entrypoint.m (KosmicKrisp only, REPRO_CASE=sentry-bn; STEAMAC-BN/BP): the driver's
+# mtl_new_render_pipeline with a missing, fragment-stage or absent vertex function must return NULL instead of
+# Metal's `vertexFunction must not be nil` abort; a valid pair draws 16 green pixels.
 # All run with Metal API validation in assert mode (MTL_DEBUG_LAYER), so a Metal validation error
 # fails the run instead of aborting a VM later.
 # All applicable tests must pass on MoltenVK. On KosmicKrisp all but 5 and 10 must pass (1 sizes the descriptor pool with
@@ -248,6 +290,88 @@ build() {
 	xcrun clang -std=c11 -Wall -Werror -O1 "$@" -I"$inc" "$here/$prog.c" $link -o "$work/$prog"
 }
 
+run_sentry_ag() {
+	build sentry_ag
+	ag_log=$work/sentry-ag.log
+	"$work/sentry_ag" > "$ag_log" 2>&1 || { cat "$ag_log"; return 1; }
+	cat "$ag_log"
+	if grep -E 'Invalid sample buffer length|Could not create MTLCounterSampleBuffer|AGX: Texture read/write assertion' "$ag_log"; then
+		echo "sentry-ag: unexpected Metal counter/pitch failure" >&2
+		return 1
+	fi
+	python3 "$here/sentry_ag_gpu.py" "${REPRO_MOLTENVK_SOURCE:-$root/work/build/host-moltenvk/src}" "$work/sentry-ag-gpu"
+}
+
+if [ "${REPRO_CASE:-}" = shared_image ]; then
+	build shared_image
+	"$work/shared_image"
+	exit
+fi
+if [ "${REPRO_CASE:-}" = sentry-94-uploads ]; then
+	build sentry-94-uploads
+	"$work/sentry-94-uploads"
+	exit
+fi
+if [ "${REPRO_CASE:-}" = sentry-g-brackets ]; then
+	[ "$driver" = kosmickrisp ] || { echo "sentry-g-brackets requires KosmicKrisp" >&2; exit 2; }
+	exec "$here/sentry-g-brackets.sh" "$kk"
+fi
+if [ "${REPRO_CASE:-}" = command-allocator ]; then
+	[ "$driver" = kosmickrisp ] || { echo "command-allocator requires KosmicKrisp" >&2; exit 2; }
+	exec "$here/command-allocator.sh" "$kk"
+fi
+if [ "${REPRO_CASE:-}" = sentry-g-views ]; then
+	[ "$driver" = kosmickrisp ] || { echo "sentry-g-views requires KosmicKrisp" >&2; exit 2; }
+	build image_views
+	exec python3 "$here/image-view-diagnostics.py" "$work/image_views"
+fi
+if [ "${REPRO_CASE:-}" = sentry-ah ]; then
+	glslangValidator -V --quiet -x "$here/shaders/sentry_ah.vert" -o "$work/sentry_ah.vert.inc"
+	glslangValidator -V --quiet -x "$here/shaders/sentry_ah.frag" -o "$work/sentry_ah.frag.inc"
+	build sentry-ah-no-vertex -I"$work"
+	"$work/sentry-ah-no-vertex"
+	exit
+fi
+if [ "${REPRO_CASE:-}" = sentry-bj ]; then
+	[ "$driver" = kosmickrisp ] || { echo "sentry-bj requires KosmicKrisp" >&2; exit 2; }
+	build sentry-bj-destroyed-view
+	"$work/sentry-bj-destroyed-view" live > "$work/sentry-bj-live.log" 2>&1 || { cat "$work/sentry-bj-live.log"; exit 1; }
+	cat "$work/sentry-bj-live.log"
+	if grep -q 'not alive' "$work/sentry-bj-live.log"; then
+		echo "sentry-bj: a live view was reported" >&2
+		exit 1
+	fi
+	# Faults after the log line, like the report: the case checks the line, not the exit status.
+	"$work/sentry-bj-destroyed-view" destroyed > "$work/sentry-bj.log" 2>&1 || true
+	cat "$work/sentry-bj.log"
+	grep -q 'attachment 0/1 (framebuffer, format 37, samples 1) image view 0x[0-9a-f]* is not alive' "$work/sentry-bj.log" || {
+		echo "sentry-bj: the destroyed attachment view was not named" >&2
+		exit 1
+	}
+	echo "OK destroyed: the attachment's destroyed view is named before the render pass begins"
+	exit
+fi
+if [ "${REPRO_CASE:-}" = sentry-bn ]; then
+	[ "$driver" = kosmickrisp ] || { echo "sentry-bn requires KosmicKrisp" >&2; exit 2; }
+	xcrun clang -Wall -Werror -fno-objc-arc -framework Metal -framework Foundation \
+		"$here/sentry-bn-entrypoint.m" -o "$work/sentry-bn-entrypoint"
+	offset=$(nm "$kk" | awk '$3 == "_mtl_new_render_pipeline" { print $1 }')
+	[ -n "$offset" ] || { echo "sentry-bn: no _mtl_new_render_pipeline in $kk" >&2; exit 1; }
+	for mode in valid missing wrong-stage nil; do
+		"$work/sentry-bn-entrypoint" "$kk" "$offset" "$mode"
+	done
+	exit
+fi
+if [ "${REPRO_CASE:-}" = sentry-ag ]; then
+	[ "$driver" = moltenvk ] || { echo "sentry-ag requires MoltenVK" >&2; exit 2; }
+	run_sentry_ag
+	exit
+fi
+if [ "${REPRO_CASE:-}" = sentry-87-components ]; then
+	[ "$driver" = moltenvk ] || { echo "sentry-87-components requires MoltenVK" >&2; exit 2; }
+	exec "$here/sentry-87-components.sh" "$libdir" "$work/sentry-87-components"
+fi
+
 src=$work/gamescope
 if [ ! -d "$src/.git" ]; then
 	git init -q "$src"
@@ -273,7 +397,7 @@ build gamescope_cs
 gspv=$work/geometry-spv
 rm -rf "$gspv"
 mkdir -p "$gspv"
-for s in "$here"/shaders/*.vert "$here"/shaders/*.geom "$here"/shaders/*.frag; do
+for s in "$here"/shaders/*.vert "$here"/shaders/*.tesc "$here"/shaders/*.tese "$here"/shaders/*.geom "$here"/shaders/*.frag; do
 	glslangValidator -V --quiet "$s" -o "$gspv/$(basename "$s").spv"
 done
 for s in "$here"/shaders/*.comp; do
@@ -290,6 +414,9 @@ build depth_stencil
 
 build linear_pitch
 "$work/linear_pitch"
+if [ "$driver" = moltenvk ]; then
+	run_sentry_ag
+fi
 
 if [ "$driver" = moltenvk ]; then
 	build xfb
@@ -309,18 +436,19 @@ build robust_access
 build invalid_usage
 "$work/invalid_usage" "$gspv"
 if [ "$driver" = moltenvk ]; then
-	# The failing MSL is logged after the error: the first lines without SPIRV-Cross' helper templates, and the
-	# lines around the error locations, each once (the two errors are on neighboring lines).
+	# Library errors happen before the failed-pipeline logger can run (STEAMAC-6V/87).
+	# Keep the complete small source, including helper templates, with unique line numbers.
 	msl_log=$work/msl-log.txt
 	"$work/invalid_usage" "$gspv" msl-log 2> "$msl_log"
 	msl_context=$(grep '^\[mvk-msl\] [0-9][0-9]*: ' "$msl_log" || true)
-	if grep -q '^\[mvk-msl\] #include <metal_stdlib>$' "$msl_log" && grep -q '^\[mvk-msl\] \.\.\. ([0-9]* lines of templates left out)$' "$msl_log" &&
-		! grep -q '^\[mvk-msl\] struct spvUnsafeArray' "$msl_log" && [ "$(printf '%s\n' "$msl_context" | grep -c 'double')" -eq 2 ] &&
+	if grep -q '^\[mvk-msl\] // Library failure MSL bytes=.*capture=full$' "$msl_log" &&
+		grep -q '^\[mvk-msl\] [0-9][0-9]*: #include <metal_stdlib>$' "$msl_log" &&
+		grep -q '^\[mvk-msl\] [0-9][0-9]*: template<' "$msl_log" &&
+		[ "$(printf '%s\n' "$msl_context" | grep -c 'double')" -eq 2 ] &&
 		[ -z "$(printf '%s\n' "$msl_context" | sed 's/: .*//' | sort | uniq -d)" ]; then
-		echo "OK   failing MSL logged: $(grep -c '^\[mvk-msl\] ' "$msl_log") [mvk-msl] lines, $(grep '^\[mvk-msl\] \.\.\. (' "$msl_log" | sed 's/^\[mvk-msl\] //' | tr '\n' ' ')error context (each line once):"
-		printf '%s\n' "$msl_context"
+		echo "OK complete small failed library source logged, including templates and both error lines"
 	else
-		echo "FAIL failing MSL not logged as [mvk-msl] lines (head without templates, both error lines, each context line once):"
+		echo "FAIL failing library source lacks full replayable diagnostics:"
 		cat "$msl_log"
 		exit 1
 	fi
@@ -334,15 +462,32 @@ if [ "$driver" = moltenvk ]; then
 	build pipeline_limits
 	MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 "$work/pipeline_limits" "$gspv" buffers
 	"$work/pipeline_limits" "$gspv" blend
+	# STEAMAC-83: tessellation+geometry is not implemented; never feed sentinel 255 to Metal.
+	tessgeom_log=$work/tessgeom-log.txt
+	"$work/pipeline_limits" "$gspv" tessgeom 2> "$tessgeom_log"
+	if ! grep -q 'Tessellation pipelines with a geometry shader are not supported' "$tessgeom_log" ||
+		grep -q 'buffer(255)\|Shader library compile failed' "$tessgeom_log"; then
+		cat "$tessgeom_log"
+		echo "FAIL combined tessellation+geometry lacks an explicit unsupported-feature diagnostic"
+		exit 1
+	fi
+	# STEAMAC-8J: sample-rate projected sampling must link on M1 (missing itrproj intrinsic).
+	"$work/pipeline_limits" "$gspv" projected
 	build spec_ids
 	"$work/spec_ids" "$gspv"
+	# STEAMAC-76/77: imported optimal volumes still need placement-backed 2D aliases.
+	build volume_views
+	"$work/volume_views"
+	"$work/volume_views" plain
 	"$work/pipeline_limits" "$gspv" shared
 	compute_log=$work/compute-memory-log.txt
 	"$work/pipeline_limits" "$gspv" oversized 2> "$compute_log"
-	if grep -q 'Compute pipeline diagnostics: entry=main hash=.*shared-memory-limit=32768' "$compute_log" &&
+	if grep -q '^\[mvk-msl\] // Compute pipeline diagnostics: entry=main hash=.*shared-memory-limit=32768' "$compute_log" &&
+		grep -q '^\[mvk-msl\] // Metal pipeline descriptor:' "$compute_log" &&
+		! grep -q '^\[mvk-error\] Compute pipeline diagnostics:' "$compute_log" &&
 		grep -q '^\[mvk-msl\] // Pipeline failure MSL stage=.*bytes=.*lines=' "$compute_log" &&
 		grep -q 'threadgroup .*11616' "$compute_log"; then
-		echo "OK oversized compute pipeline logs workgroup, memory limit and MSL declarations"
+		echo "OK oversized compute failure keeps workgroup, descriptor and MSL in one report stream"
 	else
 		cat "$compute_log"
 		echo "FAIL oversized compute pipeline lacks memory/source diagnostics"
@@ -352,6 +497,15 @@ fi
 
 build device_address
 "$work/device_address" "$gspv"
+
+tspv=$work/tess-spv
+rm -rf "$tspv"
+mkdir -p "$tspv"
+for s in "$here"/shaders/tess_components/*; do
+	glslangValidator -V --quiet "$s" -o "$tspv/$(basename "$s").spv"
+done
+build tess_components
+"$work/tess_components" "$tspv"
 
 # 25./26./27.: Dragon's Dogma 2's shader gaps and 64-bit image atomics. shaders/dd2_wave/ is
 # compiled here because subgroup ops need SPIR-V 1.3 (the generic .vert/.frag loop above targets
@@ -374,6 +528,12 @@ build queries
 
 build texel_buffer
 "$work/texel_buffer" "$gspv"
+if [ "$driver" = moltenvk ]; then
+	build texel_limits
+	for case_id in captured explicit whole boundary partial; do
+		"$work/texel_limits" "$case_id"
+	done
+fi
 
 mspv=$work/multi-entry-spv
 rm -rf "$mspv"
@@ -407,14 +567,22 @@ if [ "$driver" = moltenvk ]; then
 	"$work/msl_helpers" "$gspv" link-log 2> "$link_log"
 	if grep -q '^\[mvk-msl\] // vertex entry=main hash=' "$link_log" &&
 		grep -q '^\[mvk-msl\] // fragment entry=main hash=' "$link_log" &&
-		grep -q '^\[mvk-msl\] // in location=3 component=0 type=.* width=4 ' "$link_log" &&
-		grep -q '^\[mvk-msl\] // Pipeline failure MSL stage=.*bytes=.*lines=' "$link_log"; then
-		echo "OK graphics pipeline failure includes stage interfaces and bounded MSL source"
+		grep -q '^\[mvk-msl\] // in location=3 component=0 index=0 type=.* width=4 ' "$link_log" &&
+		grep -q '^\[mvk-msl\] // Pipeline failure MSL stage=0 .*capture=full' "$link_log" &&
+		grep -q '^\[mvk-msl\] // Pipeline failure MSL stage=4 .*capture=full' "$link_log" &&
+		grep -q '^\[mvk-msl\] [0-9][0-9]*: .*fullSourceMiddle' "$link_log" &&
+		grep -q '^\[mvk-msl\] [0-9][0-9]*: template<typename' "$link_log" &&
+		grep -q '^\[mvk-msl\] // Vulkan static blend attachment=0 .*enabled=0 ' "$link_log" &&
+		grep -q '^\[mvk-msl\] // Metal pipeline descriptor:' "$link_log"; then
+		echo "OK graphics pipeline failure includes interfaces, complete small MSL and Metal descriptor"
 	else
 		cat "$link_log"
 		echo "FAIL graphics pipeline failure lacks stage interfaces"
 		exit 1
 	fi
+	# STEAMAC-AD: retain replayable source at 112824 bytes / 1137 lines and at the
+	# inclusive byte/line limits, while keeping oversized diagnostics bounded.
+	sh "$here/sentry-ad-capture.sh" "$libdir" "$work/ad-capture" "$inc"
 fi
 
 if [ "$driver" = moltenvk ]; then
@@ -425,6 +593,12 @@ fi
 
 build frag_output
 "$work/frag_output" "$gspv"
+if [ "$driver" = moltenvk ]; then
+	"$work/frag_output" "$gspv" dual-source
+	sh "$here/stage-widths.sh" "$libdir" "$work/stage-widths"
+	sh "$here/sentry-87-components.sh" "$libdir" "$work/sentry-87-components"
+	sh "$here/sentry-57-shared.sh" "$libdir/libMoltenVK.dylib" - "$inc" "$work/shared-memory"
+fi
 
 if [ "$driver" = kosmickrisp ]; then
 	build device_lost
@@ -434,6 +608,9 @@ fi
 build host_memory
 "$work/host_memory"
 
+build shared_image
+"$work/shared_image"
+
 # What vkd3d-proton derives for a D3D12 game from this driver, and which of it Metal cannot provide
 # (Dragon's Dogma 2 refuses the GPU over a capability named in the game's own dialog).
 build d3d12_caps
@@ -441,7 +618,7 @@ build d3d12_caps
 
 if [ "$driver" = kosmickrisp ]; then
 	build image_views
-	"$work/image_views"
+	python3 "$here/image-view-diagnostics.py" "$work/image_views"
 	build linear_images
 	"$work/linear_images"
 
@@ -477,10 +654,25 @@ if [ "$driver" = kosmickrisp ]; then
 	fi
 	echo "OK encoder_shapes: 100 shapes logged once over 30 frames, 300 shapes capped at 256"
 
+	REPRO_DRIVER=kosmickrisp "$here/metal-diagnostics.sh" "$kk"
+
 	# STEAMAC-5E/5F: block-edge and volume scratch copies with Metal validation.
 	build sentry-image-copy
 	"$work/sentry-image-copy" compressed
 	"$work/sentry-image-copy" color
+
+	# STEAMAC-94: compressed asset upload patterns and completion ordering.
+	build sentry-94-uploads
+	"$work/sentry-94-uploads"
+
+	# STEAMAC-G: Metal's 256-level parser limit, deep divergent control flow and jumps.
+	"$here/sentry-g-brackets.sh" "$kk"
+
+	# STEAMAC-AH: a graphics pipeline without a vertex shader must fail creation.
+	glslangValidator -V --quiet -x "$here/shaders/sentry_ah.vert" -o "$work/sentry_ah.vert.inc"
+	glslangValidator -V --quiet -x "$here/shaders/sentry_ah.frag" -o "$work/sentry_ah.frag.inc"
+	build sentry-ah-no-vertex -I"$work"
+	"$work/sentry-ah-no-vertex"
 
 	# STEAMAC-6H/6G: unused NULL sets and missing descriptor declarations.
 	build sentry_descriptors
