@@ -1,14 +1,19 @@
 # Release DMG: builds the sources of a tag with the repository's own scripts and attaches
 #   FX-Steam-Launcher-<label>-adhoc.dmg (+ .sha256) and FX-Steam-Launcher-<label>-gpl-sources.tar
 # to the GitHub release. The app is signed ad hoc (host/launcher/dist.sh, DIST_SIGN=adhoc): no
-# Apple Developer account and no secret is involved; see docs/release-build.md.
+# Apple Developer account is involved; see docs/release-build.md.
+# In-app updates (Sparkle, SparkleUpdates.swift) come only from this fork's feed: with the repository
+# variable SPARKLE_PUBLIC_KEY (this fork's EdDSA public key) the app carries it and a release also
+# gets appcast.xml, signed in the app job with the secret SPARKLE_ED_PRIVATE_KEY (generate_keys -x);
+# Sparkle checks the DMG's EdDSA signature from that feed before it installs. Without the variable
+# the app has no feed and its update check asks this fork's GitHub releases instead.
 #
 # Jobs (GitHub's arm64 macOS runners have no nested virtualization, so no Linux containers there):
 #   dxmt   macOS      host/dxmt/build.sh fetch llvm native host pe      (DXMT host library, PE dlls)
 #   guest  Linux arm  guest/kernel, guest/mesa, scripts/build-image.sh initramfs (parallel to dxmt)
 #   layer  Linux arm  DXMT client + payload, scripts/build-image.sh layer
 #   app    macOS      ./build.sh host (bundle.sh checks the guest receipts), dist.sh, dist-verify.sh
-#   release           uploads the three files (the only job with contents: write)
+#   release           uploads the files (+ appcast.xml with the update key; the only job with contents: write)
 # The guest receipts (scripts/guest-artifacts.py) bind source bytes to output bytes and name no
 # machine or path, so the images built by `guest` are checked again by `app` on its own checkout.
 #
@@ -371,13 +376,15 @@ jobs:
       - name: Launcher self-tests (no VM)
         run: |
           app="work/out/FX Steam Launcher.app/Contents/MacOS/steamac-vm"
-          for t in graphics-path metal-cache game-layers remote-play vr; do
+          for t in graphics-path metal-cache game-layers remote-play vr stream settings l10n; do
             echo "=== --selftest-$t"
             "$app" "--selftest-$t"
           done
       - name: DMG (ad hoc signature)
         env:
           DIST_SIGN: adhoc
+          # this fork's update key (public half); empty: no in-app updates (GitHub release check)
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
         run: host/launcher/dist.sh
       - name: Verify, name, checksum
         run: |
@@ -400,6 +407,36 @@ jobs:
             echo "runner: $ImageOS $ImageVersion, $(xcodebuild -version | tr '\n' ' ')"
             cat upload/*.sha256
           } | tee upload/BUILD.txt >> "$GITHUB_STEP_SUMMARY"
+      # The feed SUFeedURL names (dist.sh: the appcast.xml asset of the latest release): one item for
+      # this release's DMG, its EdDSA signature and the feed's own signature (SURequireSignedFeed).
+      - name: Update feed (appcast.xml)
+        if: env.RELEASE_TAG != '' && vars.SPARKLE_PUBLIC_KEY != ''
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          [ -n "$SPARKLE_ED_PRIVATE_KEY" ] || { echo "::error::SPARKLE_PUBLIC_KEY is set but the secret SPARKLE_ED_PRIVATE_KEY is not: the app expects a feed signed with it"; exit 1; }
+          bin=host/launcher/.build/artifacts/sparkle/Sparkle/bin
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$key"
+          feed=$(mktemp -d)
+          cp upload/*-adhoc.dmg "$feed/"
+          repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          "$bin/generate_appcast" --ed-key-file "$key" --maximum-deltas 0             --download-url-prefix "$repo/releases/download/$RELEASE_TAG/"             --link "$repo" --full-release-notes-url "$repo/releases/tag/$RELEASE_TAG" "$feed"
+          # generate_appcast signs an item only when the app's SUPublicEDKey is the signing key's public half
+          python3 - "$feed/appcast.xml" "$repo/releases/download/$RELEASE_TAG/$(basename upload/*-adhoc.dmg)" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          path, url = sys.argv[1:]
+          sparkle = '{http://www.andymatuschak.org/xml-namespaces/sparkle}'
+          enclosures = [e for e in ET.parse(path).iter('enclosure') if e.get('url') == url]
+          sys.exit(0 if enclosures and all(e.get(sparkle + 'edSignature') for e in enclosures) else
+                   f'appcast.xml has no EdDSA signature for {url}: the app\'s SUPublicEDKey is not the signing key\'s')
+          PY
+          "$bin/sign_update" --ed-key-file "$key" "$feed/appcast.xml"
+          "$bin/sign_update" --ed-key-file "$key" --verify "$feed/appcast.xml"
+          cp "$feed/appcast.xml" upload/appcast.xml
+          cat upload/appcast.xml
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-files
@@ -429,3 +466,5 @@ jobs:
           # A pushed tag without a release gets a draft to review; an existing release keeps its notes.
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --draft --verify-tag --title "$RELEASE_TAG" --notes "Built by the Release DMG workflow."
           gh release upload "$RELEASE_TAG" upload/*.dmg upload/*.sha256 upload/*-gpl-sources.tar
+          # the in-app update feed (only with this fork's update key, see the header)
+          if [ -f upload/appcast.xml ]; then gh release upload "$RELEASE_TAG" upload/appcast.xml; fi

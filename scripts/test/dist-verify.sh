@@ -74,6 +74,18 @@ else
     bad "Info.plist has no SteamacGitCommit"
 fi
 if [[ $MODE == adhoc ]] && pl SteamacDistTeamID >/dev/null; then bad "ad hoc build claims a SteamacDistTeamID"; fi
+# This fork's updates only: no upstream feed or key (a fork install would take fxgl's DMG), and the
+# CFBundleVersion Sparkle orders by is <version>.<SteamacForkRelease>.
+feed=$(pl SUFeedURL || true)
+if [[ $feed == *fxgl.github.io* || $feed == *github.com/fxgl/* ]]; then bad "SUFeedURL is upstream's feed: $feed"; fi
+if [[ $(pl SUPublicEDKey || true) == ML1BKHcTTwKlVSLtTdMvyk7Fhwg35VN1nUp+o4fezt8= ]]; then bad "SUPublicEDKey is upstream's key"; fi
+if [[ -n $feed ]]; then
+    if [[ -n $(pl SUPublicEDKey || true) ]]; then ok "in-app updates from $feed"; else bad "SUFeedURL without SUPublicEDKey"; fi
+else
+    ok "no in-app update feed (GitHub release check)"
+fi
+want_build="$(pl CFBundleShortVersionString)$(pl SteamacForkRelease >/dev/null && echo ".$(pl SteamacForkRelease)")"
+if [[ $(pl CFBundleVersion) == "$want_build" ]]; then ok "CFBundleVersion $want_build"; else bad "CFBundleVersion $(pl CFBundleVersion), expected $want_build"; fi
 
 homes=$(LC_ALL=C grep -r -a -o -h -E '/Users/[A-Za-z0-9._-]+' "$APP" 2>/dev/null | sort -u | sed 's|^/Users/||' || true)
 for home in $homes; do

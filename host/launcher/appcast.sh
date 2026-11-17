@@ -22,6 +22,10 @@
 # STEAMAC_UPDATE_FEED=URL/appcast.xml, or build it with dist.sh's SPARKLE_FEED_URL=URL/appcast.xml.
 # Env SPARKLE_KEY_FILE: the private key from that file instead of the keychain (a throwaway test key
 # whose public half went into the app as dist.sh's SPARKLE_PUBLIC_KEY).
+#
+# This fork: releases get their feed from the release workflow (.github/workflows/release.yml, the
+# appcast.xml asset of each StonkGuy/steamac release, signed with this fork's key). Publishing to
+# upstream's feed is refused; --local test feeds work as described above.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -55,6 +59,7 @@ dmg="$DIST/$dmg_name"
 notes="FX-Steam-Launcher-$version.md"
 
 if [[ -z $local_prefix ]]; then
+    die "this fork publishes its update feed from the release workflow (appcast.xml on the release), never to $REPO's; use --local URL for a test feed"
     command -v gh >/dev/null || die "gh not found (brew install gh)"
     tag="v$version"
     size=$(gh release view "$tag" -R "$REPO" --json assets -q ".assets[] | select(.name == \"$dmg_name\") | .size") \

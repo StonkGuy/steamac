@@ -1,19 +1,38 @@
 # Release builds (GitHub Actions)
 
 `.github/workflows/release.yml` builds the app from a tag with this repository's own scripts and attaches
-three files to the tag's GitHub release:
+these files to the tag's GitHub release:
 
 | file | what |
 |---|---|
 | `FX-Steam-Launcher-<tag>-adhoc.dmg` | the app, signed ad hoc (`DIST_SIGN=adhoc`, see below) |
 | `FX-Steam-Launcher-<tag>-adhoc.dmg.sha256` | its SHA-256 |
 | `FX-Steam-Launcher-<tag>-gpl-sources.tar` | corresponding source of the GPL/LGPL parts (`scripts/gpl-sources.sh`) |
+| `appcast.xml` | the in-app update feed, only with this fork's update key (see *In-app updates*) |
 
 It runs when a `v*` tag is pushed, or by hand: Actions > **Release DMG** > Run workflow, with `ref` (the tag,
 branch or commit to build) and optionally `release_tag` (an existing release to attach the files to; empty keeps
 them as a workflow artifact only). It has no `pull_request` trigger, so code from a fork's pull request never runs
 with this repository's token. Only the last job (`release`) gets `contents: write`; every other job reads.
-No other secret is used.
+
+## In-app updates
+
+Upstream's in-app installer (Sparkle 2, `SparkleUpdates.swift`) installs an update only if the archive carries an
+EdDSA signature from the key whose public half is in the running app (`SUPublicEDKey`), read from a feed signed
+with the same key (`SURequireSignedFeed`). The Developer ID team is only Sparkle's fallback when that key changes,
+so ad hoc builds update the same way, as long as one key signs every release. This fork never ships upstream's
+feed or key (`dist.sh` and the app refuse both; `scripts/test/dist-verify.sh` checks the DMG): fxgl's feed would
+replace a fork install with an upstream build.
+
+| set in StonkGuy/steamac | what |
+|---|---|
+| variable `SPARKLE_PUBLIC_KEY` | this fork's EdDSA public key; `dist.sh` writes it, the feed URL (the `appcast.xml` asset of the latest release) and Sparkle's verification keys into the app |
+| secret `SPARKLE_ED_PRIVATE_KEY` | the private half (`generate_keys -x <file>` prints it to a file; keep an offline copy: without it no installed copy can be updated in the app again) |
+
+With both set, a release also gets `appcast.xml` (one item: the DMG, its EdDSA signature, `CFBundleVersion`
+`X.Y.Z.N` for `vX.Y.Z-eac.N`), signed in the `app` job. Without the variable the app has no feed; its update check
+then asks this fork's GitHub releases and opens the DMG in the browser. A copy built with a key only takes updates
+signed with it, so the key is set once, before the first release that carries it.
 
 ## Jobs
 
