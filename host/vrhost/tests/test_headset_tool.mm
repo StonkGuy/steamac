@@ -263,6 +263,11 @@ int main(int argc, char ** argv)
 			o.controllers = true;
 			continue;
 		}
+		if (f == "--tpose")
+		{
+			o.controllers = o.tpose = true;
+			continue;
+		}
 		if (f == "--scene")
 		{
 			scene = true;
@@ -350,7 +355,7 @@ int main(int argc, char ** argv)
 		else
 		{
 			fprintf(stderr, "usage: vrhost-test-headset [--host ADDR] [--port N] [--pin NNNNNN] [--pin-delay MS] [--frames N] [--size WxH]\n"
-			                "  [--quest3] [--render WxH] [--refresh HZ] [--yaw DEG] [--pitch DEG] [--motion-hz F] [--controllers]\n"
+			                "  [--quest3] [--render WxH] [--refresh HZ] [--yaw DEG] [--pitch DEG] [--motion-hz F] [--controllers] [--tpose]\n"
 			                "  [--dump DIR] [--dump-every N] [--scene] [--timeout S]\n");
 			return 2;
 		}

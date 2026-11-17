@@ -353,10 +353,12 @@ FakeHeadsetResult run_fake_headset(const FakeHeadsetOptions & o)
 				                                    wivrn::from_headset::angular_velocity_valid});
 				if (o.controllers)
 				{
-					// hands 40 cm in front, 30 cm below the head, 20 cm to each side, swaying with the head
+					// hands 40 cm in front, 30 cm below the head, 20 cm to each side, swaying with the head (--tpose: arms
+					// out to the sides at shoulder height, 15 cm below the head, still)
 					for (auto [dev, x]: {std::pair{wivrn::device_id::LEFT_GRIP, -0.2f}, {wivrn::device_id::LEFT_AIM, -0.2f},
 					                     {wivrn::device_id::RIGHT_GRIP, 0.2f}, {wivrn::device_id::RIGHT_AIM, 0.2f}})
-						tr.device_poses.push_back({.pose = {.orientation = head.orientation, .position = {x + 0.1f * std::sin(ph), 1.3f, -0.4f}},
+						tr.device_poses.push_back({.pose = o.tpose ? XrPosef{.orientation = {0, 0, 0, 1}, .position = {x * 3.75f, 1.45f, 0}}
+						                                           : XrPosef{.orientation = head.orientation, .position = {x + 0.1f * std::sin(ph), 1.3f, -0.4f}},
 						                           .device = dev,
 						                           .flags = wivrn::from_headset::orientation_valid | wivrn::from_headset::position_valid |
 						                                    wivrn::from_headset::orientation_tracked |

@@ -43,6 +43,9 @@ struct FakeHeadsetOptions
 	float refresh_hz = 72;
 	float yaw_amplitude = 0.3f, pitch_amplitude = 0, motion_hz = 0.159f;
 	bool controllers = false;
+	// controllers held in a T-pose (arms straight out at shoulder height, 75 cm to each side), which body
+	// estimators such as Standable take as their calibration pose
+	bool tpose = false;
 	struct View
 	{
 		std::array<std::array<float, 4>, 2> orientation; // x, y, z, w per eye (view_info pose: the render pose)
