@@ -323,7 +323,7 @@ struct Options {
                            STEAMAC_SENTRY_DEBUG=1 prints the Sentry SDK's debug log
 
     Updates (Settings > General "Check for updates at startup", on; never in the dev launcher
-    work/out/steamac-vm): the first boot asks api.github.com for the latest fxgl/steamac release, at
+    work/out/steamac-vm): the first boot asks api.github.com for the latest StonkGuy/steamac release, at
     most every 6 h; menu FX Steam Launcher > Check for Updates… checks at any time. Test hooks:
     STEAMAC_UPDATE_URL (release JSON, http(s):// or file://; also enables the dev launcher's startup
     check), STEAMAC_FAKE_VERSION (the version this launcher compares as)

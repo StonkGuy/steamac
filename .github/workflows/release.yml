@@ -382,6 +382,12 @@ jobs:
       - name: Verify, name, checksum
         run: |
           version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' host/launcher/Info.plist)
+          fork=$(/usr/libexec/PlistBuddy -c 'Print :SteamacForkRelease' host/launcher/Info.plist)
+          # the update check compares the app's version + fork release with the tags of this fork
+          if [ -n "$RELEASE_TAG" ] && [ "$RELEASE_TAG" != "v$version-eac.$fork" ]; then
+            echo "::error::release tag $RELEASE_TAG does not match the app (v$version-eac.$fork): set CFBundleShortVersionString / SteamacForkRelease in host/launcher/Info.plist"
+            exit 1
+          fi
           if [ -n "$RELEASE_TAG" ]; then label=${RELEASE_TAG#v}; else label=$version-$(git rev-parse --short=10 HEAD); fi
           mkdir upload
           mv "work/out/dist/FX-Steam-Launcher-$version.dmg" "upload/FX-Steam-Launcher-$label-adhoc.dmg"

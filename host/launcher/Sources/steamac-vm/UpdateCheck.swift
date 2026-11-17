@@ -2,8 +2,10 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// New-version check: the latest GitHub release of fxgl/steamac against this launcher's
-/// CFBundleShortVersionString. Runs in the VM process of the first boot (once per app launch, not
+/// New-version check: the latest GitHub release of this fork (StonkGuy/steamac) against this
+/// launcher's CFBundleShortVersionString plus its fork release number (Info.plist
+/// SteamacForkRelease: 1.9.8 + 2 = 1.9.8-eac.2). Upstream fxgl/steamac releases lack the patched FEX
+/// and the VR path, so a fork build never offers them. Runs in the VM process of the first boot (once per app launch, not
 /// per VM reboot) a few seconds after the window is up, at most every 6 h (also across launches),
 /// never in development builds (work/out/steamac-vm), and only while Settings > General "Check for
 /// updates at startup" is on. The request goes to api.github.com with only the User-Agent
@@ -19,8 +21,8 @@ import SwiftUI
 final class UpdateChecker {
     static let shared = UpdateChecker()
 
-    static let latestURL = URL(string: "https://api.github.com/repos/fxgl/steamac/releases/latest")!
-    static let releasesPage = URL(string: "https://github.com/fxgl/steamac/releases")!
+    static let latestURL = URL(string: "https://api.github.com/repos/StonkGuy/steamac/releases/latest")!
+    static let releasesPage = URL(string: "https://github.com/StonkGuy/steamac/releases")!
     static let urlEnv = "STEAMAC_UPDATE_URL", fakeVersionEnv = "STEAMAC_FAKE_VERSION"
     static let interval: TimeInterval = 6 * 3600
     static let timeout: TimeInterval = 10
@@ -68,15 +70,27 @@ final class UpdateChecker {
 
     static var currentVersion: String {
         if let v = ProcessInfo.processInfo.environment[fakeVersionEnv], !v.isEmpty { return v }
-        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+        let base = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+        guard let fork = Bundle.main.object(forInfoDictionaryKey: "SteamacForkRelease") as? String, !fork.isEmpty else { return base }
+        return "\(base)-eac.\(fork)"
     }
 
     /// `vX.Y[.Z…]` / `X.Y[.Z…]` -> numeric components (nil for anything else, e.g. `v1.4-rc1`).
+    /// A fork release `vX.Y[.Z]-eac.N` is the upstream version padded to three components plus N
+    /// (`v1.9-eac.2` = 1.9.0.2), so 1.9.8-eac.2 > 1.9.8-eac.1 > 1.9.8 and 1.9.15-eac.1 > 1.9.8-eac.9.
     static func parse(_ text: String) -> [Int]? {
         var t = Substring(text.trimmingCharacters(in: .whitespaces))
         if t.first == "v" || t.first == "V" { t = t.dropFirst() }
+        if let r = t.range(of: "-eac.") {
+            guard let base = numbers(t[..<r.lowerBound], max: 3), let fork = numbers(t[r.upperBound...], max: 1) else { return nil }
+            return base + Array(repeating: 0, count: 3 - base.count) + fork
+        }
+        return numbers(t, max: 4)
+    }
+
+    private static func numbers(_ t: Substring, max: Int) -> [Int]? {
         let parts = t.split(separator: ".", omittingEmptySubsequences: false)
-        guard (1...4).contains(parts.count) else { return nil }
+        guard (1...max).contains(parts.count) else { return nil }
         var out: [Int] = []
         for p in parts {
             guard !p.isEmpty, p.count <= 9, p.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(p) else { return nil }
@@ -94,7 +108,10 @@ final class UpdateChecker {
         return .orderedSame
     }
 
-    static func format(_ v: [Int]) -> String { v.map(String.init).joined(separator: ".") }
+    /// Inverse of parse for display and the skipped-version key: four components are a fork release.
+    static func format(_ v: [Int]) -> String {
+        v.count == 4 ? v[0..<3].map(String.init).joined(separator: ".") + "-eac.\(v[3])" : v.map(String.init).joined(separator: ".")
+    }
 
     /// The newest published release of a /releases/latest object or a /releases array (drafts,
     /// prereleases and tags that are no version number ignored); nil if there is none.
@@ -125,12 +142,20 @@ final class UpdateChecker {
     static func selfCheck() -> [String] {
         var failures: [String] = []
         let parsed: [(String, [Int]?)] = [("v1.3.1", [1, 3, 1]), ("1.3", [1, 3]), ("V2", [2]), ("v1.3.10", [1, 3, 10]),
-                                          ("v1.4-rc1", nil), ("v1..2", nil), ("", nil), ("latest", nil), ("v1.2.3.4.5", nil)]
+                                          ("v1.4-rc1", nil), ("v1..2", nil), ("", nil), ("latest", nil), ("v1.2.3.4.5", nil),
+                                          ("v1.9.8-eac.1", [1, 9, 8, 1]), ("v1.9-eac.2", [1, 9, 0, 2]), ("v1.9.8-eac.", nil),
+                                          ("v1.9.8-eac.1.2", nil), ("v1.2.3.4-eac.1", nil)]
         for (text, want) in parsed where parse(text) != want { failures.append("update: parse \"\(text)\" → \(String(describing: parse(text)))") }
         let order: [(String, String, ComparisonResult)] = [("1.3.10", "1.3.9", .orderedDescending), ("1.3", "1.3.0", .orderedSame),
                                                             ("1.3", "1.3.1", .orderedAscending), ("2.0", "1.99.99", .orderedDescending),
-                                                            ("v1.3.1", "1.3.1", .orderedSame)]
+                                                            ("v1.3.1", "1.3.1", .orderedSame),
+                                                            ("v1.9.8-eac.2", "v1.9.8-eac.1", .orderedDescending),
+                                                            ("v1.9.8-eac.1", "1.9.8", .orderedDescending),
+                                                            ("v1.9.15-eac.1", "v1.9.8-eac.9", .orderedDescending),
+                                                            ("v1.9-eac.2", "v1.9.0-eac.2", .orderedSame)]
         for (a, b, want) in order where compare(parse(a)!, parse(b)!) != want { failures.append("update: \(a) vs \(b) not \(want.rawValue)") }
+        for v in ["1.9.8-eac.1", "1.9.15", "1.9.0-eac.2"] where format(parse(v)!) != v { failures.append("update: format \(v) → \(format(parse(v)!))") }
+        if !latestURL.absoluteString.contains("/repos/StonkGuy/steamac/") { failures.append("update: checks \(latestURL), not this fork's releases") }
         let json = """
             [{"tag_name": "v9.0", "draft": true}, {"tag_name": "v8.0", "prerelease": true}, {"tag_name": "nightly"},
              {"tag_name": "v1.3.10", "name": "1.3.10", "body": "x", "html_url": "https://github.com/fxgl/steamac/releases/tag/v1.3.10",
