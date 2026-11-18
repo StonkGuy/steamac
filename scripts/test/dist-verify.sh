@@ -12,7 +12,9 @@
 #   scripts/test/dist-verify.sh [--receipts] <dmg> [adhoc|developer-id]     (default: adhoc)
 #
 # Env: DIST_ALLOWED_HOMES  space-separated /Users names that may appear in the binaries
-#                          (default "runner Shared": GitHub's macOS runners build in /Users/runner)
+#                          (default "runner Shared steamac-attachment-test": GitHub's macOS runners build
+#                          in /Users/runner; steamac-attachment-test is the made-up home of the launcher's
+#                          failed-shader scrubbing self-test, CrashReporting.swift)
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -21,7 +23,7 @@ if [[ ${1:-} == --receipts ]]; then receipts=1; shift; fi
 DMG=${1:?usage: dist-verify.sh [--receipts] <dmg> [adhoc|developer-id]}
 MODE=${2:-adhoc}
 NAME="FX Steam Launcher"
-read -r -a allowed <<<"${DIST_ALLOWED_HOMES:-runner Shared}"
+read -r -a allowed <<<"${DIST_ALLOWED_HOMES:-runner Shared steamac-attachment-test}"
 
 fails=0
 ok() { echo "  ok   $*"; }
