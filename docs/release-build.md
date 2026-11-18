@@ -60,7 +60,9 @@ The macOS runners are virtual machines whose GPU is a paravirtual Metal device. 
 Apple-silicon Mac has (mesh shaders, which MoltenVK's geometry shaders use; Metal 4 for KosmicKrisp). On a
 GitHub-hosted runner the workflow therefore sets `MVK_SKIP_REPRO=1` (`host/moltenvk/build.sh`: the probe still runs, the repros
 do not) and `KK_SKIP_HOST_TESTS=1` (`host/kosmickrisp/build.sh`). The runners also have no nested virtualization
-(`kern.hv_support` 0), so `host/libkrun/build.sh` builds and signs the `krun-hvf` tests but does not run them. Before a DMG is published, the skipped suites
+(`kern.hv_support` 0), so `host/libkrun/build.sh` builds and signs the `krun-hvf` tests but does not run them. Their
+video encoder is paravirtual too: H.264 returns only key frames, so a failure of `--selftest-stream`'s H.264 encoder
+check alone is a warning there (every other stream component still fails the job). Before a DMG is published, the skipped suites
 run on a Mac against the dylibs inside it:
 
 ```sh
