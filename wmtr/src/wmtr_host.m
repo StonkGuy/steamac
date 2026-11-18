@@ -26,6 +26,18 @@
 #include "wmtr_host.h"
 #include "wmtr_vr.h"
 
+#ifdef WMTR_MULLION
+/* the guest sizes Metal 4's mapping-operation arrays with these (wmtr_proto.h); Mullion needs the macOS 26 SDK.
+ * Compile-time sizes only (nothing here runs on an older macOS), so no availability check is needed. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+_Static_assert(sizeof(MTL4UpdateSparseBufferMappingOperation) == WMTR_MTL4_UPDATE_BUFFER_OP, "MTL4 update buffer op");
+_Static_assert(sizeof(MTL4UpdateSparseTextureMappingOperation) == WMTR_MTL4_UPDATE_TEXTURE_OP, "MTL4 update texture op");
+_Static_assert(sizeof(MTL4CopySparseBufferMappingOperation) == WMTR_MTL4_COPY_BUFFER_OP, "MTL4 copy buffer op");
+_Static_assert(sizeof(MTL4CopySparseTextureMappingOperation) == WMTR_MTL4_COPY_TEXTURE_OP, "MTL4 copy texture op");
+#pragma clang diagnostic pop
+#endif
+
 typedef int NTSTATUS;
 typedef NTSTATUS (*impl_fn)(void *);
 extern const void *wmtr_impl_funcs[];
@@ -33,6 +45,7 @@ extern const void *wmtr_impl_funcs[];
 #define STATUS_SUCCESS 0
 #define STATUS_UNSUCCESSFUL ((NTSTATUS)0xC0000001)
 #define STATUS_INVALID_PARAMETER ((NTSTATUS)0xC000000D)
+#define STATUS_NOT_SUPPORTED ((NTSTATUS)0xC00000BB)
 
 #define WMTR_CLASS_A 0
 #define WMTR_CLASS_S 1
@@ -41,13 +54,13 @@ extern const void *wmtr_impl_funcs[];
 #define WMTR_CLASS_N 4
 static const uint8_t call_class[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = WMTR_CLASS_##c,
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 /* the params struct each call's implementation reads and writes (the client sends exactly this) */
 static const uint32_t call_params_size[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = sizeof(t),
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 /* zeroed bytes after every request copy: a WMTR_REF_EXTRA pointer is only checked to start inside the payload,
@@ -241,7 +254,7 @@ frames_out(void) {
  * running game (presentDrawable = calls 47/48) without touching the guest. Off (one getenv) unless set. */
 static const char *const call_name[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = #n,
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 static _Atomic uint64_t cs_count[WMTR_NCALLS], cs_sync[WMTR_NCALLS], cs_ns[WMTR_NCALLS];
@@ -747,6 +760,16 @@ keep_autoreleased(struct wmtr_host *h, uint32_t slot, uint16_t call, uint8_t *pa
     vpool_keep(h, slot, ret);
     break;
   }
+#ifdef WMTR_MULLION
+  /* Mullion's own calls that return autoreleased encoders (its winemetal_unix.c): accelerationStructureCommandEncoder,
+   * and sampledCommandEncoder's compute, acceleration-structure or render encoder with sample buffers. Its D3D12 runtime
+   * keeps them across calls, so without this the request's pool released them before endEncoding and Metal aborted
+   * the VM ("Command encoder released without endEncoding"). */
+  case 160: vpool_keep(h, slot, ((struct unixcall_generic_obj_obj_ret *)params)->ret); break;
+  case 167: vpool_keep(h, slot, ((struct unixcall_mtlcommandbuffer_sampledcommandencoder *)params)->ret); break;
+  /* v0.5: the Metal 4 encoder state (its command buffer keeps it too, until it completes) */
+  case 182: vpool_keep(h, slot, ((struct unixcall_metal4_encoder *)params)->ret); break;
+#endif
   default: break;
   }
 }
@@ -949,8 +972,17 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
                                 ((struct unixcall_generic_obj_obj_uint64_noret *)params)->arg1);
     break;
   }
+#ifdef WMTR_MULLION
+  /* Mullion's diagnostics write files under host paths the guest names (WMTDiagWrite; v0.5: WMTFlightWrite,
+   * WMTTraceWrite) and WMTBootstrapKeep keeps an object under a bootstrap name: none of them may come from a VM.
+   * The guest client answers them itself; one that reaches the executor is refused. */
+  case 168: case 180: case 193: case 196:
+    return STATUS_NOT_SUPPORTED;
+#endif
+#ifndef WMTR_MULLION /* Mullion's table has no WMTVRSubmit (its 146 is a call of its own) */
   case 146: /* WMTVRSubmit: the executor's VR exporter (not DXMT's unix side, which has no VR host) */
     return wmtr_vr_submit(atomic_load(&h->vr), &((struct unixcall_wmtvr_submit *)params)->info);
+#endif
   default:
     break;
   }
@@ -961,7 +993,10 @@ host_call(struct wmtr_host *h, uint16_t call, uint8_t *params, const struct wmtr
     else if (call == 12) pp_commit((id<MTLCommandBuffer>)((struct unixcall_generic_obj_noret *)params)->handle);
     else if (call == 31) pp_event("C");
     else if (call == 30 || call == 129) pp_event("B");
-    else if (call == 47 || call == 48 || call == 146) pp_event(call == 146 ? "V" : "|");
+#ifndef WMTR_MULLION
+    else if (call == 146) pp_event("V");
+#endif
+    else if (call == 47 || call == 48) pp_event("|");
   }
   if (call == 47 || call == 48) { /* presentDrawable (both param structs start with buffer, drawable) */
     id<MTLCommandBuffer> cb = (id<MTLCommandBuffer>)((struct unixcall_generic_obj_obj_noret *)params)->handle;
@@ -1052,6 +1087,37 @@ handle_created(struct wmtr_host *h, const struct wmtr_req_ext *r, uint8_t *paylo
                 (unsigned long long)cid);
 }
 
+#ifdef WMTR_MULLION
+/* Every pointer field of Mullion's own calls (gen/gen_objects.py) must be null or one the client relocated:
+ * anything else is a guest address, which the implementation would dereference in this process. Refusing it turns
+ * a call the client does not marshal yet into a logged failure instead of a crash or a silent wrong result. */
+static const struct { uint16_t call; uint16_t off; } pointer_fields[] = {
+#define WMTR_POINTER_FIELDS
+#include WMTR_OBJECTS_INC
+#undef WMTR_POINTER_FIELDS
+};
+static _Atomic uint32_t pointer_refusals_logged;
+static int
+pointers_relocated(const struct wmtr_req_ext *r, const uint8_t *payload, const uint32_t *relocs) {
+  if (r->h.call < 146) return 1; /* DXMT's calls */
+  for (size_t i = 0; i < sizeof pointer_fields / sizeof *pointer_fields; i++) {
+    if (pointer_fields[i].call != r->h.call) continue;
+    uint32_t off = pointer_fields[i].off;
+    uint64_t v;
+    memcpy(&v, payload + off, 8); /* off + 8 <= call_params_size <= params_size, checked before */
+    if (!v) continue;
+    int found = 0;
+    for (int k = 0; k < r->n_reloc && !found; k++) found = relocs[k] == off;
+    if (!found) {
+      if (atomic_fetch_add_explicit(&pointer_refusals_logged, 1, memory_order_relaxed) < 32)
+        LOG(0, "call %u (%s): pointer field at %u is not marshalled; refusing call\n", r->h.call, call_name[r->h.call], off);
+      return 0;
+    }
+  }
+  return 1;
+}
+#endif
+
 /* ------------------------------------------------------------------------------------------- */
 struct job { struct wmtr_host *h; uint8_t *copy; uint32_t len; };
 
@@ -1099,6 +1165,10 @@ execute(struct wmtr_host *h, uint8_t *rec, uint32_t len) {
         LOG(0, "call %u: params %u bytes, expected %u\n", r->h.call, r->h.params_size, call_params_size[r->h.call]);
       } else if (__atomic_load_n(&h->faulted, __ATOMIC_ACQUIRE)) {
         st = STATUS_ACCESS_VIOLATION; /* this client already faulted the executor: refuse further work */
+#ifdef WMTR_MULLION
+      } else if (!pointers_relocated(r, payload, relocs)) {
+        st = STATUS_INVALID_PARAMETER; /* a guest address would reach the implementation (logged) */
+#endif
       } else if (!handles_in(h, r, payload, &w0, &cid)) {
         st = STATUS_INVALID_HANDLE; /* a client handle whose creation failed (logged) */
       } else {
@@ -1293,6 +1363,15 @@ wmtr_host_abi_version(void) {
   return 1;
 }
 
+const char *
+wmtr_host_flavour(void) {
+#ifdef WMTR_MULLION
+  return "mullion";
+#else
+  return "dxmt";
+#endif
+}
+
 struct wmtr_host *
 wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx) {
   const char *l = getenv("WMTR_LOG");
@@ -1464,6 +1543,16 @@ wmtr_host_get_stats(struct wmtr_host *h, struct wmtr_host_stats *o) {
 /* DXMT's unix side references ntdll's NtSetEvent for the CFRunLoop listener path, which the
  * host replaces (calls 104/108-110 above); this definition only satisfies the linker. */
 NTSTATUS NtSetEvent(void *handle, void *prev) { (void)handle; (void)prev; return STATUS_UNSUCCESSFUL; }
+#ifdef WMTR_MULLION
+/* Mullion's listener path also duplicates and closes handles; host_call answers setWin32EventAtValue (104) itself, so
+ * these never run either */
+NTSTATUS NtDuplicateObject(void *sp, void *src, void *dp, void **dst, uint32_t access, uint32_t attributes, uint32_t options) {
+  (void)sp; (void)src; (void)dp; (void)access; (void)attributes; (void)options;
+  if (dst) *dst = NULL;
+  return STATUS_UNSUCCESSFUL;
+}
+NTSTATUS NtClose(void *handle) { (void)handle; return STATUS_UNSUCCESSFUL; }
+#endif
 
 #ifdef WMTR_TESTING
 #undef wmtr_present_create_view

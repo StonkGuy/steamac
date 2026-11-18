@@ -24,11 +24,13 @@
 
 _Static_assert(VRL_INPUT_COUNT == SVR_IN_COUNT, "vrlink.h and the guest protocol disagree on input ids");
 _Static_assert((int)VRL_DEV_COUNT == (int)SVR_DEV_COUNT && sizeof(struct vrl_pose) == sizeof(struct svr_pose), "pose layout");
+#ifndef WMTR_MULLION
 /* the guest runtime builds WMTVRSubmitInfo from its own mirror of the struct */
 _Static_assert(sizeof(struct svr_wmtvr_submit) == sizeof(struct WMTVRSubmitInfo) &&
                    offsetof(struct svr_wmtvr_submit, wait_value) == offsetof(struct WMTVRSubmitInfo, wait_value) &&
                    offsetof(struct svr_wmtvr_submit, fov) == offsetof(struct WMTVRSubmitInfo, fov),
                "svr_wmtvr_submit must match DXMT's WMTVRSubmitInfo");
+#endif
 
 #define STATUS_SUCCESS 0
 #define STATUS_INVALID_PARAMETER ((int)0xC000000D)
@@ -405,6 +407,11 @@ stage_account(struct wmtr_vr *vr, int64_t t_submit, int64_t t_signal, id<MTLComm
 int
 wmtr_vr_submit(struct wmtr_vr *vr, const struct WMTVRSubmitInfo *info) {
   if (!vr) return STATUS_NOT_SUPPORTED;
+#ifdef WMTR_MULLION
+  /* Mullion has no WMTVRSubmit: the eye texture export stays on the DXMT path */
+  (void)info;
+  return STATUS_NOT_SUPPORTED;
+#else
   int64_t t_submit = now_ns();
   atomic_fetch_add(&vr->submits, 1);
   drain_releases(vr);
@@ -495,6 +502,7 @@ wmtr_vr_submit(struct wmtr_vr *vr, const struct WMTVRSubmitInfo *info) {
   }];
   [cb commit];
   return STATUS_SUCCESS;
+#endif
 }
 
 struct wmtr_vr *

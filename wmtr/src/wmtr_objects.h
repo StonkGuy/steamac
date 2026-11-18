@@ -50,6 +50,14 @@ static void object_drop(struct wmtr_host *h, uint64_t obj, int pool) {
   pthread_mutex_unlock(&h->object_lock);
 }
 struct object_walk { struct wmtr_host *h; uint8_t *base; uint32_t size; int mode; uint16_t call; };
+/* calls whose result is a Metal command encoder (ended on teardown if still open) */
+static int object_encoder_call(uint16_t call) {
+#ifdef WMTR_MULLION
+  /* Mullion: accelerationStructureCommandEncoder, sampledCommandEncoder (compute, acceleration-structure or render) */
+  if (call == 160 || call == 167) return 1;
+#endif
+  return call == 30 || call == 31 || call == 32 || call == 129;
+}
 enum { OBJECT_VALIDATE, OBJECT_LEASE, OBJECT_UNLEASE, OBJECT_EXPORT };
 /* listener handles of calls 104 (field), 109 and 110 are plain C structs: never retained or released */
 static int object_plain_field(struct object_walk *w, obj_handle_t *field) {
@@ -79,7 +87,7 @@ static int object_field(struct object_walk *w, obj_handle_t *field) {
   if (w->mode == OBJECT_EXPORT) {
     if (!e) {
       /* Allocation failure must not recreate the fatal untracked-encoder path. */
-      if (w->call == 30 || w->call == 31 || w->call == 32 || w->call == 129) {
+      if (object_encoder_call(w->call)) {
         [(id<MTLCommandEncoder>)(uintptr_t)value endEncoding];
         LOG(0, "call %u: object registry allocation failed; ended untracked encoder, losing context\n", w->call);
         __atomic_store_n(&w->h->faulted, 1, __ATOMIC_RELEASE);
@@ -90,12 +98,15 @@ static int object_field(struct object_walk *w, obj_handle_t *field) {
     if (e->value != value) {
       w->h->object_count++;
       e->value = value; e->refs = e->pool_refs = 0; e->plain = w->call == 108;
-      e->open_encoder = w->call == 30 || w->call == 31 || w->call == 32 || w->call == 129;
+      e->open_encoder = object_encoder_call(w->call);
     }
     e->refs++;
     switch (w->call) {
     case 2: case 7: case 11: case 28: case 30: case 31: case 32: case 53: case 60: case 62:
     case 66: case 67: case 71: case 89: case 90: case 91: case 129: e->pool_refs++; break;
+#ifdef WMTR_MULLION
+    case 160: case 167: case 182: e->pool_refs++; break; /* autoreleased encoders (keep_autoreleased) */
+#endif
     default: break;
     }
     return 1;
@@ -129,7 +140,7 @@ static void objects_end_open_encoders(struct wmtr_host *h) {
   }
 }
 #define WMTR_OBJECT_STRUCTS
-#include "wmtr_objects.inc"
+#include WMTR_OBJECTS_INC
 #undef WMTR_OBJECT_STRUCTS
 static int object_range(struct object_walk *w, const void *ptr, uint64_t count, uint64_t stride) {
   uintptr_t p = (uintptr_t)ptr, b = (uintptr_t)w->base;
@@ -140,6 +151,63 @@ static int object_range(struct object_walk *w, const void *ptr, uint64_t count, 
   OBJECT_INFO(T, i); obj_handle_t *a = (void *)i->binary_archives_for_lookup.ptr; \
   if (!object_range(w, a, i->num_binary_archives_for_lookup, sizeof *a)) return 0; \
   for (uint32_t n = 0; n < i->num_binary_archives_for_lookup; n++) if (!object_field(w, &a[n])) return 0; } while (0)
+/* an array of object handles behind a pointer in the payload */
+static int objects_handles(struct object_walk *w, obj_handle_t *a, uint64_t count) {
+  if (!object_range(w, a, count, sizeof *a)) return 0;
+  for (uint64_t i = 0; i < count; i++) if (!object_field(w, &a[i])) return 0;
+  return 1;
+}
+#ifdef WMTR_MULLION
+/* an acceleration structure descriptor's geometries (vertex, index and transform buffers) */
+static int objects_as_geometries(struct object_walk *w, struct WMTAccelerationStructureInfo *i) {
+  struct WMTAccelerationStructureGeometry *g = i->geometries.ptr;
+  if (!object_range(w, g, i->geometry_count, sizeof *g)) return 0;
+  for (uint32_t n = 0; n < i->geometry_count; n++) if (!objects_WMTAccelerationStructureGeometry(w, &g[n], 0)) return 0;
+  return 1;
+}
+#endif
+/* a command list (kind 0 blit, 1 compute, 2 render; Mullion: 3 acceleration structure) */
+static int objects_cmd_list(struct object_walk *w, struct wmtcmd_base *c, int kind) {
+  for (uint32_t n = 0; c; c = c->next.ptr, n++) {
+    if (n > w->size / sizeof *c || !object_range(w, c, 1, sizeof *c)) return 0;
+    /* Nop (type 0) carries no objects. DXMT heads every blit/compute/render list with one, but
+     * winemetal_unix.c names only the render Nop, so the generated table lacks blit/compute */
+    if (c->type == 0) continue;
+    switch (kind) {
+#define CMDS(K) switch (c->type) {
+#define CMD(kind, value, type) case value: OBJECT_INFO(type, c); break;
+    case 0: CMDS(BLIT)
+#define WMTR_COMMAND_BLIT
+#include WMTR_OBJECT_CMDS_INC
+#undef WMTR_COMMAND_BLIT
+      default: return 0; } break;
+    case 1: CMDS(COMPUTE)
+#define WMTR_COMMAND_COMPUTE
+#include WMTR_OBJECT_CMDS_INC
+#undef WMTR_COMMAND_COMPUTE
+      default: return 0; } break;
+    case 2: CMDS(RENDER)
+#define WMTR_COMMAND_RENDER
+#include WMTR_OBJECT_CMDS_INC
+#undef WMTR_COMMAND_RENDER
+      default: return 0; } break;
+#ifdef WMTR_MULLION
+    case 3: CMDS(ACCEL)
+#define WMTR_COMMAND_ACCEL
+#include WMTR_OBJECT_CMDS_INC
+#undef WMTR_COMMAND_ACCEL
+      default: return 0; }
+      if (c->type == WMTAccelerationStructureCommandBuild &&
+          !objects_as_geometries(w, &((struct wmtcmd_accelerationstructure_build *)c)->info)) return 0;
+      break;
+#endif
+    default: return 0;
+#undef CMD
+#undef CMDS
+    }
+  }
+  return 1;
+}
 static int objects_walk(struct object_walk *w, uint8_t *payload, int output) {
   uint16_t call = w->call;
   if (call == 0 || call == 1) {
@@ -175,45 +243,64 @@ static int objects_walk(struct object_walk *w, uint8_t *payload, int output) {
   }
   case 133: case 134: {
     struct unixcall_mtlresidencyset_addallocations *p = (void *)payload;
-    obj_handle_t *a = (void *)p->allocations.ptr;
-    if (!object_range(w, a, p->count, sizeof *a)) return 0;
-    for (uint64_t i = 0; i < p->count; i++) if (!object_field(w, &a[i])) return 0;
+    if (!objects_handles(w, (void *)p->allocations.ptr, p->count)) return 0;
     break;
   }
-  case 36: case 37: case 38: {
-    struct wmtcmd_base *c = (void *)((struct unixcall_generic_obj_cmd_noret *)payload)->cmd_head.ptr;
-    for (uint32_t n = 0; c; c = c->next.ptr, n++) {
-      if (n > w->size / sizeof *c || !object_range(w, c, 1, sizeof *c)) return 0;
-      /* Nop (type 0) carries no objects. DXMT heads every blit/compute/render list with one, but
-       * winemetal_unix.c names only the render Nop, so the generated table lacks blit/compute */
-      if (c->type == 0) continue;
-      switch (call - 36) {
-#define CMDS(K) switch (c->type) {
-#define CMD(kind, value, type) case value: OBJECT_INFO(type, c); break;
-      case 0: CMDS(BLIT)
-#define WMTR_COMMAND_BLIT
-#include "wmtr_object_cmds.inc"
-#undef WMTR_COMMAND_BLIT
-        default: return 0; } break;
-      case 1: CMDS(COMPUTE)
-#define WMTR_COMMAND_COMPUTE
-#include "wmtr_object_cmds.inc"
-#undef WMTR_COMMAND_COMPUTE
-        default: return 0; } break;
-      case 2: CMDS(RENDER)
-#define WMTR_COMMAND_RENDER
-#include "wmtr_object_cmds.inc"
-#undef WMTR_COMMAND_RENDER
-        default: return 0; } break;
-#undef CMD
-#undef CMDS
-      }
-    }
+  case 36: case 37: case 38:
+    if (!objects_cmd_list(w, (void *)((struct unixcall_generic_obj_cmd_noret *)payload)->cmd_head.ptr, call - 36)) return 0;
+    break;
+#ifdef WMTR_MULLION
+  /* Mullion's own calls with objects behind pointers (the generated metadata covers the params themselves) */
+  case 158: { /* accelerationStructureSizes: the descriptor's buffers and its geometries' */
+    struct WMTAccelerationStructureInfo *i = ((struct unixcall_mtldevice_accelerationstructuresizes *)payload)->info.ptr;
+    OBJECT_INFO(WMTAccelerationStructureInfo, i);
+    if (!objects_as_geometries(w, i)) return 0;
     break;
   }
+  case 161: /* the acceleration-structure encoder's command list */
+    if (!objects_cmd_list(w, (void *)((struct unixcall_generic_obj_cmd_noret *)payload)->cmd_head.ptr, 3)) return 0;
+    break;
+  case 162: { /* newLinkedComputePipelineState: its function and the linked functions */
+    struct WMTLinkedComputePipelineInfo *i = (void *)((struct unixcall_mtldevice_newlinkedcomputepso *)payload)->info.ptr;
+    OBJECT_INFO(WMTLinkedComputePipelineInfo, i);
+    if (!objects_handles(w, i->functions.ptr, i->function_count)) return 0;
+    break;
+  }
+  case 163: { /* newVisibleFunctionTable: the functions in it */
+    struct unixcall_mtlcomputepso_newvisiblefunctiontable *p = (void *)payload;
+    if (!objects_handles(w, (void *)p->functions.ptr, p->function_count)) return 0;
+    break;
+  }
+  case 182: { /* Metal 4 encoder: a render pass's attachments, the sample heap */
+    struct unixcall_metal4_encoder *p = (void *)payload;
+    if (p->render.ptr) OBJECT_INFO(WMTRenderPassInfo, p->render.ptr);
+    if (p->samples.ptr) OBJECT_INFO(WMTSampleBufferAttachmentInfo, p->samples.ptr);
+    break;
+  }
+  case 183: { /* a Metal 4 encoder's command list, of the stream it names */
+    struct unixcall_metal4_commands *p = (void *)payload;
+    static const int8_t kind[4] = {[WMTMetal4Render] = 2, [WMTMetal4Compute] = 1, [WMTMetal4Blit] = 0,
+                                   [WMTMetal4AccelerationStructure] = 3};
+    if (p->kind >= 4 || !objects_cmd_list(w, (void *)p->head.ptr, kind[p->kind])) return 0;
+    break;
+  }
+  case 204: /* encodeDenoisedScale: its textures and fence */
+    OBJECT_INFO(WMTFXDenoisedScaleArgs, ((struct unixcall_mtlcommandbuffer_denoised_scale *)payload)->args.ptr);
+    break;
+  case 167: { /* sampledCommandEncoder: the sample buffer, and a render pass's attachments */
+    struct unixcall_mtlcommandbuffer_sampledcommandencoder *p = (void *)payload;
+    if (p->samples.ptr) OBJECT_INFO(WMTSampleBufferAttachmentInfo, p->samples.ptr);
+    if (p->render_info.ptr) OBJECT_INFO(WMTRenderPassInfo, p->render_info.ptr);
+    break;
+  }
+#endif
   default: break;
   }
   if (call == 114) return !output || object_field(w, &((struct unixcall_generic_obj_uint64_obj_ret *)payload)->ret);
+#ifdef WMTR_MULLION
+  /* newMTL4CommandQueue returns its queue in the uint64 ret of a generic struct */
+  if (call == 154 && output && !object_field(w, (obj_handle_t *)&((struct unixcall_generic_obj_uint64_ret *)payload)->ret)) return 0;
+#endif
   if (call == 71 && output) {
     struct WMTLayerProps *p = ((struct unixcall_generic_obj_ptr_noret *)payload)->arg.ptr;
     if (!object_range(w, p, 1, sizeof *p) || !object_field(w, &p->device)) return 0;
@@ -226,7 +313,7 @@ static int objects_walk(struct object_walk *w, uint8_t *payload, int output) {
   }
   switch (call) {
 #define WMTR_OBJECT_CALLS
-#include "wmtr_objects.inc"
+#include WMTR_OBJECTS_INC
 #undef WMTR_OBJECT_CALLS
   default: return 1;
   }
