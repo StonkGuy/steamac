@@ -161,12 +161,17 @@ final class Renderer {
                                       mipmapLevel: 0, withBytes: src, bytesPerRow: b.stride)
     }
 
-    /// Use the window queue so the next upload waits for every reader of the shared scanout.
+    /// Use the window queue so the next upload waits for every reader of the shared scanout: the
+    /// capture samples `texture` (the current slot), which stays in use until `cb` completes.
     func submitCapture(_ encode: (MTLCommandBuffer) -> Void) {
         guard let cb = queue.makeCommandBuffer() else { return }
         encode(cb)
         cb.commit()
-        lastCommandBuffer = cb
+        if slots.indices.contains(currentSlot) {
+            slots[currentSlot].user = cb
+            useSeq += 1
+            slots[currentSlot].seq = useSeq
+        }
     }
 
     func dropTexture() {
