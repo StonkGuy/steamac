@@ -3,7 +3,7 @@
  * request the guest wrote itself. The implementations are stubs that read and write their whole params struct;
  * calls that dereference guest handles by design (raw Metal object pointers: the trust boundary of
  * fxgl/steamac#14) are mapped to a plain call, so a report here is a decoding bug, not the handle model.
- * Build (Homebrew LLVM; Apple clang has no libFuzzer), from wmtr/:
+ * Build (Homebrew LLVM; Apple clang has no libFuzzer), from wmtr/ (Mullion flavour: add -DWMTR_MULLION, DXMT=<mullion>):
  *   clang -g -O1 -fsanitize=fuzzer,address,undefined -ObjC -Iinclude -Isrc -I../host/vrhost/include \
  *     -I../guest/vr/include -I$DXMT/src/winemetal -I$DXMT/src/airconv tests/fuzz_wmtr_host.m src/wmtr_host.m \
  *     [src/wmtr_vr.m] -framework Foundation -framework Metal -framework Cocoa -framework QuartzCore \
@@ -40,11 +40,11 @@ static volatile uint8_t sink;
     memset(b, 0, sizeof(t));                                                                                          \
     return 0;                                                                                                         \
   }
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 const void *wmtr_impl_funcs[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = stub_##i,
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 

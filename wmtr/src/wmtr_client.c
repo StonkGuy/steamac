@@ -356,23 +356,23 @@ b_in(uint32_t field_off, const void *src, uint64_t size) {
   return o;
 }
 
-static void
+static uint32_t
 b_out(uint32_t field_off, void *dst, uint64_t size, int inout) {
-  if (!dst) { uint64_t z = 0; memcpy(B.buf + field_off, &z, 8); return; }
-  if (B.n_out == MAX_OUT) { B.error = 1; return; }
+  if (!dst) { uint64_t z = 0; memcpy(B.buf + field_off, &z, 8); return UINT32_MAX; }
+  if (B.n_out == MAX_OUT) { B.error = 1; return UINT32_MAX; }
   B.force_sync = 1;
   uint32_t used = 0;
   for (int i = 0; i < B.n_out; i++) if (!B.dsts[i].arena) used += B.outs[i].size;
   if (size > INLINE_OUT_MAX || used + size + B.params_size > WMTR_SLOT_BYTES) {
     uint32_t blob, off;
     uint8_t *p = (B.n_stage < MAX_STAGE) ? arena_alloc(size, &blob, &off) : NULL;
-    if (!p) { B.error = 1; return; }
+    if (!p) { B.error = 1; return UINT32_MAX; }
     if (inout) memcpy(p, dst, size);
     B.stages[B.n_stage++] = (struct stage){blob, off, size};
     B.dsts[B.n_out] = (struct out_dst){dst, (uint32_t)size, p};
     B.outs[B.n_out++] = (struct wmtr_out){0, 0}; /* not copied through the slot */
     b_reloc(field_off, WMTR_REF_ARENA | ((uint64_t)blob << 32) | off);
-    return;
+    return UINT32_MAX;
   }
   uint32_t o = b_grow(size ? (uint32_t)size : 8); /* a zero-length output still needs an in-bounds address */
   if (inout) memcpy(B.buf + o, dst, size);
@@ -380,6 +380,7 @@ b_out(uint32_t field_off, void *dst, uint64_t size, int inout) {
   B.dsts[B.n_out] = (struct out_dst){dst, (uint32_t)size, NULL};
   B.outs[B.n_out++] = (struct wmtr_out){o, (uint32_t)size};
   b_reloc(field_off, WMTR_REF_EXTRA | o);
+  return o;
 }
 
 static void
@@ -405,7 +406,7 @@ static NTSTATUS send_built_flags(uint16_t call, uint16_t extra_flags, void *para
 #define WMTR_CLS_N 1
 static const uint8_t call_cls[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = WMTR_CLS_##c,
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 
@@ -577,16 +578,48 @@ find_ntdll(struct dl_phdr_info *info, size_t size, void *out) {
 }
 #endif
 
-/* ntdll's NtSetEvent in this process (exported for tests) */
-__attribute__((visibility("default"))) void *
-wmtr_find_nt_set_event(void) {
-  void *f = dlsym(RTLD_DEFAULT, "NtSetEvent");
+/* an ntdll function in this process */
+static void *
+find_nt(const char *name) {
+  void *f = NULL;
+#ifdef WMTR_TESTING
+  char test_name[64]; /* the loopback test's stand-ins (its executor defines a stub NtSetEvent itself) */
+  snprintf(test_name, sizeof test_name, "wmtr_test_%s", name);
+  f = dlsym(RTLD_DEFAULT, test_name);
+#endif
+  if (!f) f = dlsym(RTLD_DEFAULT, name);
 #ifdef __linux__
   void *h = NULL;
-  if (!f && dl_iterate_phdr(find_ntdll, &h) && h) f = dlsym(h, "NtSetEvent");
+  if (!f && dl_iterate_phdr(find_ntdll, &h) && h) f = dlsym(h, name);
 #endif
   return f;
 }
+
+/* ntdll's NtSetEvent in this process (exported for tests) */
+__attribute__((visibility("default"))) void *
+wmtr_find_nt_set_event(void) {
+  return find_nt("NtSetEvent");
+}
+
+#ifdef WMTR_MULLION
+/* Mullion's setWin32EventAtValue with `reference`: the caller may close its handle before the event reaches the value
+ * (and the handle's value may then name another object), so the notification sets a duplicate of its own, which the
+ * listener closes once it has set it. The flag marks such a handle on its way through the host and back. */
+#define WMTR_EVENT_OWNED 0x8000000000000000ull
+typedef NTSTATUS (*pNtDuplicateObject)(void *, void *, void *, void **, uint32_t, uint32_t, uint32_t);
+typedef NTSTATUS (*pNtClose)(void *);
+static pNtClose nt_close;
+static uint64_t
+event_reference(uint64_t handle) {
+  static pNtDuplicateObject duplicate;
+  if (!duplicate) duplicate = (pNtDuplicateObject)find_nt("NtDuplicateObject");
+  if (!nt_close) nt_close = (pNtClose)find_nt("NtClose");
+  void *self = (void *)~(uintptr_t)0, *dup = NULL;
+  if (!duplicate || !nt_close || duplicate(self, (void *)(uintptr_t)handle, self, &dup, 0, 0, 2 /* SAME_ACCESS */))
+    return 0; /* a handle that names no object has nothing to set (Mullion's own unix side does the same) */
+  return (uint64_t)(uintptr_t)dup | WMTR_EVENT_OWNED;
+}
+#endif
 
 static NTSTATUS
 listener_run(uint64_t listener) {
@@ -603,6 +636,14 @@ listener_run(uint64_t listener) {
       struct wmtr_event e = R->event_ring[t % WMTR_EVENT_RING];
       if (e.listener != listener) continue; /* one listener per device in DXMT; others are dropped */
       if (!e.event_handle) { stop = 1; continue; }
+#ifdef WMTR_MULLION
+      if (e.event_handle & WMTR_EVENT_OWNED) {
+        void *own = (void *)(uintptr_t)(e.event_handle & ~WMTR_EVENT_OWNED);
+        set_event(own, NULL);
+        if (nt_close) nt_close(own);
+        continue;
+      }
+#endif
       set_event((void *)(uintptr_t)e.event_handle, NULL);
     }
     __atomic_store_n(&R->event_tail, t, __ATOMIC_RELEASE);
@@ -619,8 +660,8 @@ listener_run(uint64_t listener) {
 static uint32_t
 cmd_size(int kind, uint16_t type) {
 #define CMD(k, e, s) if (kind == WMTR_KIND_##k && type == e) return sizeof(struct s);
-  enum { WMTR_KIND_BLIT, WMTR_KIND_COMPUTE, WMTR_KIND_RENDER };
-#include "wmtr_cmds.inc"
+  enum { WMTR_KIND_BLIT, WMTR_KIND_COMPUTE, WMTR_KIND_RENDER, WMTR_KIND_ACCEL };
+#include WMTR_CMDS_INC
 #undef CMD
   if (type == 0) return sizeof(struct wmtcmd_base);
   return 0;
@@ -641,7 +682,12 @@ marshal_cmds(int kind, uint32_t head_field_off, const struct wmtcmd_base *c) {
     if (kind == 1 && c->type == WMTComputeCommandSetBytes) {
       const struct wmtcmd_compute_setbytes *b = (const void *)c;
       b_in(o + OFF(struct wmtcmd_compute_setbytes, bytes), b->bytes.ptr, b->length);
+#ifdef WMTR_MULLION
+    } else if (kind == 2 && (c->type == WMTRenderCommandSetFragmentBytes || c->type == WMTRenderCommandSetVertexBytes ||
+                             c->type == WMTRenderCommandSetMeshBytes)) {
+#else
     } else if (kind == 2 && c->type == WMTRenderCommandSetFragmentBytes) {
+#endif
       const struct wmtcmd_render_setbytes *b = (const void *)c;
       b_in(o + OFF(struct wmtcmd_render_setbytes, bytes), b->bytes.ptr, b->length);
     } else if (kind == 2 && c->type == WMTRenderCommandSetViewports) {
@@ -652,6 +698,12 @@ marshal_cmds(int kind, uint32_t head_field_off, const struct wmtcmd_base *c) {
       const struct wmtcmd_render_setscissorrects *b = (const void *)c;
       b_in(o + OFF(struct wmtcmd_render_setscissorrects, scissor_rects), b->scissor_rects.ptr,
            (uint64_t)b->rect_count * sizeof(struct WMTScissorRect));
+#ifdef WMTR_MULLION
+    } else if (kind == 3 && c->type == WMTAccelerationStructureCommandBuild) {
+      const struct wmtcmd_accelerationstructure_build *b = (const void *)c;
+      b_in(o + OFF(struct wmtcmd_accelerationstructure_build, info.geometries), b->info.geometries.ptr,
+           (uint64_t)b->info.geometry_count * sizeof(struct WMTAccelerationStructureGeometry));
+#endif
     }
   }
 }
@@ -664,7 +716,14 @@ marshal_sm50_args(uint32_t field_off, const struct SM50_SHADER_COMPILATION_ARGUM
   for (; a; a = a->next) {
     uint32_t sz;
     switch (a->type) {
+#ifdef WMTR_MULLION
+    case SM50_SHADER_STREAM_OUTPUT: sz = sizeof(struct SM50_SHADER_STREAM_OUTPUT_DATA); break;
+    case SM50_SHADER_MESH_SHADER: sz = sizeof(struct SM50_SHADER_MESH_SHADER_DATA); break;
+    case SM50_SHADER_RAY_SHADER: sz = sizeof(struct SM50_SHADER_RAY_SHADER_DATA); break;
+    case SM50_SHADER_LIBRARIES: sz = sizeof(struct SM50_SHADER_LIBRARIES_DATA); break;
+#else
     case SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT: sz = sizeof(struct SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA); break;
+#endif
     case SM50_SHADER_COMMON: sz = sizeof(struct SM50_SHADER_COMMON_DATA); break;
     case SM50_SHADER_PSO_PIXEL_SHADER: sz = sizeof(struct SM50_SHADER_PSO_PIXEL_SHADER_DATA); break;
     case SM50_SHADER_IA_INPUT_LAYOUT: sz = sizeof(struct SM50_SHADER_IA_INPUT_LAYOUT_DATA); break;
@@ -680,11 +739,32 @@ marshal_sm50_args(uint32_t field_off, const struct SM50_SHADER_COMPILATION_ARGUM
     b_reloc(link, WMTR_REF_EXTRA | o);
     link = o; /* next is the first member */
     uint64_t z = 0; memcpy(B.buf + link, &z, 8);
+#ifdef WMTR_MULLION
+    if (a->type == SM50_SHADER_STREAM_OUTPUT) {
+      const struct SM50_SHADER_STREAM_OUTPUT_DATA *d = (const void *)a;
+      b_in(o + OFF(struct SM50_SHADER_STREAM_OUTPUT_DATA, elements), d->elements,
+           (uint64_t)d->num_elements * sizeof(struct SM50_STREAM_OUTPUT_ELEMENT2));
+    } else if (a->type == SM50_SHADER_MESH_SHADER) {
+      /* the pixel shader's DXBC container; its header holds the total size (offset 24) */
+      const struct SM50_SHADER_MESH_SHADER_DATA *d = (const void *)a;
+      const uint32_t *bc = d->pixel_shader_bytecode;
+      if (bc && bc[0] != 0x43425844) { LOG(0, "mesh pipeline: pixel shader is not a DXBC container\n"); B.error = 1; return; }
+      b_in(o + OFF(struct SM50_SHADER_MESH_SHADER_DATA, pixel_shader_bytecode), bc, bc ? bc[6] : 0);
+    } else if (a->type == SM50_SHADER_RAY_SHADER) {
+      const struct SM50_SHADER_RAY_SHADER_DATA *d = (const void *)a;
+      b_cstr(o + OFF(struct SM50_SHADER_RAY_SHADER_DATA, name), d->name);
+    } else if (a->type == SM50_SHADER_LIBRARIES) {
+      const struct SM50_SHADER_LIBRARIES_DATA *d = (const void *)a;
+      b_in(o + OFF(struct SM50_SHADER_LIBRARIES_DATA, libraries), d->libraries, (uint64_t)d->count * sizeof(sm50_shader_t));
+    } else
+#else
     if (a->type == SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT) {
       const struct SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA *d = (const void *)a;
       b_in(o + OFF(struct SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT_DATA, elements), d->elements,
            (uint64_t)d->num_elements * sizeof(struct SM50_STREAM_OUTPUT_ELEMENT));
-    } else if (a->type == SM50_SHADER_ROOT_SIGNATURE || a->type == SM50_SHADER_ROOT_SIGNATURE2) {
+    } else
+#endif
+    if (a->type == SM50_SHADER_ROOT_SIGNATURE || a->type == SM50_SHADER_ROOT_SIGNATURE2) {
       const struct SM50_SHADER_ROOT_SIGNATURE_DATA *d = (const void *)a;
       b_in(o + OFF(struct SM50_SHADER_ROOT_SIGNATURE_DATA, bytecode), d->bytecode, (uint64_t)d->bytecode_length);
     } else if (a->type == SM50_SHADER_IA_INPUT_LAYOUT) {
@@ -936,6 +1016,92 @@ dispatch(uint16_t call, void *params, uint32_t size, int sync) {
   case 143: b_begin(params, size); b_out(OFF(struct unixcall_mtldevice_newicb, info), ((struct unixcall_mtldevice_newicb *)params)->info.ptr, sizeof(struct WMTIndirectCommandBufferInfo), 1); break;
   case 144: { struct unixcall_mtldevice_newlibrarywithsource *p = params; b_begin(p, size); b_in(OFF(struct unixcall_mtldevice_newlibrarywithsource, source), p->source.ptr, p->length); break; }
   case 109: return listener_run(((struct unixcall_generic_obj_noret *)params)->handle);
+#ifdef WMTR_MULLION
+  /* Mullion's own calls (146..208, gen/gen_table.py); those without pointer fields take the default */
+  case 155: case 156: { /* MTL4CommandQueue_update/copyMappings: arrays of Metal 4's mapping operations */
+    struct unixcall_mtl4_mappings *p = params; b_begin(p, size);
+    static const uint8_t op_size[2][2] = {{WMTR_MTL4_UPDATE_BUFFER_OP, WMTR_MTL4_UPDATE_TEXTURE_OP},
+                                          {WMTR_MTL4_COPY_BUFFER_OP, WMTR_MTL4_COPY_TEXTURE_OP}};
+    b_in(OFF(struct unixcall_mtl4_mappings, operations), p->operations.ptr, p->count * op_size[call == 156][p->texture != 0]);
+    break; }
+  case 158: { /* accelerationStructureSizes: the info is in and out (sizes), its geometries are in */
+    struct unixcall_mtldevice_accelerationstructuresizes *p = params; struct WMTAccelerationStructureInfo *i = p->info.ptr;
+    b_begin(p, size);
+    uint32_t o = b_out(OFF(struct unixcall_mtldevice_accelerationstructuresizes, info), i, sizeof *i, 1);
+    if (i && o != UINT32_MAX)
+      b_in(o + OFF(struct WMTAccelerationStructureInfo, geometries), i->geometries.ptr,
+           (uint64_t)i->geometry_count * sizeof(struct WMTAccelerationStructureGeometry));
+    break; }
+  case 161: { struct unixcall_generic_obj_cmd_noret *p = params; b_begin(p, size);
+    marshal_cmds(3, OFF(struct unixcall_generic_obj_cmd_noret, cmd_head), p->cmd_head.ptr); break; }
+  case 162: { struct unixcall_mtldevice_newlinkedcomputepso *p = params; const struct WMTLinkedComputePipelineInfo *i = p->info.ptr;
+    b_begin(p, size);
+    uint32_t o = b_in(OFF(struct unixcall_mtldevice_newlinkedcomputepso, info), i, sizeof *i);
+    if (i && o != UINT32_MAX)
+      b_in(o + OFF(struct WMTLinkedComputePipelineInfo, functions), i->functions.ptr, 8ull * i->function_count);
+    break; }
+  case 163: { struct unixcall_mtlcomputepso_newvisiblefunctiontable *p = params; b_begin(p, size);
+    b_in(OFF(struct unixcall_mtlcomputepso_newvisiblefunctiontable, functions), p->functions.ptr, 8ull * p->function_count);
+    break; }
+  case 167: { struct unixcall_mtlcommandbuffer_sampledcommandencoder *p = params; b_begin(p, size);
+    b_in(OFF(struct unixcall_mtlcommandbuffer_sampledcommandencoder, samples), p->samples.ptr, sizeof(struct WMTSampleBufferAttachmentInfo));
+    b_in(OFF(struct unixcall_mtlcommandbuffer_sampledcommandencoder, render_info), p->render_info.ptr, sizeof(struct WMTRenderPassInfo));
+    break; }
+  case 164: { struct sm50_get_ray_shader_params *p = params; b_begin(p, size); /* SM50GetRayShader: name and info out */
+    b_out(OFF(struct sm50_get_ray_shader_params, name), p->name, p->name_size, 0);
+    b_out(OFF(struct sm50_get_ray_shader_params, info), p->info, sizeof(struct SM50_RAY_SHADER_INFO), 0);
+    break; }
+  case 168: return STATUS_SUCCESS; /* WMTDiagWrite: diagnostic files at host paths, nothing written (ret 0) */
+  case 169: { struct unixcall_dispatchdata_bytes *p = params; b_begin(p, size);
+    b_out(OFF(struct unixcall_dispatchdata_bytes, buffer), p->buffer.ptr, p->size, 0); break; }
+  case 104: { struct unixcall_mtlsharedevent_setevent *p = params; b_begin(p, size); /* setWin32EventAtValue */
+    if (p->reference && p->event_handle) {
+      uint64_t own = event_reference(p->event_handle);
+      if (!own) return STATUS_SUCCESS;
+      memcpy(B.buf + OFF(struct unixcall_mtlsharedevent_setevent, event_handle), &own, 8);
+    }
+    break; }
+  case 176: b_begin(params, size); /* WMTPresentStatistics_get */
+    b_out(OFF(struct unixcall_generic_obj_ptr_noret, arg), ((struct unixcall_generic_obj_ptr_noret *)params)->arg.ptr,
+          sizeof(struct WMTPresentStatistics), 0);
+    break;
+  case 177: { struct unixcall_wmtgpu_statistics *p = params; b_begin(p, size); /* WMTGPUStatistics */
+    b_out(OFF(struct unixcall_wmtgpu_statistics, buffer), p->buffer.ptr, p->size, 0); break; }
+  /* flight records and traces are files under host paths: nothing is written (the guest keeps its own log) */
+  case 180: return STATUS_SUCCESS;
+  case 193: ((struct unixcall_wmttrace_write *)params)->ret = 0; return STATUS_SUCCESS;
+  case 196: return STATUS_NOT_SUPPORTED; /* WMTBootstrapKeep: bootstrap names do not cross the VM */
+  case 182: { struct unixcall_metal4_encoder *p = params; b_begin(p, size); /* MTL4 encoder: render pass in, samples in and out */
+    b_in(OFF(struct unixcall_metal4_encoder, render), p->render.ptr, p->render.ptr ? sizeof(struct WMTRenderPassInfo) : 0);
+    b_out(OFF(struct unixcall_metal4_encoder, samples), p->samples.ptr, sizeof(struct WMTSampleBufferAttachmentInfo), 1);
+    break; }
+  case 183: { struct unixcall_metal4_commands *p = params; b_begin(p, size); /* MTL4 command lists of each stream */
+    static const int8_t kind[4] = {[WMTMetal4Render] = 2, [WMTMetal4Compute] = 1, [WMTMetal4Blit] = 0,
+                                   [WMTMetal4AccelerationStructure] = 3};
+    if (p->kind >= 4) { LOG(0, "MTL4 command list of unknown kind %llu\n", (unsigned long long)p->kind); return STATUS_UNSUCCESSFUL; }
+    marshal_cmds(kind[p->kind], OFF(struct unixcall_metal4_commands, head), p->head.ptr);
+    break; }
+  case 199: b_begin(params, size); /* newSpatialScaler (Metal 4) */
+    b_in(OFF(struct unixcall_mtldevice_newfxspatialscaler, info), ((struct unixcall_mtldevice_newfxspatialscaler *)params)->info.ptr,
+         sizeof(struct WMTFXSpatialScalerInfo));
+    break;
+  case 201: b_begin(params, size); /* newTemporalScaler (Metal 4) */
+    b_in(OFF(struct unixcall_mtldevice_newfxtemporalscaler, info), ((struct unixcall_mtldevice_newfxtemporalscaler *)params)->info.ptr,
+         sizeof(struct WMTFXTemporalScalerInfo));
+    break;
+  case 202: b_begin(params, size); /* encodeTemporalScale (Metal 4) */
+    b_in(OFF(struct unixcall_mtlcommandbuffer_temporal_scale, props), ((struct unixcall_mtlcommandbuffer_temporal_scale *)params)->props.ptr,
+         sizeof(struct WMTFXTemporalScalerProps));
+    break;
+  case 203: b_begin(params, size); /* newDenoisedScaler */
+    b_in(OFF(struct unixcall_mtldevice_newfxdenoisedscaler, info), ((struct unixcall_mtldevice_newfxdenoisedscaler *)params)->info.ptr,
+         sizeof(struct WMTFXDenoisedScalerInfo));
+    break;
+  case 204: b_begin(params, size); /* encodeDenoisedScale */
+    b_in(OFF(struct unixcall_mtlcommandbuffer_denoised_scale, args), ((struct unixcall_mtlcommandbuffer_denoised_scale *)params)->args.ptr,
+         sizeof(struct WMTFXDenoisedScaleArgs));
+    break;
+#endif
   default: b_begin(params, size); break;
   }
   return send_built(call, sync, params, size);
@@ -950,7 +1116,7 @@ dispatch(uint16_t call, void *params, uint32_t size, int sync) {
 #define WMTR_SYNC_N 1
 static const uint8_t call_sync[WMTR_NCALLS] = {
 #define X(i, n, t, c) [i] = WMTR_SYNC_##c,
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 static const uint32_t call_size[WMTR_NCALLS] = {
@@ -960,7 +1126,7 @@ static const uint32_t call_size[WMTR_NCALLS] = {
 #define WMTR_SIZEOF_B(t) sizeof(t)
 #define WMTR_SIZEOF_C(t) sizeof(t)
 #define WMTR_SIZEOF_N(t) 0
-#include "wmtr_calls.inc"
+#include WMTR_CALLS_INC
 #undef X
 };
 
@@ -990,12 +1156,36 @@ entry(uint16_t call, void *params) {
 #define E10(n) E(n##0) E(n##1) E(n##2) E(n##3) E(n##4) E(n##5) E(n##6) E(n##7) E(n##8) E(n##9)
 E(0) E(1) E(2) E(3) E(4) E(5) E(6) E(7) E(8) E(9) E10(1) E10(2) E10(3) E10(4) E10(5) E10(6) E10(7) E10(8) E10(9)
 E10(10) E10(11) E10(12) E10(13) E(140) E(141) E(142) E(143) E(144) E(145) E(146)
+#ifdef WMTR_MULLION
+E(147) E(148) E(149) E10(15) E10(16) E10(17) E10(18) E10(19) E(200) E(201) E(202) E(203) E(204) E(205) E(206) E(207) E(208)
+#endif
 #define P(n) e##n,
 #define P10(n) P(n##0) P(n##1) P(n##2) P(n##3) P(n##4) P(n##5) P(n##6) P(n##7) P(n##8) P(n##9)
 __attribute__((visibility("default"))) const void *__wine_unix_call_funcs[WMTR_NCALLS] = {
     P(0) P(1) P(2) P(3) P(4) P(5) P(6) P(7) P(8) P(9) P10(1) P10(2) P10(3) P10(4) P10(5) P10(6) P10(7) P10(8) P10(9)
-        P10(10) P10(11) P10(12) P10(13) P(140) P(141) P(142) P(143) P(144) P(145) P(146)};
+        P10(10) P10(11) P10(12) P10(13) P(140) P(141) P(142) P(143) P(144) P(145) P(146)
+#ifdef WMTR_MULLION
+        P(147) P(148) P(149) P10(15) P10(16) P10(17) P10(18) P10(19) P(200) P(201) P(202) P(203) P(204) P(205) P(206) P(207) P(208)
+#endif
+};
+#ifdef WMTR_MULLION
+_Static_assert(WMTR_NCALLS == 209, "add entries for new calls above");
+#else
 _Static_assert(WMTR_NCALLS == 147, "add entries for new calls above");
+#endif
+
+#ifdef WMTR_TESTING
+/* test hook: a call sent as the default case sends it, with none of its pointer fields marshalled (a hostile or
+ * outdated client) */
+__attribute__((visibility("default"))) NTSTATUS
+wmtr_test_send_unmarshalled(uint16_t call, void *params, uint32_t size) {
+  pthread_once(&init_once, wmtr_init);
+  if (!init_ok) return STATUS_UNSUCCESSFUL;
+  b_begin(params, size);
+  B.force_sync = 1;
+  return send_built(call, 1, params, size);
+}
+#endif
 
 /* test hook: wait through the transport for *done >= seq on reply slot `slot` */
 __attribute__((visibility("default"))) int

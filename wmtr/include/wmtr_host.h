@@ -20,6 +20,10 @@ struct wmtr_host_ops {
   const char *(*map_path)(void *ctx, const char *client_path, char *buf, uint64_t buflen);
 };
 
+/* The winemetal unix-call table this executor runs, which the guest's dlls must match: "dxmt", or "mullion" for the
+ * Mullion flavour (MULLION=1: Mullion's table, DXMT's calls plus its own). The launcher tells the guest which payload
+ * to install from it (steamac.gfx=). */
+const char *wmtr_host_flavour(void);
 /* `ring` is the host mapping of blob 0 (struct wmtr_ring + data + slots), already initialised by
  * the client. Starts the executor thread. */
 struct wmtr_host *wmtr_host_create(void *ring, const struct wmtr_host_ops *ops, void *ctx);

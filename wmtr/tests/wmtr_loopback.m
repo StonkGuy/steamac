@@ -115,7 +115,35 @@ static int probe_alive;
 - (void)fire { if (notification) notification((id<MTLSharedEvent>)self, 1); }
 - (void)dealloc { [notification release]; [super dealloc]; }
 @end
+#ifdef WMTR_MULLION
+/* ntdll stand-ins the client finds with dlsym: setWin32EventAtValue with `reference` sets and closes a duplicate */
+static _Atomic uint64_t ev_set[8], ev_closed[8];
+static _Atomic int n_ev_set, n_ev_closed;
+__attribute__((visibility("default"))) NTSTATUS wmtr_test_NtSetEvent(void *h, void *prev) {
+  int i = atomic_fetch_add(&n_ev_set, 1); if (i < 8) ev_set[i] = (uint64_t)(uintptr_t)h; return 0;
+}
+__attribute__((visibility("default"))) NTSTATUS wmtr_test_NtDuplicateObject(void *sp, void *src, void *dp, void **dst, uint32_t a, uint32_t at, uint32_t o) {
+  *dst = (void *)((uintptr_t)src + 0x1000); return 0;
+}
+__attribute__((visibility("default"))) NTSTATUS wmtr_test_NtClose(void *h) {
+  int i = atomic_fetch_add(&n_ev_closed, 1); if (i < 8) ev_closed[i] = (uint64_t)(uintptr_t)h; return 0;
+}
+static NTSTATUS remote(int call, void *p);
+static void *listener_thread(void *l) {
+  struct unixcall_generic_obj_noret p = {(obj_handle_t)(uintptr_t)l};
+  remote(109, &p);
+  return NULL;
+}
+#endif
 static NTSTATUS f_autoreleased(void *a) { ((struct unixcall_generic_obj_ret *)a)->ret = (obj_handle_t)[[[Probe alloc] init] autorelease]; return 0; }
+#ifdef WMTR_MULLION
+/* Mullion's encoder creations that return autoreleased objects (160 accelerationStructureCommandEncoder, 167 sampledCommandEncoder) */
+static NTSTATUS f_as_encoder(void *a) { ((struct unixcall_generic_obj_obj_ret *)a)->ret = (obj_handle_t)[[[Probe alloc] init] autorelease]; return 0; }
+static NTSTATUS f_sampled_encoder(void *a) {
+  ((struct unixcall_mtlcommandbuffer_sampledcommandencoder *)a)->ret = (obj_handle_t)[[[Probe alloc] init] autorelease];
+  return 0;
+}
+#endif
 /* DXMT's out-errors: autoreleased NSError retained before the handle is returned (+1, owned by the caller) */
 static int err_alive;
 @interface ErrProbe : NSObject
@@ -192,7 +220,11 @@ static NTSTATUS f_end_encoding(void *a) { enc_note(33, ((struct unixcall_generic
 static NTSTATUS f_compute_encode(void *a) { enc_note(37, ((struct unixcall_generic_obj_cmd_noret *)a)->encoder); return 0; }
 const void *wmtr_impl_funcs[WMTR_NCALLS] = {[120] = f_newshared, [123] = f_eventport, [124] = f_eventwithport, [12] = f_commit, [1] = f_release, [17] = f_signal, [25] = f_newlibrary, [76] = f_sm50compile, [30] = f_blit_enc, [31] = f_compute_enc, [32] = f_render_enc,
                                     [33] = f_end_encoding, [37] = f_compute_encode, [8] = f_getcstring, [26] = f_newfunction, [38] = f_render_encode,
-                                    [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes};
+                                    [39] = f_pixelformat, [47] = f_noop, [53] = f_autoreleased, [5] = f_fault, [88] = f_argsinfo, [45] = f_replace, [145] = f_getbytes,
+#ifdef WMTR_MULLION
+                                    [160] = f_as_encoder, [167] = f_sampled_encoder,
+#endif
+};
 
 /* ---------------- loopback transport ---------------- */
 static struct wmtr_host *H;
@@ -339,6 +371,7 @@ static void test_vr_query(struct wmtr_vr *vr, int host_fd) {
   CHECK(s.queries >= 6 && s.haptics == 1, "query stats %llu/%llu", s.queries, s.haptics);
 }
 
+#ifndef WMTR_MULLION /* the eye texture export (WMTVRSubmit, DXMT flavour only) */
 static void test_vr(id<MTLDevice> dev) {
   struct unixcall_wmtvr_submit sub;
   memset(&sub, 0, sizeof sub);
@@ -492,6 +525,7 @@ static void test_vr(id<MTLDevice> dev) {
   [tex[0] release]; [tex[1] release]; [ev release];
   printf("vr: submits=%llu sent=%llu dropped=%llu released=%llu swapchains=%llu\n", st.submits, st.sent, st.dropped, st.released, st.swapchains);
 }
+#endif
 
 /* WMTR_VR_FD (steamac-vm's attach path): one link per process (a dup of the launcher's socketpair end, one
  * VRL_HELLO) shared by every context: a second context (the game after Proton's steam.exe did VR_Init) uses the
@@ -976,7 +1010,9 @@ int main(void) {
             (unsigned long long)(R->free_head - R->free_tail));
       atomic_store_explicit(&burst_done, 1, memory_order_relaxed);
     }
+#ifndef WMTR_MULLION /* Mullion has no WMTVRSubmit */
     test_vr(dev);
+#endif
     test_vr_fd();
     /* 8. client-assigned handles: a frame's pool + encoder creations do not wait for the host (one sync call
           apart from the calls that return values); each use reaches the host after its creation and gets the object;
@@ -1026,6 +1062,33 @@ int main(void) {
     }
     struct wmtr_host_stats st; wmtr_host_get_stats(H, &st);
     printf("requests=%llu sync=%llu bytes=%llu\n", st.requests, st.sync_requests, st.bytes);
+#ifdef WMTR_MULLION
+    { /* Mullion's autoreleased encoders live as long as the client pool they were created in, across requests */
+      static const uint16_t calls[2] = {160, 167};
+      for (int c = 0; c < 2; c++) {
+        struct unixcall_generic_obj_ret pool = {0};
+        remote(10, &pool);
+        obj_handle_t enc = 0;
+        if (calls[c] == 160) {
+          struct unixcall_generic_obj_obj_ret p = {0x77, 0};
+          remote(160, &p); enc = p.ret;
+        } else {
+          struct WMTSampleBufferAttachmentInfo samples; memset(&samples, 0, sizeof samples);
+          struct WMTRenderPassInfo render; memset(&render, 0, sizeof render);
+          struct unixcall_mtlcommandbuffer_sampledcommandencoder p; memset(&p, 0, sizeof p);
+          p.cmdbuf = 0x77; p.samples.ptr = &samples; p.render_info.ptr = &render;
+          remote(167, &p); enc = p.ret;
+        }
+        struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); /* sync: the creating request has finished */
+        int alive_in_pool = probe_alive;
+        obj_handle_t ph = pool.ret;
+        remote(1, &ph);
+        remote(39, &q);
+        CHECK(enc && alive_in_pool && !probe_alive, "Mullion call %u: encoder alive after its request %d, after the pool %d",
+              calls[c], alive_in_pool, probe_alive);
+      }
+    }
+#endif
     { /* an autoreleased result outside any client pool must outlive the request (DXMT reads it next) */
       struct unixcall_generic_obj_ret ar = {0};
       remote(53, &ar);
@@ -1118,6 +1181,33 @@ int main(void) {
       [late_event fire];
       CHECK(__atomic_load_n(&wake_count, __ATOMIC_RELAXED) == before_wake + 1 &&
             wmtr_host_progress(H, WMTR_EVENT_SLOT) == before_event + 1, "live event did not wake");
+#ifdef WMTR_MULLION
+      { /* Mullion's `reference` events: the caller may close its handle before the value is reached, so the
+           notification sets a duplicate, which the listener closes after setting it; without `reference` the
+           caller's handle is set as before and nothing is closed */
+        struct unixcall_generic_obj_ret nl = {0};
+        remote(108, &nl);
+        pthread_t lt;
+        CHECK(nl.ret && pthread_create(&lt, NULL, listener_thread, (void *)(uintptr_t)nl.ret) == 0, "listener");
+        DelayedSharedEvent *ev1 = [[DelayedSharedEvent alloc] init], *ev2 = [[DelayedSharedEvent alloc] init];
+        struct unixcall_mtlsharedevent_setevent r1 = {.shared_event = (obj_handle_t)ev1, .shared_event_listener = nl.ret,
+                                                      .event_handle = 0x40, .value = 1, .reference = 1};
+        struct unixcall_mtlsharedevent_setevent r2 = {.shared_event = (obj_handle_t)ev2, .shared_event_listener = nl.ret,
+                                                      .event_handle = 0x44, .value = 1, .reference = 0};
+        remote(104, &r1); remote(104, &r2);
+        { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); }
+        [ev1 fire]; [ev2 fire];
+        for (int i = 0; i < 2000 && (atomic_load(&n_ev_set) < 2 || atomic_load(&n_ev_closed) < 1); i++) usleep(1000);
+        CHECK(atomic_load(&n_ev_set) == 2 && atomic_load(&n_ev_closed) == 1 && ev_closed[0] == 0x1040 &&
+              ((ev_set[0] == 0x1040 && ev_set[1] == 0x44) || (ev_set[0] == 0x44 && ev_set[1] == 0x1040)),
+              "reference events: set %d (%llx %llx), closed %d (%llx)", atomic_load(&n_ev_set), (unsigned long long)ev_set[0],
+              (unsigned long long)ev_set[1], atomic_load(&n_ev_closed), (unsigned long long)ev_closed[0]);
+        struct unixcall_generic_obj_noret d = {nl.ret};
+        remote(110, &d);
+        pthread_join(lt, NULL);
+        [ev1 release]; [ev2 release];
+      }
+#endif
       test_hostile_requests(dev);
       /* shared resources (DXMT's D3D11 MISC_SHARED textures and shared fences): the Mach ports stay in this process,
        * so register/look-up (121/122) work through it, and a port a client passes in must be one the host gave out */
