@@ -1,0 +1,158 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: StonkGuy <68372320+StonkGuy@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:43:00 +0200
+Subject: [PATCH 4/4] mullion: CPU access goes where newBuffer says the
+ contents are
+
+Three places placed memory of their own under a buffer and then kept
+reading or writing that memory instead of the WMTBufferInfo.memory that
+newBuffer returns: the staging blocks of the ring bump allocator (constant
+buffers, uploads), the stream-output scratch overflow word the GPU writes,
+and the pixels of a frame a window without a layer gets through GDI. With
+a unix side in this process both are the same memory; a unix side that
+backs the buffer with other memory (steamac's wmtr, whose Metal runs in a
+VM's host) saw zeros on the GPU side or read zeros back. They now go
+through the returned pointer, like BufferAllocation, and keep the placed
+memory only to free it. The same change to DXMT's staging blocks is in
+steamac's DXMT patches (0002).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/mullion/mullion_context.cpp             |  9 ++++++---
+ src/mullion/mullion_context.hpp             |  1 +
+ src/mullion/mullion_presenter.cpp           |  3 ++-
+ src/mullion/mullion_presenter.hpp           |  2 ++
+ src/mullion/mullion_ring_bump_allocator.hpp | 18 +++++++++++++-----
+ 5 files changed, 24 insertions(+), 9 deletions(-)
+
+diff --git a/src/mullion/mullion_context.cpp b/src/mullion/mullion_context.cpp
+index c48b0226fbe3dbcc11b0f695c2669c4ac43c509f..cab1bf36265943c62d01fee7cbadba5c0184ba8b 100644
+--- a/src/mullion/mullion_context.cpp
++++ b/src/mullion/mullion_context.cpp
+@@ -78,6 +78,9 @@ ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Devic
+   overflow_info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
+   so_scratch_overflow_ = device.newBuffer(overflow_info);
+   so_scratch_overflow_va_ = overflow_info.gpu_address;
++  // the GPU writes the overflow where newBuffer says the contents are, which a unix side may back with other memory
++  // than the placed one
++  so_scratch_overflow_mapped_ = overflow_info.memory.get() ? (uint64_t *)overflow_info.memory.get() : so_scratch_overflow_host_;
+   cpu_buffer_chunks_.emplace_back();
+   barrier_event_ = device_.newEvent();
+   for (unsigned i = 0; i < kParityLane; i++) {
+@@ -142,7 +145,7 @@ ArgumentEncodingContext::indirectGeometryBound(uint32_t invocations) {
+   if (invocations) {
+     // the per-invocation counts alone bound how many object threadgroups the scratch can hold
+     auto per_group = SM50StreamOutputScratch(1, invocations) - SM50StreamOutputScratch(1, 0);
+-    bound = std::max(bound, std::max(so_scratch_budget_, *so_scratch_overflow_host_) / per_group);
++    bound = std::max(bound, std::max(so_scratch_budget_, *so_scratch_overflow_mapped_) / per_group);
+   }
+   return bound;
+ }
+@@ -161,8 +164,8 @@ ArgumentEncodingContext::encodeStreamOutputTargets(uint32_t warps, uint32_t inst
+   // an indirect draw's scratch is in the context's area, which the encoder's first such draw grows by what an earlier
+   // one lacked. the encoder writes it all, so encoders using it run one after another
+   if (!warps && !encoder->so_scratch) {
+-    if (uint64_t lacked = *so_scratch_overflow_host_) {
+-      *so_scratch_overflow_host_ = 0;
++    if (uint64_t lacked = *so_scratch_overflow_mapped_) {
++      *so_scratch_overflow_mapped_ = 0;
+       if (lacked > so_scratch_budget_) {
+         while (so_scratch_budget_ < lacked)
+           so_scratch_budget_ *= 2;
+diff --git a/src/mullion/mullion_context.hpp b/src/mullion/mullion_context.hpp
+index 7394e17ea456dadb03cd45e8c5c5f239278cdfea..6368285a7772661c36311ae42c2aba508d0d75f4 100644
+--- a/src/mullion/mullion_context.hpp
++++ b/src/mullion/mullion_context.hpp
+@@ -1000,6 +1000,7 @@ private:
+   WMT::Reference<WMT::Buffer> so_scratch_overflow_;
+   uint64_t so_scratch_overflow_va_;
+   uint64_t *so_scratch_overflow_host_;
++  uint64_t *so_scratch_overflow_mapped_;
+ 
+   WMT::Reference<WMT::SamplerState> dummy_sampler_;
+   WMTSamplerInfo dummy_sampler_info_;
+diff --git a/src/mullion/mullion_presenter.cpp b/src/mullion/mullion_presenter.cpp
+index faf954cb4394c81ffea20da5aa4d54956eef4d75..6a9a16fe3a3f6ac25cbc500b5204c0b7ff241b60 100644
+--- a/src/mullion/mullion_presenter.cpp
++++ b/src/mullion/mullion_presenter.cpp
+@@ -245,6 +245,7 @@ Presenter::encodeCommands(
+     frame.pixels.reset(wsi::aligned_malloc(buffer_info.length, MULLION_PAGE_SIZE));
+     buffer_info.memory.set(frame.pixels.get());
+     frame.buffer = device_.newBuffer(buffer_info);
++    frame.mapped = buffer_info.memory.get() ? buffer_info.memory.get() : frame.pixels.get();
+     wmtcmd_blit_copy_from_texture_to_buffer copy{.type = WMTBlitCommandCopyFromTextureToBuffer};
+     copy.next.set(nullptr);
+     copy.src = target.handle;
+@@ -295,7 +296,7 @@ Presenter::drawToWindow(double after) {
+     return;
+   SetStretchBltMode(dc, COLORONCOLOR);
+   StretchDIBits(
+-      dc, 0, 0, client.right, client.bottom, 0, 0, frame.width, frame.height, frame.pixels.get(), &bitmap, DIB_RGB_COLORS,
++      dc, 0, 0, client.right, client.bottom, 0, 0, frame.width, frame.height, frame.mapped, &bitmap, DIB_RGB_COLORS,
+       SRCCOPY
+   );
+   ReleaseDC(window_, dc);
+diff --git a/src/mullion/mullion_presenter.hpp b/src/mullion/mullion_presenter.hpp
+index c8f2fa2221cdad3d53a4eb0f335b637a95f8d1e5..1c4aa07c33efe2913f345bf1ad98c2d16ca42cd6 100644
+--- a/src/mullion/mullion_presenter.hpp
++++ b/src/mullion/mullion_presenter.hpp
+@@ -145,6 +145,8 @@ private:
+   struct WindowFrame {
+     // placed here: a 32-bit process reads no memory Metal allocates
+     std::unique_ptr<void, void (*)(void *)> pixels{nullptr, wsi::aligned_free};
++    // where newBuffer says the contents are: a unix side may back the buffer with other memory than `pixels`
++    void *mapped = nullptr;
+     WMT::Reference<WMT::Buffer> buffer;
+     uint32_t width, height;
+     uint64_t number;
+diff --git a/src/mullion/mullion_ring_bump_allocator.hpp b/src/mullion/mullion_ring_bump_allocator.hpp
+index 571720a17e806191764ccecf3f86e08516ac67f6..08e9d903a8bbf0db9b396b2b46a15412fcaad213 100644
+--- a/src/mullion/mullion_ring_bump_allocator.hpp
++++ b/src/mullion/mullion_ring_bump_allocator.hpp
+@@ -94,12 +94,16 @@ public:
+     WMT::Reference<WMT::Buffer> buffer;
+     uint64_t gpu_address;
+     void *mapped_address;
++    // the memory placed under the buffer (freed with the block); mapped_address is what newBuffer returned for CPU
++    // access, which a unix side may back with other memory than the placed one
++    void *placed_address;
+ 
+     ~Block() {
+-      if (mapped_address) {
+-        free(mapped_address);
+-        mapped_address = nullptr;
++      if (placed_address) {
++        free(placed_address);
++        placed_address = nullptr;
+       }
++      mapped_address = nullptr;
+     };
+ 
+     Block() = default;
+@@ -109,20 +113,24 @@ public:
+       buffer = std::move(move.buffer);
+       gpu_address = move.gpu_address;
+       mapped_address = move.mapped_address;
++      placed_address = move.placed_address;
+       move.mapped_address = nullptr;
++      move.placed_address = nullptr;
+     };
+   };
+ 
+   Block
+   allocate(size_t block_size) {
+     Block block{};
+-    block.mapped_address = placed_buffer_ ? malloc(block_size) : nullptr;
++    block.placed_address = placed_buffer_ ? malloc(block_size) : nullptr;
+     WMTBufferInfo info;
+     info.options = buffer_info_;
+-    info.memory.set(block.mapped_address);
++    info.memory.set(block.placed_address);
+     info.length = block_size;
+     block.buffer = device_.newBuffer(info);
+     block.gpu_address = info.gpu_address;
++    // CPU writes go where newBuffer says the contents are (like BufferAllocation does)
++    block.mapped_address = placed_buffer_ ? info.memory.get() : nullptr;
+     return block;
+   };
+ 
