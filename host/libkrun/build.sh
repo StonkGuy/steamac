@@ -32,7 +32,10 @@
 # (libkrun/libkrun#980): imago 0.2.3 shrinks a raw image when a discard or write-zeroes reaches
 # its last byte (libkrun/libkrun#949; this fork's 0027 took 0.2.5 for it and has the test).
 # Upstream steamac's 0024 (capture control bounded at 200 ms, HAL/TCC isolated) is not applied:
-# this fork's 0018/0020/0022/0023/0030 rework the same capture and control paths.
+# this fork's 0018/0020/0022/0023/0030 rework the same capture and control paths. 0036 ports its
+# behaviours onto them: capture I/O waits at most 200 ms for the microphone (then paced silence),
+# a denied/restricted microphone permission fails the start without a HAL call, and STOP/RELEASE
+# hand the capture unit to the stream's worker instead of stopping it on the control thread.
 # test/capture-guest.sh checks repeated capture failure/recovery and surviving playback
 # inside a fresh throwaway VM.
 #
@@ -123,7 +126,8 @@ done
 	# Speaker detection/config consistency, PCM permutations, height routing and downmix.
 	RUSTFLAGS="-L native=$out/lib -C link-args=-Wl,-rpath,$out/lib" \
 		cargo test -q --features snd --test macos_audio
-	# CoreAudio backend: control requests and the pump stalling each other (patch 0022).
+	# CoreAudio backend: control requests and the pump stalling each other (patch 0022); the
+	# microphone wait bound, the denied permission and the stuck capture stop (patch 0036).
 	RUSTFLAGS="-L native=$out/lib -C link-args=-Wl,-rpath,$out/lib" \
 		cargo test -q --features gpu,snd --lib -- virtio::snd
 	# The wmtr context frees an arena blob the guest released (patch 0028).

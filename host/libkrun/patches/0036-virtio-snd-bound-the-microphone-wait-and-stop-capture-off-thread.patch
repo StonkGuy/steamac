@@ -1,0 +1,632 @@
+From 3530de360986961705d5c07627f70f9d20d4ed96 Mon Sep 17 00:00:00 2001
+From: steamac <steamac@local>
+Date: Wed, 18 Nov 2026 11:15:06 +0200
+Subject: [PATCH] virtio-snd: bound the wait for the microphone, refuse a
+ denied permission early, stop capture units off the control thread
+
+Upstream steamac's 0024 (STEAMAC-8N/8P) moved capture into a worker with a
+200 ms START deadline, a microphone-permission check and a RELEASE that
+returns buffers while the HAL is stuck. This fork's 0018/0020/0022/0023/0030
+already answer START at once and open the microphone on a per-stream start
+worker (and 0025 records from a VR headset), so 0024 itself does not apply;
+this ports its three behaviours onto that design:
+
+- The guest's capture I/O waits for the microphone at most 200 ms after
+  START (CAPTURE_START_WAIT). Before, it waited for as long as the start
+  worker did: a permission prompt or a stuck HAL left arecord without data
+  until it timed out. After 200 ms the pump delivers clock-paced silence (as
+  for a missing device) until the unit runs; the late open is logged once.
+- The start worker asks AVCaptureDevice for the microphone permission first.
+  Denied or restricted fails the start at once, without any HAL call (whose
+  start can wait on TCC), and capture gets paced silence; "undetermined" goes
+  on and lets macOS ask. The input device and the permission are logged.
+- A capture unit taken off its stream (STOP, RELEASE, a new START, a VR
+  headset switch) is no longer stopped by the caller: the stream's worker
+  stops it, in order and before it opens the next one (StartGate::kick). The
+  control thread called AudioOutputUnitStop itself, so a stuck HAL hung STOP
+  and RELEASE with the guest's queued buffers.
+
+Upstream state: steamac 1.9.15's 0024 (not applied in this fork, see
+host/libkrun/build.sh). Tests (fail without this patch):
+capture_waits_for_the_microphone_at_most_the_start_bound,
+denied_microphone_permission_fails_the_start_without_the_hal,
+capture_stop_and_release_do_not_wait_for_a_stuck_unit_stop,
+start_gate_tests::a_kick_runs_the_worker_once_more_without_a_request.
+---
+ .../virtio/snd/audio_backends/coreaudio.rs    | 392 ++++++++++++++++--
+ 1 file changed, 354 insertions(+), 38 deletions(-)
+
+diff --git a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
+index bd7c801..f7ac11b 100644
+--- a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
++++ b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
+@@ -364,6 +364,44 @@ const IO_STALL: Duration = Duration::from_secs(3);
+ const WATCHDOG_PERIOD: Duration = Duration::from_millis(250);
+ /// Non-zero status the converter input proc returns when the ring has no more frames now.
+ const NO_MORE_INPUT: OSStatus = 0x6e6f6d6f; // 'nomo'
++/// Capture: how long the guest's capture I/O waits for the microphone to open after START
++/// (a permission prompt, a stuck HAL). After that it gets clock-paced silence until the unit
++/// runs, so a recording application never waits on the Mac's microphone.
++const CAPTURE_START_WAIT: Duration = Duration::from_millis(200);
++
++#[link(name = "AVFoundation", kind = "framework")]
++extern "C" {
++    static AVMediaTypeAudio: *mut c_void;
++}
++#[link(name = "objc")]
++extern "C" {
++    fn objc_getClass(name: *const c_char) -> *mut c_void;
++    fn sel_registerName(name: *const c_char) -> *mut c_void;
++    // Only used for +[AVCaptureDevice authorizationStatusForMediaType:].
++    fn objc_msgSend(receiver: *mut c_void, selector: *mut c_void, media: *mut c_void) -> isize;
++}
++
++/// This process's microphone permission (TCC): AVAuthorizationStatus and its name.
++fn microphone_permission() -> (isize, &'static str) {
++    // SAFETY: framework class method with one NSString argument and an NSInteger result.
++    let status = unsafe {
++        objc_msgSend(
++            objc_getClass(c"AVCaptureDevice".as_ptr()),
++            sel_registerName(c"authorizationStatusForMediaType:".as_ptr()),
++            AVMediaTypeAudio,
++        )
++    };
++    (
++        status,
++        match status {
++            0 => "undetermined",
++            1 => "restricted",
++            2 => "denied",
++            3 => "authorized",
++            _ => "unknown",
++        },
++    )
++}
+ 
+ /// STEAMAC_SND_TRACE=1: log PCM commands with the host stream state, plus a once-a-second
+ /// heartbeat of each running stream (render callbacks, ring and clock positions), on stderr.
+@@ -635,6 +673,17 @@ struct Shared {
+     /// Capture: at most one start worker per stream; a START while it runs only leaves the
+     /// newest format for it (see `StartGate`).
+     start_gate: StartGate<Format>,
++    /// Capture: units taken off a stream (STOP, RELEASE, a new START) that the start worker
++    /// stops, in order and before it opens the next one. `AudioOutputUnitStop` can block while
++    /// the HAL is stuck; a control request never waits for it.
++    retired: Mutex<Vec<CaptureState>>,
++    /// Capture: when the latest START asked for the microphone (`ticks_to_nanos`), for
++    /// `CAPTURE_START_WAIT`.
++    start_requested: AtomicU64,
++    /// Capture: the microphone permission check (tests replace it).
++    mic_permission: Mutex<fn() -> (isize, &'static str)>,
++    /// Capture: why the last start failed, if it did (logged; tests read it).
++    start_error: Mutex<Option<String>>,
+     /// Capture: AudioUnitRender target, touched only by the IO thread.
+     scratch: UnsafeCell<Box<[u8]>>,
+     /// Changed only while the output unit is stopped/uninitialized.
+@@ -658,6 +707,29 @@ struct Shared {
+ struct CaptureState {
+     unit: Unit,
+     converter: Converter,
++    /// Test only: `stop` waits for this first (a stop stuck in the HAL).
++    #[cfg(test)]
++    stop_gate: Option<mpsc::Receiver<()>>,
++}
++
++impl CaptureState {
++    fn new(unit: Unit, converter: Converter) -> Self {
++        Self {
++            unit,
++            converter,
++            #[cfg(test)]
++            stop_gate: None,
++        }
++    }
++
++    /// Returns once the input callback no longer runs; can block while the HAL is stuck.
++    fn stop(&mut self) {
++        #[cfg(test)]
++        if let Some(gate) = self.stop_gate.take() {
++            let _ = gate.recv();
++        }
++        self.unit.stop();
++    }
+ }
+ 
+ // SAFETY: `scratch` is only accessed from the IO thread of the single unit using this
+@@ -700,6 +772,10 @@ impl Shared {
+             starting: AtomicBool::new(false),
+             stop_pending: AtomicBool::new(false),
+             start_gate: StartGate::default(),
++            retired: Mutex::new(Vec::new()),
++            start_requested: AtomicU64::new(0),
++            mic_permission: Mutex::new(microphone_permission),
++            start_error: Mutex::new(None),
+             scratch: UnsafeCell::new(scratch),
+             mixer: UnsafeCell::new(Mixer::default()),
+             vr_mixer: UnsafeCell::new(Mixer::default()),
+@@ -1470,7 +1546,7 @@ impl Unit {
+ 
+     /// Returns once the IO thread no longer runs the unit's callbacks.
+     fn stop(&mut self) {
+-        if self.started {
++        if self.started && !self.au.is_null() {
+             // SAFETY: valid unit.
+             unsafe { AudioOutputUnitStop(self.au) };
+             self.started = false;
+@@ -1480,6 +1556,9 @@ impl Unit {
+ 
+ impl Drop for Unit {
+     fn drop(&mut self) {
++        if self.au.is_null() {
++            return; // a test stand-in
++        }
+         self.uninitialize();
+         // SAFETY: valid unit, disposed once.
+         unsafe { AudioComponentInstanceDispose(self.au) };
+@@ -1545,14 +1624,16 @@ fn create_input_unit(refcon: *mut c_void) -> Result<Unit> {
+ /// another worker; they queued up behind CoreAudio's HAL lock by the hundreds.
+ /// `busy` mirrors "a worker runs or will run" for lock-free readers (`Shared::starting`); it
+ /// only changes under the gate's lock, so it cannot be cleared behind a new request.
++/// A kick (`kick`) has the worker run once more without a new request, to stop retired units.
+ struct StartGate<T> {
+-    inner: Mutex<(bool, Option<T>)>,
++    /// (a worker runs, the newest unserved request, a kick is pending)
++    inner: Mutex<(bool, Option<T>, bool)>,
+ }
+ 
+ impl<T> Default for StartGate<T> {
+     fn default() -> Self {
+         Self {
+-            inner: Mutex::new((false, None)),
++            inner: Mutex::new((false, None, false)),
+         }
+     }
+ }
+@@ -1566,16 +1647,27 @@ impl<T> StartGate<T> {
+         !std::mem::replace(&mut g.0, true)
+     }
+ 
+-    /// Worker: the next request to serve, or `None` when there is none (the worker then exits;
+-    /// `busy` is cleared).
+-    fn next(&self, busy: &AtomicBool) -> Option<T> {
++    /// Have the worker run once more (spawned if none runs). Returns true when the caller must
++    /// spawn it.
++    fn kick(&self, busy: &AtomicBool) -> bool {
++        let mut g = self.inner.lock().unwrap();
++        g.2 = true;
++        busy.store(true, Ordering::Release);
++        !std::mem::replace(&mut g.0, true)
++    }
++
++    /// Worker: `Some(request)` to serve next (`Some(None)`: only a kick), or `None` when there
++    /// is nothing left (the worker then exits; `busy` is cleared).
++    fn next(&self, busy: &AtomicBool) -> Option<Option<T>> {
+         let mut g = self.inner.lock().unwrap();
+         let req = g.1.take();
+-        if req.is_none() {
++        let kicked = std::mem::replace(&mut g.2, false);
++        if req.is_none() && !kicked {
+             g.0 = false;
+             busy.store(false, Ordering::Release);
++            return None;
+         }
+-        req
++        Some(req)
+     }
+ 
+     /// A STOP: drop a request the worker has not taken yet.
+@@ -1586,15 +1678,59 @@ impl<T> StartGate<T> {
+     /// The worker could not be spawned: nothing runs.
+     fn abandon(&self, busy: &AtomicBool) {
+         let mut g = self.inner.lock().unwrap();
+-        *g = (false, None);
++        *g = (false, None, false);
+         busy.store(false, Ordering::Release);
+     }
+ }
+ 
+-/// Capture start worker thread: serves start requests until none is left.
++/// Capture start worker thread: stops retired units, then serves start requests, until none
++/// is left.
+ fn capture_start_thread(shared: Arc<Shared>, id: usize) {
+-    while let Some(fmt) = shared.start_gate.next(&shared.starting) {
+-        capture_start_worker(&shared, fmt, id);
++    while let Some(req) = shared.start_gate.next(&shared.starting) {
++        stop_retired(&shared, id);
++        if let Some(fmt) = req {
++            capture_start_worker(&shared, fmt, id);
++        }
++    }
++}
++
++/// Start worker: stop (and drop) the units taken off the stream, oldest first.
++fn stop_retired(shared: &Shared, id: usize) {
++    let retired = std::mem::take(&mut *shared.retired.lock().unwrap());
++    for mut state in retired {
++        let started = Instant::now();
++        state.stop();
++        if started.elapsed() >= SLOW_UNIT_JOB {
++            log::warn!("snd: stream {id}: stopping the microphone took {:?}", started.elapsed());
++        }
++    }
++}
++
++/// Run the stream's start worker (it serves what the gate holds); false if it could not be
++/// spawned (the gate is then reset).
++fn spawn_capture_worker(shared: &Arc<Shared>, id: usize) -> bool {
++    let worker = Arc::clone(shared);
++    match std::thread::Builder::new()
++        .name(format!("virtio-snd capture {id}"))
++        .spawn(move || capture_start_thread(worker, id))
++    {
++        Ok(_) => true,
++        Err(err) => {
++            log::error!("snd: stream {id}: cannot spawn the capture worker: {err}");
++            shared.start_gate.abandon(&shared.starting);
++            false
++        }
++    }
++}
++
++/// Hand a capture unit taken off its stream to the stream's worker, which stops it before it
++/// opens the next one. The caller (the control thread, the pump under `hosts`) never waits for
++/// `AudioOutputUnitStop`, so STOP and RELEASE complete the guest's queued I/O while the HAL is
++/// stuck. Without a worker thread the unit is stopped here.
++fn retire_capture(shared: &Arc<Shared>, state: CaptureState, id: usize) {
++    shared.retired.lock().unwrap().push(state);
++    if shared.start_gate.kick(&shared.starting) && !spawn_capture_worker(shared, id) {
++        stop_retired(shared, id);
+     }
+ }
+ 
+@@ -1618,8 +1754,20 @@ fn capture_start_worker(shared: &Shared, fmt: Format, id: usize) {
+         if stop_requested {
+             return Ok(());
+         }
++        // A known refusal fails at once, without touching the HAL (whose start could wait on
++        // TCC); "undetermined" goes on and lets macOS ask.
++        let (permission, permission_name) = (*shared.mic_permission.lock().unwrap())();
++        if permission == 1 || permission == 2 {
++            return Err(Error::UnexpectedAudioBackendError(format!(
++                "microphone permission {permission_name} (System Settings > Privacy & Security > Microphone)"
++            )));
++        }
+         let device: AudioObjectID = input_device()
+             .ok_or_else(|| Error::UnexpectedAudioBackendError("no input device".into()))?;
++        log::info!(
++            "snd: stream {id}: opening input device {device} '{}', microphone permission {permission_name}",
++            device_name(device)
++        );
+         // Recorded before any AudioUnit call (which can block for seconds): the input-device
+         // check compares against it and must not see a stale device meanwhile.
+         shared.capture_device.store(device, Ordering::Release);
+@@ -1673,7 +1821,7 @@ fn capture_start_worker(shared: &Shared, fmt: Format, id: usize) {
+         if shared.stop_pending.swap(false, Ordering::AcqRel) {
+             return Ok(());
+         }
+-        let mut state = CaptureState { unit, converter };
++        let mut state = CaptureState::new(unit, converter);
+         // The input callback needs the unit pointer before the unit starts producing; it reads
+         // it lock-free from `shared.unit`.
+         shared.unit.store(state.unit.au, Ordering::Release);
+@@ -1701,6 +1849,7 @@ fn capture_start_worker(shared: &Shared, fmt: Format, id: usize) {
+         shared.wake.signal();
+         Ok(())
+     })();
++    *shared.start_error.lock().unwrap() = result.as_ref().err().map(|err| err.to_string());
+     if let Err(err) = result {
+         log::error!("snd: stream {id}: cannot start the microphone ({err}); delivering silence");
+         shared.unit.store(ptr::null_mut(), Ordering::Release);
+@@ -1724,6 +1873,9 @@ unsafe impl Send for Converter {}
+ 
+ impl Drop for Converter {
+     fn drop(&mut self) {
++        if self.conv.is_null() {
++            return; // a test stand-in
++        }
+         // SAFETY: created by AudioConverterNew, disposed once.
+         unsafe { AudioConverterDispose(self.conv) };
+     }
+@@ -1996,6 +2148,8 @@ struct HostStream {
+     /// Capture without a device: epoch and frames delivered, so silence advances at the
+     /// guest sample rate rather than completing every queued buffer immediately.
+     capture_silence: Option<(Instant, u64)>,
++    /// Capture: `start_requested` of the START whose late microphone was logged.
++    start_wait_logged: u64,
+ }
+ 
+ impl HostStream {
+@@ -2036,6 +2190,7 @@ impl HostStream {
+             vr_retired: Vec::new(),
+             vr_mic: None,
+             capture_silence: None,
++            start_wait_logged: 0,
+         }
+     }
+ 
+@@ -2309,31 +2464,23 @@ impl HostStream {
+             self.vr_mic = Some((vr, MicStream::new(fmt.format, fmt.rate, fmt.channels, now)));
+             return Ok(());
+         }
+-        // `capture` already holds no unit, so capture I/O that arrives while the worker builds
+-        // the new one is completed with silence.
++        // `capture` already holds no unit; capture I/O waits for the new one at most
++        // CAPTURE_START_WAIT, then gets paced silence until it runs.
+         self.shared.stop_pending.store(false, Ordering::Release);
+-        if !self.shared.start_gate.request(fmt, &self.shared.starting) {
+-            // The running worker takes this request when it is done with its current one.
+-            return Ok(());
+-        }
+-        let shared = Arc::clone(&self.shared);
+-        let id = self.id;
+-        if let Err(err) = std::thread::Builder::new()
+-            .name(format!("virtio-snd capture {id}"))
+-            .spawn(move || capture_start_thread(shared, id))
+-        {
+-            log::error!("snd: stream {id}: cannot spawn the capture start worker: {err}");
+-            self.shared.start_gate.abandon(&self.shared.starting);
++        // SAFETY: plain clock read.
++        let now = ticks_to_nanos(unsafe { mach_absolute_time() });
++        self.shared.start_requested.store(now, Ordering::Release);
++        if self.shared.start_gate.request(fmt, &self.shared.starting) {
++            spawn_capture_worker(&self.shared, self.id);
+         }
++        // Otherwise the running worker takes this request when it is done with its current one.
+         Ok(())
+     }
+ 
+-    /// Capture: tear the unit down (pump thread; control requests detach and stop it themselves,
+-    /// without `hosts`).
++    /// Capture: take the unit down; the stream's worker stops it (`retire_capture`).
+     fn stop_capture(&mut self) {
+-        if let Some(mut state) = self.detach_capture() {
+-            state.unit.stop();
+-            // Dropped here, away from the IO thread.
++        if let Some(state) = self.detach_capture() {
++            retire_capture(&self.shared, state, self.id);
+         }
+     }
+ 
+@@ -2735,7 +2882,11 @@ impl HostStream {
+                     // Let the async worker finish opening the microphone. In particular,
+                     // never complete the guest's entire capture ring at START: ALSA sees a
+                     // hw_ptr overrun and PipeWire repeatedly tears down/reopens the HAL unit.
+-                    None if self.shared.starting.load(Ordering::Acquire) => break,
++                    None if self.shared.starting.load(Ordering::Acquire)
++                        && !self.capture_start_overdue() =>
++                    {
++                        break
++                    }
+                     None => {
+                         // No usable input device: keep capture flowing at the sample clock.
+                         let (since, sent) = self
+@@ -2775,6 +2926,24 @@ impl HostStream {
+         }
+     }
+ 
++    /// Capture: the microphone has not opened within CAPTURE_START_WAIT of START (logged once
++    /// per START); the pump then delivers paced silence until it does.
++    fn capture_start_overdue(&mut self) -> bool {
++        let requested = self.shared.start_requested.load(Ordering::Acquire);
++        // SAFETY: plain clock read.
++        let now = ticks_to_nanos(unsafe { mach_absolute_time() });
++        let overdue = now.saturating_sub(requested) >= CAPTURE_START_WAIT.as_nanos() as u64;
++        if overdue && self.start_wait_logged != requested {
++            self.start_wait_logged = requested;
++            log::warn!(
++                "snd: stream {}: the microphone is not open {:?} after START; delivering silence until it is",
++                self.id,
++                CAPTURE_START_WAIT
++            );
++        }
++        overdue
++    }
++
+     fn drain_dump(&mut self) {
+         let Some(ring) = &self.shared.dump else {
+             return;
+@@ -3210,15 +3379,15 @@ impl CoreAudioBackend {
+             let host = &mut hosts[id];
+             host.suspended = false;
+             match host.direction {
+-                Direction::Input => (host.detach_capture(), false),
++                Direction::Input => (host.detach_capture().map(|s| (s, host.shared.clone())), false),
+                 Direction::Output => (
+                     None,
+                     host.unit_busy || host.slot.unit.as_ref().is_some_and(|u| u.started),
+                 ),
+             }
+         };
+-        if let Some(mut state) = capture {
+-            state.unit.stop();
++        if let Some((state, shared)) = capture {
++            retire_capture(&shared, state, id);
+         }
+         if playing {
+             self.unit_job(id, "stop", |slot, _, _| {
+@@ -3638,6 +3807,9 @@ mod tests {
+         assert_eq!(streams.read().unwrap()[0].buffers[0].pos, 0);
+         host.shared.running.store(true, Ordering::Release);
+         host.shared.starting.store(true, Ordering::Release);
++        // SAFETY: plain clock read.
++        let now = ticks_to_nanos(unsafe { mach_absolute_time() });
++        host.shared.start_requested.store(now, Ordering::Release);
+         for _ in 0..20 {
+             host.pump_input(&mut None, &streams);
+         }
+@@ -4147,6 +4319,136 @@ mod tests {
+             std::thread::sleep(Duration::from_millis(50));
+         }
+     }
++
++    /// A microphone that does not open (a permission prompt, a stuck HAL) holds the guest's
++    /// capture I/O for at most CAPTURE_START_WAIT; then clock-paced silence flows until it opens.
++    /// (Before: the I/O waited for as long as the start worker did; arecord timed out.)
++    #[test]
++    fn capture_waits_for_the_microphone_at_most_the_start_bound() {
++        let (mut host, streams, message) = capture_fixture();
++        host.shared.running.store(true, Ordering::Release);
++        host.shared.starting.store(true, Ordering::Release);
++        // SAFETY: plain clock read.
++        let now = ticks_to_nanos(unsafe { mach_absolute_time() });
++        let start = Instant::now();
++        host.shared.start_requested.store(now, Ordering::Release);
++        while !completed(&message) {
++            host.pump_input(&mut None, &streams);
++            assert!(
++                start.elapsed() < Duration::from_secs(1),
++                "the 100 ms capture period was still waiting for the microphone after 1 s"
++            );
++            std::thread::sleep(Duration::from_millis(5));
++        }
++        // 200 ms of waiting plus the 100 ms period of paced silence.
++        assert!(
++            start.elapsed() >= CAPTURE_START_WAIT + Duration::from_millis(80),
++            "completed after {:?}: the period must not be filled at once",
++            start.elapsed()
++        );
++    }
++
++    /// A refused microphone permission fails the start at once, before any HAL call, and capture
++    /// gets paced silence. (Before: the worker opened the device and AudioOutputUnitStart could
++    /// wait on TCC.)
++    #[test]
++    fn denied_microphone_permission_fails_the_start_without_the_hal() {
++        let (mut host, streams, message) = capture_fixture();
++        *host.shared.mic_permission.lock().unwrap() = || (2, "denied");
++        host.shared.running.store(true, Ordering::Release);
++        let start = Instant::now();
++        host.start_capture().unwrap();
++        wait_for("the start worker to finish", Duration::from_secs(2), || {
++            !host.shared.starting.load(Ordering::Acquire)
++        });
++        let error = host.shared.start_error.lock().unwrap().clone();
++        assert!(
++            error.as_deref().is_some_and(|e| e.contains("microphone permission denied")),
++            "start error: {error:?}"
++        );
++        assert_eq!(
++            host.shared.capture_device.load(Ordering::Acquire),
++            0,
++            "no input device was looked at"
++        );
++        wait_for("paced silence to complete the period", Duration::from_secs(1), || {
++            host.pump_input(&mut None, &streams);
++            completed(&message)
++        });
++        assert!(start.elapsed() < Duration::from_secs(1));
++    }
++
++    /// STOP and RELEASE of a capture stream answer, and complete its queued I/O, while stopping
++    /// its unit is stuck in the HAL; the stream's worker stops it later. (Before: the control
++    /// thread called AudioOutputUnitStop itself and RELEASE hung with the guest's buffers.)
++    #[test]
++    fn capture_stop_and_release_do_not_wait_for_a_stuck_unit_stop() {
++        let mut stream = Stream::default();
++        stream.direction = Direction::Input;
++        stream.params.rate = VIRTIO_SND_PCM_RATE_48000;
++        stream.params.channels = 1;
++        stream.state = PCMState::Start;
++        let streams = Arc::new(RwLock::new(vec![stream]));
++        let backend = Arc::new(
++            CoreAudioBackend::with_deadlines(
++                streams,
++                Arc::new(SndControl::default()),
++                Duration::from_secs(5),
++                Duration::from_secs(60),
++            )
++            .unwrap(),
++        );
++        let (unstick, gate) = mpsc::channel::<()>();
++        let shared = {
++            let hosts = backend.inner.hosts.lock().unwrap();
++            assert_eq!(hosts[0].direction, Direction::Input);
++            Arc::clone(&hosts[0].shared)
++        };
++        // A running unit whose stop does not return (stand-ins: no AudioUnit, no converter).
++        let mut state = CaptureState::new(
++            Unit {
++                au: ptr::null_mut(),
++                initialized: false,
++                started: true,
++            },
++            Converter {
++                conv: ptr::null_mut(),
++                in_frame_bytes: 4,
++                staging: Vec::new(),
++            },
++        );
++        state.stop_gate = Some(gate);
++        *shared.capture.lock().unwrap() = Some(state);
++        // The fixture's own stream and host go at the end of this statement.
++        let message = capture_fixture().2;
++        backend.inner.streams.write().unwrap()[0]
++            .buffers
++            .push_back(Buffer::new(
++                Descriptor {
++                    addr: 0x200,
++                    len: 4800,
++                    flags: 0,
++                    next: 0,
++                },
++                message.clone(),
++                Direction::Input,
++            ));
++        let (done_tx, done_rx) = mpsc::channel();
++        let b = backend.clone();
++        std::thread::spawn(move || {
++            let _ = done_tx.send((b.stop(0), b.release(0)));
++        });
++        let answered = done_rx.recv_timeout(Duration::from_secs(1));
++        // Let the stuck stop return either way, so the test does not leave a thread behind.
++        let _ = unstick.send(());
++        let (stop, release) = answered.expect("STOP/RELEASE waited for the stuck unit stop");
++        stop.unwrap();
++        release.unwrap();
++        assert!(completed(&message), "RELEASE left the capture I/O queued");
++        wait_for("the worker to stop the unit", Duration::from_secs(2), || {
++            shared.retired.lock().unwrap().is_empty() && !shared.starting.load(Ordering::Acquire)
++        });
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -4169,7 +4471,7 @@ mod start_gate_tests {
+         assert!(!gate.request(3, &busy));
+         assert_eq!(
+             gate.next(&busy),
+-            Some(3),
++            Some(Some(3)),
+             "the worker serves only the newest request"
+         );
+         assert!(
+@@ -4198,6 +4500,20 @@ mod start_gate_tests {
+         assert!(gate.request(3, &busy), "abandon leaves the gate usable");
+     }
+ 
++    #[test]
++    fn a_kick_runs_the_worker_once_more_without_a_request() {
++        let gate = StartGate::<u32>::default();
++        let busy = AtomicBool::new(false);
++        assert!(gate.kick(&busy), "a kick with no worker spawns one");
++        assert!(busy.load(Ordering::Acquire));
++        assert!(!gate.request(7, &busy), "the kicked worker also serves a START");
++        assert_eq!(gate.next(&busy), Some(Some(7)));
++        assert!(!gate.kick(&busy), "a kick while the worker runs spawns nothing");
++        assert_eq!(gate.next(&busy), Some(None), "the kick alone: run once more");
++        assert_eq!(gate.next(&busy), None);
++        assert!(!busy.load(Ordering::Acquire));
++    }
++
+     #[test]
+     fn many_starts_while_a_start_blocks_use_one_thread() {
+         // A start that blocks (the microphone opening, the HAL lock) while the guest or the
+@@ -4218,7 +4534,7 @@ mod start_gate_tests {
+                     served.clone(),
+                 );
+                 handles.push(std::thread::spawn(move || {
+-                    while gate.next(&busy).is_some() {
++                    while gate.next(&busy).is_some_and(|req| req.is_some()) {
+                         // `live` counts starts in progress (a worker that just found nothing
+                         // left may still be exiting while the next one spawns).
+                         let n = live.fetch_add(1, Ordering::SeqCst) + 1;

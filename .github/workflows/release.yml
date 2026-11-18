@@ -438,6 +438,8 @@ jobs:
           SPARKLE_PUBLIC_KEY: ${{ inputs.feed_test && env.FEED_TEST_PUBLIC_KEY || vars.SPARKLE_PUBLIC_KEY }}
         run: host/launcher/dist.sh
       - name: Verify, name, checksum
+        env:
+          FORK_UPDATE_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
         run: |
           version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' host/launcher/Info.plist)
           fork=$(/usr/libexec/PlistBuddy -c 'Print :SteamacForkRelease' host/launcher/Info.plist)
@@ -451,6 +453,15 @@ jobs:
           mv "work/out/dist/FX-Steam-Launcher-$version.dmg" "upload/FX-Steam-Launcher-$label-adhoc.dmg"
           mv "work/out/dist/FX-Steam-Launcher-$version-gpl-sources.tar" "upload/FX-Steam-Launcher-$label-gpl-sources.tar"
           scripts/test/dist-verify.sh --receipts "upload/FX-Steam-Launcher-$label-adhoc.dmg" adhoc
+          # A release carries this fork's update key (never a feed_test throwaway key, never none
+          # while the key is configured): every installed copy takes only updates it signed.
+          if [ -n "$RELEASE_TAG" ] && [ -n "$FORK_UPDATE_KEY" ]; then
+            m=$(mktemp -d)
+            hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$m" "upload/FX-Steam-Launcher-$label-adhoc.dmg"
+            key=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$m/FX Steam Launcher.app/Contents/Info.plist" 2>/dev/null || true)
+            hdiutil detach -quiet "$m"
+            [ "$key" = "$FORK_UPDATE_KEY" ] || { echo "::error::the release app's SUPublicEDKey ($key) is not the repository's SPARKLE_PUBLIC_KEY"; exit 1; }
+          fi
           (cd upload && shasum -a 256 "FX-Steam-Launcher-$label-adhoc.dmg" > "FX-Steam-Launcher-$label-adhoc.dmg.sha256" && cat ./*.sha256)
           {
             echo "sources: $(git rev-parse HEAD) ($SOURCE_REF)"
