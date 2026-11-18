@@ -429,7 +429,8 @@ final class GameSessionTracker {
             game: LauncherSettings.shared.gameName(s.appid), mac: .current,
             vm: GameStatsVM(cpus: options.cpus, memMiB: options.memMiB, driver: options.vulkanDriver.rawValue,
                             wmtr: options.wmtrLibrary != nil, hz: options.refreshRate, steamos: GameSessionTracker.steamosBuild),
-            gfx: s.gfx, env: s.env,
+            gfx: s.gfx == "dxmt" && options.wmtrLibrary.map(LauncherSettings.Wmtr.flavour) == "mullion" ? "mullion" : s.gfx,
+            env: s.env,
             launched: s.firstWindow != nil, end: end, runS: max(0, Int(Date().timeIntervalSince(s.started).rounded())),
             playS: Int(s.playS.rounded()), firstWindowS: firstWindow, proton: s.proton, res: s.res, fps: s.frames.fps,
             mem: mem.gameMiB == nil && mem.guestMiB == nil && mem.hostMiB == nil ? nil : mem)

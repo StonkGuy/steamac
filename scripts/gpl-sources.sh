@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Package corresponding GPL/LGPL source for the kernel, static initramfs tools and
-# DXMT graphics path (host executor and the guest layer's PE DLLs and winemetal.so), and the GPL-3.0
+# DXMT graphics path (host executor and the guest layer's PE DLLs and winemetal.so), the experimental
+# Mullion executor's (the same parts, when this build has them), and the GPL-3.0
 # steamac-vrhost (host/vrhost + its pinned OpenSSL tarball) when the app bundles it.
 # Usage: scripts/gpl-sources.sh [GIT_REF] (HEAD uses the current working tree).
 # The tagged files are read with git archive, never checked out over the working tree.
@@ -34,6 +35,10 @@ if [[ $REF == HEAD ]]; then
     if [[ -f $ROOT/work/out/host/bin/steamac-vrhost ]]; then
         git -C "$ROOT" ls-files -z -- host/vrhost | tar -C "$ROOT" --null -T - -cf - | tar -xf - -C "$ST/repo"
     fi
+    if [[ -f $ROOT/host/mullion/pin.env ]]; then
+        git -C "$ROOT" ls-files -z --cached --others --exclude-standard -- host/mullion \
+            | tar -C "$ROOT" --null -T - -cf - | tar -xf - -C "$ST/repo"
+    fi
 else
     git -C "$ROOT" rev-parse --verify "$REF^{commit}" >/dev/null
     git -C "$ROOT" archive "$REF" host/launcher/Info.plist scripts/config.env \
@@ -51,6 +56,9 @@ else
     # The VR host ships only in apps built with host/vrhost/build.sh; include its source whenever the tag has it.
     if git -C "$ROOT" cat-file -e "$REF:host/vrhost/CMakeLists.txt" 2>/dev/null; then
         git -C "$ROOT" archive "$REF" host/vrhost | tar -xf - -C "$ST/repo"
+    fi
+    if git -C "$ROOT" cat-file -e "$REF:host/mullion/pin.env" 2>/dev/null; then
+        git -C "$ROOT" archive "$REF" host/mullion | tar -xf - -C "$ST/repo"
     fi
 fi
 version=$(plutil -extract CFBundleShortVersionString raw -o - "$ST/Info.plist")
@@ -229,6 +237,38 @@ while read -r sha name; do
 done <<< "$source_checksums"
 [[ $count -ge 2 ]] || { echo "incomplete source in $dsc_name" >&2; exit 1; }
 
+# Mullion (LGPL-2.1-or-later, a DXMT fork with Direct3D 12): the experimental Mullion executor
+# (Frameworks/libwmtr_host_mullion.dylib) and its guest payload, present when this build made them.
+mullion_notes=
+if [[ -f $ST/repo/host/mullion/pin.env ]] && [[ -f $ROOT/work/out/host/lib/libwmtr_host_mullion.dylib \
+        || -f $ROOT/work/out/mullion/x86_64-unix/winemetal.so ]]; then
+    . "$ST/repo/host/mullion/pin.env"
+    for v in MULLION_COMMIT DXHEADERS_COMMIT NVAPI_COMMIT; do
+        [[ ${!v} =~ ^[[:xdigit:]]{40}$ ]] || { echo "invalid host/mullion/pin.env ($v)" >&2; exit 1; }
+    done
+    for v in MULLION_SHA256 DXHEADERS_SHA256 NVAPI_SHA256; do
+        [[ ${!v} =~ ^[[:xdigit:]]{64}$ ]] || { echo "invalid host/mullion/pin.env ($v)" >&2; exit 1; }
+    done
+    copy_source "$ROOT/work/cache/mullion/mullion-$MULLION_COMMIT.tar.gz" "$MULLION_URL" "$MULLION_SHA256" \
+        "mullion-$MULLION_COMMIT.tar.gz"
+    copy_source "$ROOT/work/cache/mullion/mingw-directx-headers-$DXHEADERS_COMMIT.tar.gz" "$DXHEADERS_URL" \
+        "$DXHEADERS_SHA256" "mingw-directx-headers-$DXHEADERS_COMMIT.tar.gz"
+    copy_source "$ROOT/work/cache/mullion/nvapi-$NVAPI_COMMIT.tar.gz" "$NVAPI_URL" "$NVAPI_SHA256" \
+        "nvapi-$NVAPI_COMMIT.tar.gz"
+    mullion_notes="
+Mullion executor (experimental; LGPL-2.1-or-later): Contents/Frameworks/
+libwmtr_host_mullion.dylib and the guest layer's /usr/lib/steamac/mullion/
+x86_64-windows/{d3d11,dxgi,d3d10core,d3d12,d3d12core,winemetal}.dll and
+x86_64-unix/winemetal.so. Complete Mullion source:
+sources/mullion-$MULLION_COMMIT.tar.gz ($MULLION_REPO at that commit,
+SHA-256 $MULLION_SHA256). Apply repo/host/mullion/patches/*.patch in filename
+order with git apply. Extract sources/mingw-directx-headers-$DXHEADERS_COMMIT.tar.gz
+into Mullion's include/native/directx and sources/nvapi-$NVAPI_COMMIT.tar.gz
+into external/nvapi, both with --strip-components=1. Build with
+repo/host/mullion/build.sh: fetch llvm native host pe client payload (the same
+toolchains and the same repo/wmtr/ as the DXMT path, with MULLION=1)."
+fi
+
 cat > "$ST/README.txt" <<EOF
 FX Steam Launcher $version — corresponding GPL/LGPL source ($REF)
 
@@ -264,6 +304,8 @@ repo/guest/initramfs/init. Its static binaries are:
 
 $dxmt_notes
 $vrhost_notes
+$mullion_notes
+
 Debian snapshot archive: $snapshot
 EOF
 

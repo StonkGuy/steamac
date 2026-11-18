@@ -337,7 +337,9 @@ struct Options {
                            Switching makes Steam and games rebuild their shader caches.
       --wmtr-lib PATH      experimental: offer the guest the wmtr virtio-gpu context type (capset 30), DXMT's
                            winemetal calls run on this Mac's Metal by the executor library PATH
-                           (default: Settings > Advanced "Allow DXMT", off unless changed)
+                           (default: Settings > Advanced "Allow DXMT", off unless changed);
+                           `mullion`: the bundled Mullion executor (DXMT with Direct3D 12, experimental),
+                           and games with the DXMT profile get Mullion's dlls
       --no-wmtr            the guest gets no wmtr context type for this run
       --graphics-path P    dxmt: --wmtr-lib with the bundled executor; vulkan: --no-wmtr (scripts of
                            the earlier "Graphics path" setting)
@@ -554,7 +556,7 @@ struct Options {
                     throw OptionError("--vulkan-driver: moltenvk or kosmickrisp")
                 }
                 o.vulkanDriver = d
-            case "--wmtr-lib": o.wmtrLibrary = try value(a)
+            case "--wmtr-lib": o.wmtrLibrary = LauncherSettings.Wmtr.path(for: try value(a))
             case "--no-wmtr": o.wmtrLibrary = nil
             case "--shm-mib": o.shmMiB = try int(a)
             case "--gpu-flags":
@@ -707,7 +709,7 @@ struct Options {
             func add(_ key: String, _ value: @autoclosure () -> String?) { o.cmdline += Options.kernelArg(key, value(), unlessSetIn: given) }
             add("steamac.ssh", o.sshPort == 0 ? "0" : "1")
             add("steamac.steam_client", o.steamClient.rawValue)
-            add("steamac.gfx", o.wmtrLibrary == nil ? "vulkan" : "dxmt")
+            add("steamac.gfx", o.wmtrLibrary.map { LauncherSettings.Wmtr.flavour($0) } ?? "vulkan")
             add("steamac.gpu_mib", String(VMSizing.gpuBudgetMiB(memMiB: o.memMiB)))
             // only written when on; absent is the default (off), so an explicit =0 needs no key
             if let a = Options.frameLatencyArg(o.frameLatency) { add(a.key, a.value) }
