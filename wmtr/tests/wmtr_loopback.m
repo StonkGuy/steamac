@@ -830,6 +830,32 @@ int main(void) {
       CHECK(rb.ret && ri.memory.ptr, "newBuffer after trim");
       if (rb.ret) { memset(ri.memory.ptr, 7, 100u << 20); obj_handle_t h = rb.ret; remote(1, &h); }
     }
+    /* 7a. a new buffer without initial bytes reads as zeros, as Metal's own buffers and Direct3D 12's committed
+          resources do (Mullion's descriptor heaps and query results rely on it), also when the arena hands it a range
+          an earlier buffer wrote */
+    {
+      const uint32_t n = 1u << 20;
+      struct WMTBufferInfo ai = {n, WMTResourceStorageModeShared, {NULL}, 0};
+      struct unixcall_mtldevice_newbuffer ab = {(obj_handle_t)dev, {&ai}, 0};
+      remote(18, &ab);
+      CHECK(ab.ret && ai.memory.ptr, "zeroed: first buffer");
+      void *first = ai.memory.ptr;
+      if (first) memset(first, 0xab, n);
+      obj_handle_t h1 = ab.ret; remote(1, &h1);
+      struct wmtr_ring *R = blob_base[0];
+      uint64_t want = R->free_head;
+      for (int i = 0; i < 2000 && R->free_head < want + 1; i++) { struct unixcall_generic_obj_uint64_ret q = {0}; remote(39, &q); usleep(1000); }
+      struct WMTBufferInfo bi = {n, WMTResourceStorageModeShared, {NULL}, 0};
+      struct unixcall_mtldevice_newbuffer bb = {(obj_handle_t)dev, {&bi}, 0};
+      remote(18, &bb);
+      const uint8_t *m = bi.memory.ptr;
+      uint32_t nonzero = 0;
+      for (uint32_t i = 0; m && i < n; i++) nonzero += m[i] != 0;
+      CHECK(bb.ret && m && !nonzero, "a new buffer has %u non-zero bytes (%s range)", nonzero,
+            (void *)m == first ? "a reused" : "another");
+      CHECK((void *)m == first, "zeroed: the second buffer did not reuse the first one's range (test is void)");
+      if (bb.ret) { obj_handle_t h2 = bb.ret; remote(1, &h2); }
+    }
     /* 7b. more NoCopy frees than the free ring holds, with no client allocation to drain it (quit/logout:
           Metal runs the deallocator inside the release call the client waits on). The executor must queue
           them instead of waiting, and hand every range back as the client drains at its next sync call. */
