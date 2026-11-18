@@ -65,6 +65,9 @@ static pthread_mutex_t arena_lock = PTHREAD_MUTEX_INITIALIZER;
  * to the host (transport release_blob), so the Mac stops paying for them. The steady-state cost
  * is one compare per sync call; the clock is read only while idle bytes exceed the reserve. */
 static uint64_t blob_idle_since[WMTR_MAX_BLOBS]; /* CLOCK_MONOTONIC ns; 0 = in use */
+/* bytes of each blob ever handed out (from offset 0): a new blob's memory is zero, so only a range below this mark can
+ * hold an earlier allocation's bytes (first fit keeps the used part of a blob low) */
+static uint64_t blob_dirty[WMTR_MAX_BLOBS];
 static _Atomic uint64_t arena_idle_bytes;
 static uint64_t arena_keep_bytes = UINT64_MAX; /* UINT64_MAX: never release (no transport support) */
 static uint64_t arena_trim_ns = 1000000000ull;
@@ -202,7 +205,7 @@ arena_trim_locked(void) {
     if (!blob_idle_since[b] || now - blob_idle_since[b] < arena_trim_ns) continue;
     uint64_t size = blobs[b].size;
     T->release_blob(T, b, blobs[b].base, size);
-    blobs[b].base = NULL; blobs[b].size = 0;
+    blobs[b].base = NULL; blobs[b].size = 0; blob_dirty[b] = 0;
     blob_free[b].n = 0;
     blob_idle_since[b] = 0;
     atomic_fetch_sub_explicit(&arena_idle_bytes, size, memory_order_relaxed);
@@ -211,8 +214,10 @@ arena_trim_locked(void) {
   }
 }
 
+/* zero: the memory reads as zeros, as a new Metal buffer's does (and Direct3D 12's committed resources). A range an
+ * earlier allocation used is cleared; memory the blob never handed out is zero already and stays untouched. */
 static void *
-arena_alloc(uint64_t size, uint32_t *blob_out, uint32_t *off_out) {
+arena_alloc_ext(uint64_t size, uint32_t *blob_out, uint32_t *off_out, int zero) {
   size = (size + WMTR_PAGE - 1) & ~(uint64_t)(WMTR_PAGE - 1);
   pthread_mutex_lock(&arena_lock);
   drain_host_frees_locked();
@@ -227,9 +232,13 @@ arena_alloc(uint64_t size, uint32_t *blob_out, uint32_t *off_out) {
         uint64_t off = f->r[i].off;
         f->r[i].off += size; f->r[i].size -= size;
         if (!f->r[i].size) { memmove(&f->r[i], &f->r[i + 1], (f->n - i - 1) * sizeof(*f->r)); f->n--; }
+        uint64_t dirty = blob_dirty[b] < off + size ? blob_dirty[b] : off + size;
+        if (blob_dirty[b] < off + size) blob_dirty[b] = off + size;
+        uint8_t *p = blobs[b].base + off;
         pthread_mutex_unlock(&arena_lock);
+        if (zero && dirty > off) memset(p, 0, dirty - off); /* the range is this caller's now */
         *blob_out = b; *off_out = (uint32_t)off;
-        return blobs[b].base + off;
+        return p;
       }
     }
   }
@@ -239,13 +248,18 @@ arena_alloc(uint64_t size, uint32_t *blob_out, uint32_t *off_out) {
   uint64_t bsize = size > WMTR_ARENA_BLOB_BYTES ? size : WMTR_ARENA_BLOB_BYTES;
   uint8_t *p = T->add_blob(T, b, bsize);
   if (!p) { pthread_mutex_unlock(&arena_lock); LOG(0, "add_blob %u (%llu bytes) failed\n", b, (unsigned long long)bsize); return NULL; }
-  blobs[b].base = p; blobs[b].size = bsize; blobs[b].id = b;
+  blobs[b].base = p; blobs[b].size = bsize; blobs[b].id = b; blob_dirty[b] = size;
   if (b == nblobs) nblobs++;
   if (bsize > size) range_add(&blob_free[b], size, bsize - size);
   pthread_mutex_unlock(&arena_lock);
   LOG(2, "arena blob %u: %llu MiB\n", b, (unsigned long long)(bsize >> 20));
   *blob_out = b; *off_out = 0;
   return p;
+}
+
+static void *
+arena_alloc(uint64_t size, uint32_t *blob_out, uint32_t *off_out) {
+  return arena_alloc_ext(size, blob_out, off_out, 0);
 }
 
 static void
@@ -758,7 +772,8 @@ dispatch(uint16_t call, void *params, uint32_t size, int sync) {
     if (!private_storage || info->memory.ptr) {
       /* caller-placed memory (DXMT's CpuPlaced buffers) is not host-visible: back the buffer with arena
        * memory holding the same initial bytes; DXMT reads the pointer back from info->memory */
-      mem = arena_alloc(info->length, &blob, &off);
+      /* without initial bytes it reads as zeros, like Metal's own buffer memory */
+      mem = arena_alloc_ext(info->length, &blob, &off, !info->memory.ptr);
       if (!mem) return STATUS_UNSUCCESSFUL;
       if (info->memory.ptr) memcpy(mem, info->memory.ptr, info->length);
     }
