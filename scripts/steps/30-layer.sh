@@ -15,6 +15,10 @@ ST=$(mktemp -d)
 trap 'rm -rf "$ST"' EXIT
 
 cp -a /src/guest/layer/usr "$ST/usr"
+install -d "$ST/usr/lib/steamac/fex-eac"
+for file in build-fex.sh install-fex-tool.sh; do
+    install -m 0755 "/src/fex-eac/$file" "$ST/usr/lib/steamac/fex-eac/$file"
+done
 
 if [[ -d $VENUS/usr ]]; then
     cp -a "$VENUS/usr/." "$ST/usr/"

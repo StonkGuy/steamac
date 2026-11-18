@@ -111,6 +111,7 @@ struct Options {
     /// Its name as the guest agent reported it (`game <appid> <name>`), if seen before.
     var vrGameName: String?
     var selftestVR = false
+    var experimentalGameSupport = false
     var shmMiB = 8192
     var gpuFlags: UInt32? = nil
     var gvproxyPath: String?
@@ -177,6 +178,7 @@ struct Options {
                       [--lan-remote-play | --no-lan-remote-play]
                       [--vr | --no-vr] [--vr-bitrate MBIT] [--vr-size WxH]
                       [--vr-codec auto|hevc|h264] [--no-vr-pair-on-request] [--no-vr-audio]
+                      [--experimental-game-support | --no-experimental-game-support]
            steamac-vm --selftest-display [--headless] [--selftest-out DIR] [--display WxH]
            steamac-vm --selftest-overlay [--selftest-out DIR] [--display WxH]
            steamac-vm --selftest-stall [--selftest-out DIR] [--display WxH]
@@ -296,6 +298,11 @@ struct Options {
       --no-vr-pair-on-request  an unpaired headset is refused instead of opening pairing with a new PIN
       --no-vr-audio        keep the guest's audio on the Mac while a headset is connected
       --selftest-vr        spawn/teardown self-test of steamac-vrhost (no VM, no headset)
+      --experimental-game-support  experimental game support on (kernel cmdline steamac.fex_eac=1|0,
+                           added on every boot; default: Settings > Advanced "Experimental game
+                           support", off): downloads and builds a Linux game runtime on first use;
+                           restart Steam when setup finishes. Game support varies.
+                           --no-experimental-game-support turns it off for this run.
 
     Creating a SteamOS disk (no Docker; the same code as Settings > Advanced "Create New Disk…"):
       --create-disk PATH   download the signed SteamOS bundle of the branch (default: the saved setting,
@@ -471,6 +478,8 @@ struct Options {
             case "--no-vr-pair-on-request": o.vrPairOnRequest = false
             case "--no-vr-audio": o.vrHeadsetAudio = false
             case "--selftest-vr": o.selftestVR = true
+            case "--experimental-game-support": o.experimentalGameSupport = true
+            case "--no-experimental-game-support": o.experimentalGameSupport = false
             case "--vulkan-driver":
                 let v = try value(a)
                 guard let d = LauncherSettings.VulkanDriver(rawValue: v) else {
@@ -580,6 +589,15 @@ struct Options {
         on ? ("steamac.vr", "1") : nil
     }
 
+    static func experimentalGameSupportArg(_ on: Bool) -> (key: String, value: String) {
+        ("steamac.fex_eac", on ? "1" : "0")
+    }
+
+    static func kernelArg(_ key: String, _ value: @autoclosure () -> String?, unlessSetIn cmdline: String) -> String {
+        guard !cmdline.split(separator: " ").contains(where: { $0.hasPrefix(key + "=") }), let v = value() else { return "" }
+        return " \(key)=\(v)"
+    }
+
     var isSelftest: Bool {
         selftestDisplay || selftestOverlay || selftestStall || selftestPill || selftestSettings || selftestProvision || selftestRemotePlay
             || selftestMetalCache || selftestPointer || selftestGameLayers || selftestVR || selftestL10n || createDisk != nil
@@ -610,11 +628,8 @@ struct Options {
             AppBundle.fill(&o, settings: settings, overrides: &overrides)
             Provision.attachPending(&o)
             Provision.attachConfig(&o)
-            let words = o.cmdline.split(separator: " ")
-            func add(_ key: String, _ value: @autoclosure () -> String?) {
-                guard !words.contains(where: { $0.hasPrefix(key + "=") }), let v = value() else { return }
-                o.cmdline += " \(key)=\(v)"
-            }
+            let given = o.cmdline
+            func add(_ key: String, _ value: @autoclosure () -> String?) { o.cmdline += Options.kernelArg(key, value(), unlessSetIn: given) }
             add("steamac.ssh", o.sshPort == 0 ? "0" : "1")
             add("steamac.steam_client", o.steamClient.rawValue)
             add("steamac.gfx", o.wmtrLibrary == nil ? "vulkan" : "dxmt")
@@ -622,6 +637,8 @@ struct Options {
             // only written when on; absent is the default (off), so an explicit =0 needs no key
             if let a = Options.frameLatencyArg(o.frameLatency) { add(a.key, a.value) }
             if let a = Options.vrArg(o.vr && VRHost.unavailableReason(o) == nil) { add(a.key, a.value) }
+            let fex = Options.experimentalGameSupportArg(o.experimentalGameSupport)
+            add(fex.key, fex.value)
             if o.macTime {
                 add("steamac.tz", MacTime.zone)
                 add("steamac.clock24", MacTime.clock24.map { $0 ? "1" : "0" })
@@ -697,6 +714,9 @@ struct Options {
         vrGameName = s.gameName(vrGameAppID)
         vrRenderScale = s.vrRenderScale; vrUpscaler = s.vrUpscaler; vrSharpness = s.vrSharpness; vrForceSRGB = s.vrForceSRGB
         vrKeyframeInterval = s.vrKeyframeInterval; vrTCPOnly = s.vrTCPOnly; vrVirtualDesktop = s.vrVirtualDesktop
+        if given("--experimental-game-support") || given("--no-experimental-game-support") {
+            ov[.experimentalGameSupport] = experimentalGameSupport ? "--experimental-game-support" : "--no-experimental-game-support"
+        } else { experimentalGameSupport = s.experimentalGameSupport }
         if given("--no-sound") { ov[.soundEnabled] = "--no-sound" } else { sound = s.soundEnabled }
         if given("--no-gamepad") { ov[.virtualPad] = "--no-gamepad" }
         if let padType { ov[.padType] = "--pad \(padType.rawValue)" }

@@ -2422,6 +2422,22 @@
         }
       }
     },
+    "Downloads and builds a Linux game runtime on first use. Restart Steam when setup finishes. Game support varies." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "При первом использовании загружает и собирает среду выполнения игр Linux. После завершения настройки перезапустите Steam. Поддержка зависит от игры."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "首次使用时会下载并构建 Linux 游戏运行环境。设置完成后请重启 Steam。支持情况因游戏而异。"
+          }
+        }
+      }
+    },
     "Downloads the official SteamOS image from Valve (signed bundle, ~4.5 GB of data), checks Valve's signature and the image checksum, and writes a new disk. The first start then finishes the setup inside the VM." : {
       "localizations" : {
         "ru" : {
@@ -2676,6 +2692,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "实验性"
+          }
+        }
+      }
+    },
+    "Experimental game support" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Экспериментальная поддержка игр"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "实验性游戏支持"
           }
         }
       }

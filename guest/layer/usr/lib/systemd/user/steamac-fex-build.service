@@ -1,0 +1,8 @@
+[Unit]
+Description=Prepare the experimental Linux game runtime
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/steamac/steam-fex-eac build
+TimeoutStartSec=infinity
+Nice=10

@@ -15,7 +15,7 @@ enum L10nSelfTest {
     static var probes: [String] {
         ["Graphics path", "DXMT (lean)", "Vulkan (classic)", "Applies from the next start.",
          "Not available here: %@; Vulkan is used.", "Render scale", "Off (1.0×)", "Upscale lower game resolutions",
-         "Frame latency", "Loading…", "not included in this build (%@)",
+         "Frame latency", "Experimental game support", "Loading…", "not included in this build (%@)",
          "VR (experimental)", "VR pairing PIN %@", "Pairing PIN", "Let new headsets ask to pair", "Start in VR",
          "Game audio in the headset", "Treat game images as sRGB", "Upscaler", "Preset",
          "The VR host did not answer.", "No headset is connected, or it does not offer this refresh rate.",
