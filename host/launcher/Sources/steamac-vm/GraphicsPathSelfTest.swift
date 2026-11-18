@@ -9,8 +9,10 @@ enum GraphicsPathSelfTest {
         var failures = 0
         func check(_ ok: Bool, _ what: String) { if !ok { failures += 1; log("selftest-graphics-path: FAIL \(what)") } }
         log("selftest-graphics-path: resolved \(resolved.graphicsPath.rawValue), cmdline \(resolved.cmdline)")
-        check(resolved.cmdline.split(separator: " ").contains("steamac.gfx=\(resolved.graphicsPath.rawValue)"),
-              "kernel command line lacks steamac.gfx=\(resolved.graphicsPath.rawValue)")
+        // the DXMT path's guest side is the executor's flavour (dxmt, or mullion for Mullion's executor)
+        let gfx = resolved.wmtrLibrary.map { LauncherSettings.Wmtr.flavour($0) } ?? "vulkan"
+        check(resolved.cmdline.split(separator: " ").contains("steamac.gfx=\(gfx)"),
+              "kernel command line lacks steamac.gfx=\(gfx)")
         for path in [resolved.graphicsPath] + LauncherSettings.GraphicsPath.allCases.filter({ $0 != resolved.graphicsPath }) {
             var o = resolved
             o.wmtrLibrary = path == .dxmt ? (resolved.wmtrLibrary ?? LauncherSettings.Wmtr.path(for: "")) : nil
