@@ -2045,6 +2045,38 @@
         }
       }
     },
+    "DXMT (Direct3D 10 and 11)" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DXMT (Direct3D 10 и 11)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DXMT（Direct3D 10 和 11）"
+          }
+        }
+      }
+    },
+    "DXMT implementation" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Реализация DXMT"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DXMT 实现"
+          }
+        }
+      }
+    },
     "DXMT is not in effect while Allow DXMT is off." : {
       "localizations" : {
         "ru" : {
@@ -4267,6 +4299,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "鼠标"
+          }
+        }
+      }
+    },
+    "Mullion (Direct3D 10, 11 and 12)" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mullion (Direct3D 10, 11 и 12)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mullion（Direct3D 10、11 和 12）"
+          }
+        }
+      }
+    },
+    "Mullion is a DXMT fork that adds Direct3D 12. Games whose profile selects DXMT use it instead of DXMT; Direct3D 12 games need that profile too. Takes effect at the next VM start." : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mullion — форк DXMT с поддержкой Direct3D 12. Игры, в профиле которых выбран DXMT, используют его вместо DXMT; играм на Direct3D 12 тоже нужен этот профиль. Действует со следующего запуска ВМ."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mullion 是 DXMT 的一个分支，增加了 Direct3D 12。配置文件选择 DXMT 的游戏将改用它；Direct3D 12 游戏同样需要该配置文件。下次启动虚拟机时生效。"
           }
         }
       }

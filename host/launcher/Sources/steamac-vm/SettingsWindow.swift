@@ -1155,6 +1155,8 @@ private struct AdvancedTab: View {
         let path = LauncherSettings.Wmtr.path(for: settings.wmtrLibrary)
         let shown = settings.wmtrLibrary.isEmpty
             ? String(localized: "Bundled: \(LauncherSettings.Wmtr.bundledLibrary)")
+            : settings.wmtrLibrary == LauncherSettings.Wmtr.mullionSetting
+            ? String(localized: "Bundled: \(LauncherSettings.Wmtr.mullionLibrary)")
             : (settings.wmtrLibrary as NSString).abbreviatingWithTildeInPath
         guard let reason = LauncherSettings.Wmtr.localizedUnavailableReason(path) else { return (shown, true) }
         return (String(localized: "\(shown): \(reason); SteamOS gets no wmtr channel."), false)
@@ -1357,6 +1359,19 @@ private struct AdvancedTab: View {
                     Label2(title: "Allow DXMT (D3D11 on the Mac's Metal)",
                            detail: GameProfile.securityText,
                            now: false, key: .wmtr, experimental: true)
+                }
+                if settings.wmtr && (LauncherSettings.Wmtr.mullionBundled
+                                     || settings.wmtrLibrary == LauncherSettings.Wmtr.mullionSetting) {
+                    Picker(selection: Binding(
+                        get: { settings.wmtrLibrary == LauncherSettings.Wmtr.mullionSetting },
+                        set: { settings.wmtrLibrary = $0 ? LauncherSettings.Wmtr.mullionSetting : "" })) {
+                        Text("DXMT (Direct3D 10 and 11)").tag(false)
+                        Text("Mullion (Direct3D 10, 11 and 12)").tag(true)
+                    } label: {
+                        Label2(title: "DXMT implementation",
+                               detail: String(localized: "Mullion is a DXMT fork that adds Direct3D 12. Games whose profile selects DXMT use it instead of DXMT; Direct3D 12 games need that profile too. Takes effect at the next VM start."),
+                               now: false, key: .wmtrLibrary, experimental: true)
+                    }
                 }
                 if settings.wmtr {
                     VStack(alignment: .leading, spacing: 6) {

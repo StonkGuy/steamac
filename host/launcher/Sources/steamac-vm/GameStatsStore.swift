@@ -49,6 +49,9 @@ final class GameStatsStore: ObservableObject {
         case sent
         /// The service refused it (400/413): never retried.
         case rejected
+        /// Kept on this Mac only: a session on the experimental Mullion executor (gfx "mullion"), which the
+        /// service's per-path statistics and recommendations do not cover.
+        case local
     }
 
     struct StoredSession: Codable, Identifiable, Equatable {
@@ -167,7 +170,7 @@ final class GameStatsStore: ObservableObject {
             g.totalSessions += 1
             g.totalPlayS += report.playS
             g.lastPlayed = Date()
-            g.sessions.insert(StoredSession(report: report, ended: Date(), state: .pending), at: 0)
+            g.sessions.insert(StoredSession(report: report, ended: Date(), state: report.gfx == "mullion" ? .local : .pending), at: 0)
             if g.sessions.count > GameStatsStore.sessionsPerGame { g.sessions.removeLast(g.sessions.count - GameStatsStore.sessionsPerGame) }
         }
         flush()
@@ -211,6 +214,7 @@ final class GameStatsStore: ObservableObject {
         for g in games where wantedRating(g) != g.sentRating {
             let wanted = wantedRating(g)
             let last = g.sessions.first?.report
+            if last?.gfx == "mullion" { continue } /* sent with the game's next session on a tracked path */
             let report = GameRatingReport(
                 install: install, launcher: GameStatsStore.launcherVersion, appid: g.appid, game: g.name,
                 rating: wanted?.rawValue ?? "none", mac: .current,

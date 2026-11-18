@@ -216,10 +216,45 @@ final class LauncherSettings: ObservableObject {
     enum Wmtr {
         /// Library name in the app's Frameworks (work/out/host/lib for the dev launcher).
         static let bundledLibrary = "libwmtr_host.dylib"
+        /// Experimental: the executor of Mullion (a DXMT fork with Direct3D 12), bundled when the build has it
+        /// (host/mullion). Its unix-call table extends DXMT's, so the guest gets Mullion's dlls with it.
+        static let mullionLibrary = "libwmtr_host_mullion.dylib"
+        /// The `wmtrLibrary` setting (and --wmtr-lib value) that selects the bundled Mullion executor.
+        static let mullionSetting = "mullion"
 
         /// STEAMAC_WMTR_LIB for a `wmtrLibrary` setting ("" = the bundled library).
         static func path(for setting: String) -> String {
-            setting.isEmpty ? "@rpath/" + bundledLibrary : setting
+            if setting.isEmpty { return "@rpath/" + bundledLibrary }
+            if setting == mullionSetting { return "@rpath/" + mullionLibrary }
+            return setting
+        }
+
+        /// The guest side an executor library serves (steamac.gfx=): "mullion" for a library that says so
+        /// (wmtr_host_flavour), "dxmt" for any other, also one that cannot be loaded.
+        static func flavour(_ path: String) -> String {
+            guard let handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL) else { return "dxmt" }
+            defer { dlclose(handle) }
+            guard let symbol = dlsym(handle, "wmtr_host_flavour") else { return "dxmt" }
+            let name = unsafeBitCast(symbol, to: (@convention(c) () -> UnsafePointer<CChar>?).self)()
+            return name.map { String(cString: $0) } == "mullion" ? "mullion" : "dxmt"
+        }
+
+        /// Whether this build bundles the Mullion executor (Settings > Advanced offers it then).
+        static var mullionBundled: Bool { unavailableReason(path(for: mullionSetting)) == nil }
+
+        /// --selftest-settings: the setting's mapping and the flavour each bundled executor reports.
+        static func selfCheck() -> [String] {
+            var failures: [String] = []
+            if path(for: "") != "@rpath/" + bundledLibrary || path(for: mullionSetting) != "@rpath/" + mullionLibrary
+                || path(for: "/x/lib.dylib") != "/x/lib.dylib" { failures.append("wmtr: library setting mapping") }
+            if flavour("/nonexistent/libwmtr_host.dylib") != "dxmt" { failures.append("wmtr: flavour of a missing library") }
+            if unavailableReason(path(for: "")) == nil && flavour(path(for: "")) != "dxmt" {
+                failures.append("wmtr: the bundled DXMT executor does not report dxmt")
+            }
+            if mullionBundled && flavour(path(for: mullionSetting)) != "mullion" {
+                failures.append("wmtr: the bundled Mullion executor does not report mullion")
+            }
+            return failures
         }
 
         private enum Problem {

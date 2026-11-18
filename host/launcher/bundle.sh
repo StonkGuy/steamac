@@ -3,7 +3,8 @@
 #   Contents/MacOS/steamac-vm           launcher, rpath @executable_path/../Frameworks only
 #   Contents/Frameworks/*.dylib         libkrun, libvirglrenderer, libMoltenVK, libvulkan_kosmickrisp
 #                                       (when built: host/kosmickrisp, macOS 26+), libwmtr_host
-#                                       (when built: host/dxmt) + their non-system dependencies
+#                                       (when built: host/dxmt), libwmtr_host_mullion (when built:
+#                                       host/mullion) + their non-system dependencies
 #                                       (libepoxy), install names @rpath/<name>
 #   Contents/Frameworks/Sparkle.framework  in-app updates (SparkleUpdates), build.sh's copy of
 #                                       SwiftPM's; without the XPC services (sandboxed apps only)
@@ -93,6 +94,8 @@ copy_lib() {
 libs=(libkrun.1.dylib libvirglrenderer.1.dylib libMoltenVK.dylib)
 [[ -f "$KRUN_PREFIX/lib/libvulkan_kosmickrisp.dylib" ]] && libs+=(libvulkan_kosmickrisp.dylib)
 [[ -f "$KRUN_PREFIX/lib/libwmtr_host.dylib" ]] && libs+=(libwmtr_host.dylib)
+# the experimental Mullion executor (host/mullion; Settings > Advanced "DXMT implementation")
+[[ -f "$KRUN_PREFIX/lib/libwmtr_host_mullion.dylib" ]] && libs+=(libwmtr_host_mullion.dylib)
 for lib in "${libs[@]}"; do
     copy_lib "$KRUN_PREFIX/lib/$lib"
 done
