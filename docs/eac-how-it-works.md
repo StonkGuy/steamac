@@ -29,7 +29,7 @@ session never authenticates.
 
 ## What the patched FEX does
 
-FEX-2610 with the EAC patches ([StonkGuy/FEX](https://github.com/StonkGuy/FEX/tree/eac-2610) tag `eac-2610.5`, built in the guest with `-DBUILD_STEAM_SUPPORT=ON`) emulates the x86-64 view of a `ptrace`
+FEX-2611.1 with the EAC patches ([StonkGuy/FEX](https://github.com/StonkGuy/FEX/tree/eac-2611) tag `eac-2611.1`, built in the guest with `-DBUILD_STEAM_SUPPORT=ON`) emulates the x86-64 view of a `ptrace`
 tracee, runs guest signal handlers with the Linux signal mask, and keeps registers set on syscall-entered handlers; patch
 0002 stops pages that keep faulting on self-modifying code from being write-protected. Earlier `.2` tests passed all three checks.
 The current `.3` pin still needs those guest checks and a real game test. Patch
