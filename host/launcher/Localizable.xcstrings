@@ -2,22 +2,6 @@
   "sourceLanguage" : "en",
   "strings" : {
     "" : {},
-    "\"Still working\" card over the picture after 2 s without GPU work from SteamOS (loading, shader compiles)." : {
-      "localizations" : {
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Карточка «Работа продолжается» поверх изображения после 2 с без активности GPU в SteamOS (загрузка, компиляция шейдеров)."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SteamOS 连续 2 秒没有 GPU 活动时（加载或编译着色器），在画面上显示“仍在工作”提示卡片。"
-          }
-        }
-      }
-    },
     "%@ %lld%%" : {
       "localizations" : {
         "en" : {
@@ -3839,22 +3823,6 @@
         }
       }
     },
-    "Graphics path" : {
-      "localizations" : {
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Графический путь"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "图形路径"
-          }
-        }
-      }
-    },
     "Grow Disk" : {
       "localizations" : {
         "ru" : {
@@ -5518,22 +5486,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此处不可用：%@；将使用 MoltenVK。"
-          }
-        }
-      }
-    },
-    "Not available here: %@; Vulkan is used." : {
-      "localizations" : {
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Недоступно здесь: %@; используется Vulkan."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此处不可用：%@；将使用 Vulkan。"
           }
         }
       }
@@ -8830,22 +8782,6 @@
         }
       }
     },
-    "Still working — loading or compiling shaders…" : {
-      "localizations" : {
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Работа продолжается — загрузка или компиляция шейдеров…"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "仍在工作 — 正在加载或编译着色器…"
-          }
-        }
-      }
-    },
     "Stop" : {
       "localizations" : {
         "ru" : {
@@ -11243,22 +11179,6 @@
         }
       }
     },
-    "drives the virtual pad" : {
-      "localizations" : {
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "управляет виртуальным контроллером"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "控制虚拟控制器"
-          }
-        }
-      }
-    },
     "encode %@ ms, headset decode %@ ms" : {
       "localizations" : {
         "en" : {
@@ -11539,22 +11459,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无权创建 %@：请选择可写入的文件夹"
-          }
-        }
-      }
-    },
-    "no permission to write in %@: choose a folder you can write to, or allow writing in Finder → Get Info → Sharing & Permissions" : {
-      "localizations" : {
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "нет разрешения на запись в %@: выберите папку с доступом на запись или разрешите запись в Finder → «Свойства» → «Общий доступ и права доступа»"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "无权在 %@ 中写入：请选择可写入的文件夹，或在“访达 → 显示简介 → 共享与权限”中允许写入"
           }
         }
       }

@@ -13,8 +13,8 @@ enum L10nSelfTest {
     /// GPU-idle card, Settings > VR, the pairing PIN in the window title, VR host errors) whose
     /// translation must be present in every language.
     static var probes: [String] {
-        ["Graphics path", "DXMT (lean)", "Vulkan (classic)", "Applies from the next start.",
-         "Not available here: %@; Vulkan is used.", "Render scale", "Off (1.0×)", "Upscale lower game resolutions",
+        ["Allow DXMT", "DXMT (lean)", "Vulkan (classic)", "Applies from the next start.",
+         "Not available here: %@; MoltenVK is used.", "Render scale", "Off (1.0×)", "Upscale lower game resolutions",
          "Frame latency", "Loading…", "not included in this build (%@)",
          "VR (experimental)", "VR pairing PIN %@", "Pairing PIN", "Let new headsets ask to pair", "Start in VR",
          "Game audio in the headset", "Treat game images as sRGB", "Upscaler", "Preset",
