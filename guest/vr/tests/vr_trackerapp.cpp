@@ -9,6 +9,8 @@
 //   vr-trackerapp RUNTIME_DIR driver SECONDS      scene app: the svrtest driver's two trackers through svr-driverhost
 //   vr-trackerapp RUNTIME_DIR secondary           background app without a host link: the headset pose from the
 //                                                 scene app's mirror, and the table's trackers
+//   vr-trackerapp RUNTIME_DIR noscene             background app while no scene app runs: VR_Init must fail with
+//                                                 Init_NoServerForBackgroundApp, also when a host link is reachable
 #include <dlfcn.h>
 #include <math.h>
 #include <stdio.h>
@@ -87,6 +89,13 @@ int main(int argc, char **argv) {
   int rc = -1;
   auto *core = factory ? (IVRClientCore *)factory("IVRClientCore_003", &rc) : nullptr;
   if (!core) return printf("FAIL no client core\n"), 1;
+  if (mode == "noscene") {
+    vr::EVRInitError e = core->Init(vr::VRApplication_Background, "");
+    CHECK(e == vr::VRInitError_Init_NoServerForBackgroundApp, "noscene: Init returned %s", core->GetIDForVRInitError(e));
+    if (!e) core->Cleanup();
+    printf("%s: %d checks, %d failures\n", failures ? "FAIL" : "PASS", checks, failures);
+    return failures ? 1 : 0;
+  }
   bool secondary = mode == "secondary";
   vr::EVRInitError err = core->Init(secondary ? vr::VRApplication_Background : vr::VRApplication_Scene, "");
   CHECK(err == vr::VRInitError_None, "Init (%s): %s", mode.c_str(), core->GetIDForVRInitError(err));

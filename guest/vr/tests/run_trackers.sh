@@ -5,7 +5,8 @@
 #   1. svr-tracker-feed, 3 devices, stops cleanly (slots released -> Deactivated at once)
 #   2. svr-tracker-feed, 8 devices, killed with SIGKILL (slots left behind -> Deactivated when stale, 2 s)
 #   3. svr-driverhost hosting tests/sample_driver (an unmodified-style SteamVR tracker driver)
-#   4. a background app without a host link reads the headset and the feed's trackers through the mirror
+#   4. a background app reads the headset and the feed's trackers through the mirror, also when it could reach the
+#      host link itself, and fails VR_Init (Init_NoServerForBackgroundApp) once no scene app runs
 #   5. svr-driverhost --then: the driver beside a companion program loads, the program starts, the host exits with it
 #   tests/run_trackers.sh BUILD_DIR
 set -eu
@@ -66,7 +67,14 @@ pids="$pids $!"
 sleep 1
 env -u STEAMAC_VR_SOCKET STEAMAC_VR_LOG=1 "$out/vr-trackerapp" "$out/runtime" secondary 2>"$tmp/app4.err" || fail "secondary"
 grep -q 'init without a host link' "$tmp/app4.err" || fail "secondary log"
+# the same companion while it can reach the host link itself (a D3D11 companion on the DXMT path loads wmtr): it must
+# still use the scene app's mirror, not take the link from the scene app
+STEAMAC_VR_SOCKET=$sock STEAMAC_VR_LOG=1 "$out/vr-trackerapp" "$out/runtime" secondary 2>"$tmp/app4b.err" || fail "secondary with a link"
+grep -q 'init without a host link' "$tmp/app4b.err" || fail "secondary with a link took the host link"
 wait $app || fail "secondary's scene app"
+# no scene app any more (its mirror goes stale): a background app does not start a VR session, as on SteamVR
+sleep 1
+STEAMAC_VR_SOCKET=$sock "$out/vr-trackerapp" "$out/runtime" noscene 2>"$tmp/app4c.err" || fail "background app without a scene app"
 wait $fh
 # 5. companion mode: driver directory taken from the program's own directory, host lives as long as the program
 cp -r "$out/svrtest" "$tmp/product"
