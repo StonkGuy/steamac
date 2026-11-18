@@ -34,9 +34,16 @@ Runtime &Runtime::get() {
 
 vr::EVRInitError Runtime::init(vr::EVRApplicationType type) {
   std::lock_guard<std::mutex> g(m_);
-  if (transport_) return vr::VRInitError_None;
+  if (transport_ || secondary_) return vr::VRInitError_None;
+  // Only a scene app owns the host link. A companion (background, overlay, utility) that can reach it too, such as a
+  // D3D11 program on the DXMT path, whose device loads wmtr, would otherwise take it from the game: it uses the scene
+  // app's mirror instead. A background app does not start a VR session of its own, as on SteamVR.
+  if (type != vr::VRApplication_Scene && init_secondary_locked()) return vr::VRInitError_None;
+  if (type == vr::VRApplication_Background) {
+    SVR_ERR("background app and no scene app running: not taking the host link");
+    return vr::VRInitError_Init_NoServerForBackgroundApp;
+  }
   transport_ = Transport::open_default();
-  if (!transport_ && type != vr::VRApplication_Scene && init_secondary_locked()) return vr::VRInitError_None;
   if (!transport_) {
     SVR_ERR("no host link (DXMT/wmtr not loaded in this process and STEAMAC_VR_SOCKET not set)");
     return vr::VRInitError_Init_HmdNotFound;
