@@ -1,0 +1,380 @@
+# CI for the fxgl-mullion pull-request branch (this file and the GPU-test skips exist only on the CI branch):
+# builds the whole app from the sources of `ref` with both executors (DXMT and Mullion) and the guest layer with
+# both payloads, runs the wmtr tests of both flavours, the guest-script tests and the launcher self-tests, and
+# uploads the app as a workflow artifact (no DMG signing, no release, no update feed: a dev bundle).
+#   dxmt     macOS      host/dxmt/build.sh fetch llvm native host pe
+#   mullion  macOS      host/mullion/build.sh fetch llvm native host pe smoke (wmtr MULLION=1 + make test)
+#   guest    Linux arm  guest/kernel, guest/mesa, scripts/build-image.sh initramfs
+#   layer    Linux arm  DXMT + Mullion clients and payloads, scripts/build-image.sh layer
+#   app      macOS      ./build.sh host, launcher self-tests, app zip
+name: Release DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or commit whose sources are built
+        required: true
+        default: fxgl-mullion
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fxgl-mullion-${{ inputs.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_REF: ${{ inputs.ref }}
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
+
+jobs:
+  checks:
+    name: Guest script tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - run: |
+          bash scripts/test/steam-gfx-path.sh
+          python3 scripts/test/steam-compat-default.py
+          python3 scripts/test/steam-dxmt-arm64ec.py
+          bash -n scripts/steps/30-layer.sh host/mullion/build.sh scripts/export-mullion-patches.sh
+          python3 host/launcher/l10n.py check --strict
+
+  dxmt:
+    name: DXMT host library and PE dlls
+    needs: checks
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - &xcode
+        name: Xcode, Metal toolchain, Rosetta
+        run: |
+          echo "runner image: $ImageOS $ImageVersion"
+          sw_vers
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun -sdk macosx -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+          xcrun -sdk macosx -f metal
+          arch -x86_64 /usr/bin/true 2>/dev/null || softwareupdate --install-rosetta --agree-to-license
+          echo "kern.hv_support: $(sysctl -n kern.hv_support 2>/dev/null || echo n/a)"
+      # Each cache is saved as soon as its step succeeds, so a later failure does not lose it.
+      - name: LLVM 15 cache
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: llvm15-${{ runner.os }}-${{ runner.arch }}-xcode26.6-${{ hashFiles('host/dxmt/build.sh', 'host/dxmt/pin.env') }}
+      - name: DXMT source, LLVM 15
+        run: host/dxmt/build.sh fetch llvm
+      - if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+      - name: DXMT (native, host, pe)
+        run: host/dxmt/build.sh native host pe
+      - name: Pack
+        run: tar -cf dxmt-host.tar work/out/host/lib/libwmtr_host.dylib work/out/dxmt-pe
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dxmt-host
+          path: dxmt-host.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  mullion:
+    name: Mullion host library, PE dlls, smoke test
+    needs: checks
+    runs-on: macos-26
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - *xcode
+      - name: LLVM 15 cache
+        id: llvm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: llvm15-${{ runner.os }}-${{ runner.arch }}-xcode26.6-${{ hashFiles('host/dxmt/build.sh', 'host/dxmt/pin.env') }}
+      - name: Mullion source, LLVM 15
+        run: host/mullion/build.sh fetch llvm
+      - if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/out/host/llvm15
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+      - name: Mullion (native, host + wmtr tests, pe, smoke)
+        run: host/mullion/build.sh native host pe smoke
+      - name: Pack
+        run: |
+          shasum -a 256 work/out/host/lib/libwmtr_host_mullion.dylib work/out/mullion-pe/*.dll work/out/mullion-smoke/*
+          tar -cf mullion-host.tar work/out/host/lib/libwmtr_host_mullion.dylib work/out/mullion-pe work/out/mullion-smoke
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mullion-host
+          path: mullion-host.tar
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: mullion-logs
+          path: |
+            work/build/mullion-native/meson-logs
+            work/build/mullion-pe/meson-logs
+          retention-days: 7
+          if-no-files-found: ignore
+
+  guest:
+    name: Guest kernel, Mesa, initramfs
+    needs: checks
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - name: Runner, disk, amd64 emulation for the x86_64 + i386 Mesa and DXMT client containers
+        run: |
+          echo "runner image: $ImageOS $ImageVersion, $(nproc) cpus"
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          # QEMU 10.2 user emulation (the Ubuntu package, 8.2, crashes on the x86 fault reporter's own SIGSEGV
+          # test in guest/mesa verify); the same installer docker/setup-qemu-action uses, pinned
+          docker run --rm --privileged docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install amd64,386
+          # probe only (not a build input); a separate image: an index digest pulled for amd64 cannot be pulled again for arm64
+          test "$(docker run --rm --platform linux/amd64 docker.io/library/busybox:1.37 uname -m)" = x86_64
+          df -h / "$PWD"
+      - name: Kernel cache
+        id: kernel
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            work/out/Image
+            work/out/Image.inputs.json
+            work/out/kernel.config
+            work/out/kernel-check-config.log
+            work/cache/kernel
+          key: kernel-${{ hashFiles('guest/kernel/**') }}
+      - name: Mesa cache
+        id: mesa
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            work/out/mesa-venus
+            work/out/mesa-venus.inputs.json
+            work/out/mesa-aarch64.inputs.json
+            work/out/mesa-x86.inputs.json
+            work/build/mesa-venus/bin
+            work/build/mesa-venus/packages-*.txt
+            work/build/mesa-venus/toolchain-*.txt
+          key: mesa-v2-${{ hashFiles('guest/mesa/**', 'scripts/config.env', 'scripts/steps/10-rootfs.sh', 'scripts/builder/Dockerfile', 'scripts/keys/**') }}
+      # A cached output counts only when its receipt still matches these sources and its bytes.
+      - name: Kernel
+        run: |
+          if python3 scripts/guest-artifacts.py check kernel; then
+            echo "kernel: receipt valid, build skipped"
+          else
+            JOBS=$(nproc) guest/kernel/build.sh
+          fi
+      - if: steps.kernel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            work/out/Image
+            work/out/Image.inputs.json
+            work/out/kernel.config
+            work/out/kernel-check-config.log
+            work/cache/kernel
+          key: ${{ steps.kernel.outputs.cache-primary-key }}
+      - name: Builder image
+        run: scripts/build-image.sh builder
+      # Both architectures first, cached as soon as they are built (with the probe programs and the
+      # package/toolchain lists the verification and MANIFEST.txt use); then the verification against
+      # Valve's rootfs (a restored build whose per-architecture receipts match is only verified).
+      - name: Mesa (aarch64, x86_64 + i386)
+        run: |
+          if python3 scripts/guest-artifacts.py check mesa; then
+            echo "mesa: receipt valid, build skipped"
+          elif python3 scripts/guest-artifacts.py check mesa-aarch64 && python3 scripts/guest-artifacts.py check mesa-x86; then
+            echo "mesa: per-architecture receipts valid, only verify runs"
+          else
+            guest/mesa/build.sh fetch aarch64 x86
+          fi
+          sudo chown -R "$(id -u):$(id -g)" work
+      - if: steps.mesa.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            work/out/mesa-venus
+            work/out/mesa-venus.inputs.json
+            work/out/mesa-aarch64.inputs.json
+            work/out/mesa-x86.inputs.json
+            work/build/mesa-venus/bin
+            work/build/mesa-venus/packages-*.txt
+            work/build/mesa-venus/toolchain-*.txt
+          key: ${{ steps.mesa.outputs.cache-primary-key }}
+      - name: Mesa verify (against the verified SteamOS rootfs)
+        run: |
+          if ! python3 scripts/guest-artifacts.py check mesa; then
+            scripts/build-image.sh rootfs
+            sudo chown -R "$(id -u):$(id -g)" work
+            guest/mesa/build.sh verify
+            sudo rm -rf work/cache/rootfs
+          fi
+          sudo chown -R "$(id -u):$(id -g)" work
+          python3 scripts/guest-artifacts.py check mesa
+          df -h "$PWD"
+      - name: Initramfs
+        run: scripts/build-image.sh initramfs
+      - name: Pack
+        run: |
+          python3 scripts/guest-artifacts.py check kernel
+          python3 scripts/guest-artifacts.py check initramfs
+          python3 scripts/guest-artifacts.py check mesa
+          tar -cf guest-base.tar \
+            work/out/Image work/out/Image.inputs.json work/out/kernel.config \
+            work/out/initramfs.cpio.gz work/out/initramfs.cpio.gz.inputs.json \
+            work/out/mesa-venus work/out/mesa-venus.inputs.json work/out/mesa-aarch64.inputs.json work/out/mesa-x86.inputs.json \
+            work/cache/kernel/*.tar.xz work/cache/dosfstools/*/*.tar.gz work/cache/e2fsprogs/*/*.tar.xz work/cache/btrfs-progs/*/*.tar.xz
+          ls -l guest-base.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: guest-base
+          path: guest-base.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  layer:
+    name: DXMT guest payload and layer
+    needs: [dxmt, mullion, guest]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - name: amd64 emulation for the DXMT client container
+        run: docker run --rm --privileged docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install amd64,386
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: guest-base
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dxmt-host
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mullion-host
+      - name: Unpack (receipts checked against this checkout)
+        run: |
+          tar -xf mullion-host.tar work/out/mullion-pe && rm mullion-host.tar
+          tar -xf guest-base.tar
+          tar -xf dxmt-host.tar work/out/dxmt-pe
+          rm guest-base.tar dxmt-host.tar
+          python3 scripts/guest-artifacts.py check mesa
+      - name: DXMT guest payload (client, payload)
+        run: host/dxmt/build.sh fetch client payload
+      - name: Mullion guest payload (client + test-linux, payload)
+        run: host/mullion/build.sh fetch client payload
+      - name: Layer
+        run: |
+          scripts/build-image.sh builder layer
+          sudo chown -R "$(id -u):$(id -g)" work
+      - name: Receipts and container facts
+        run: |
+          python3 scripts/guest-artifacts.py check-release
+          git status --short
+      - name: Pack
+        run: |
+          tar -cf guest.tar \
+            work/out/Image work/out/Image.inputs.json work/out/kernel.config \
+            work/out/initramfs.cpio.gz work/out/initramfs.cpio.gz.inputs.json \
+            work/out/steamac-layer.img work/out/steamac-layer.img.inputs.json \
+            work/out/mesa-venus work/out/mesa-venus.inputs.json work/out/mesa-aarch64.inputs.json work/out/mesa-x86.inputs.json \
+            work/out/dxmt work/out/mullion  \
+            work/cache/licenses work/cache/cargo-home/registry work/cache/mullion \
+            work/cache/kernel/*.tar.xz work/cache/dosfstools/*/*.tar.gz work/cache/e2fsprogs/*/*.tar.xz work/cache/btrfs-progs/*/*.tar.xz
+          ls -l guest.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: guest
+          path: guest.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  app:
+    name: Host stack, app
+    needs: [dxmt, mullion, layer]
+    runs-on: macos-26
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - *xcode
+      - name: Homebrew packages
+        run: brew install meson ninja pkgconf dtc xz lld go cmake
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dxmt-host
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mullion-host
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: guest
+      - name: Guest images and executor libraries into work/
+        run: |
+          tar -xf guest.tar
+          tar -xf dxmt-host.tar work/out/host/lib/libwmtr_host.dylib
+          tar -xf mullion-host.tar work/out/host/lib/libwmtr_host_mullion.dylib work/out/mullion-smoke
+          rm guest.tar dxmt-host.tar mullion-host.tar
+          python3 scripts/guest-artifacts.py check-release
+          # licenses.sh / gpl-sources.sh read the pinned source tarballs
+          host/dxmt/build.sh fetch
+          host/mullion/build.sh fetch
+      # GitHub-hosted macOS runners are virtual machines with a paravirtual Metal device (no mesh shaders, no
+      # Metal 4): the MoltenVK and KosmicKrisp GPU repros are skipped there (CI-only switches).
+      - name: Host stack and app (./build.sh host)
+        run: |
+          export MVK_SKIP_REPRO=1 KK_SKIP_HOST_TESTS=1
+          ./build.sh host
+      - name: Launcher self-tests (no VM)
+        timeout-minutes: 10
+        run: |
+          app="work/out/FX Steam Launcher.app/Contents/MacOS/steamac-vm"
+          ls -l "work/out/FX Steam Launcher.app/Contents/Frameworks"
+          for t in settings metal-cache game-layers remote-play; do
+            echo "=== --selftest-$t"
+            "$app" "--selftest-$t" --selftest-out "$RUNNER_TEMP/selftest"
+          done
+      - name: GPL source archive
+        run: scripts/gpl-sources.sh HEAD && ls -l work/out/dist/
+      - name: Pack the app
+        run: |
+          mkdir upload
+          label=$(git rev-parse --short=10 HEAD)
+          ditto -c -k --keepParent "work/out/FX Steam Launcher.app" "upload/FX-Steam-Launcher-fxgl-mullion-$label.zip"
+          cp work/out/mullion-smoke/* upload/
+          (cd upload && shasum -a 256 * | tee SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app
+          path: upload/
+          retention-days: 14
+          if-no-files-found: error

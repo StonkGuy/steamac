@@ -287,10 +287,14 @@ if grep -q 'MVK-BUILD-ERROR' "$probe_log"; then
 fi
 
 # --- repros: gamescope compute pipelines, geometry shaders, null pipeline binds
+if [ "${MVK_SKIP_REPRO:-0}" = 1 ]; then
+	echo ">> repro skipped: MVK_SKIP_REPRO=1 (CI runner without the GPU features)"
+else
 echo ">> repro: gamescope compute pipelines, geometry shaders, null pipeline binds"
 repro_log=$work/repro.log
 "$here/repro/run.sh" "$stage/lib" > "$repro_log" 2>&1 || { cat "$repro_log"; exit 1; }
 grep -v '^\[mvk-info\]\|^	' "$repro_log"
+fi
 
 # --- install (temp + rename, never rewrite a mapped dylib in place)
 mkdir -p "$out/lib" "$out/share/vulkan/icd.d" "$out/include"

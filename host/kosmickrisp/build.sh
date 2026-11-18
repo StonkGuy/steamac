@@ -606,6 +606,9 @@ loader=$(brew --prefix vulkan-loader)/lib
 probe=$work/probe
 xcrun clang -std=c11 -Wall -Werror -O1 -I"$root/work/build/host-moltenvk/src/Package/Release/MoltenVK/include" \
 	"$root/host/moltenvk/probe/probe.c" -L"$loader" -lvulkan -Wl,-rpath,"$loader" -o "$probe"
+if [ "${KK_SKIP_HOST_TESTS:-0}" = 1 ]; then
+	echo ">> probe + repro skipped: KK_SKIP_HOST_TESTS=1 (CI runner without Metal 4)"
+else
 echo ">> probe: $staged"
 VK_DRIVER_FILES=$icd "$probe"
 echo ">> repro (REPRO_DRIVER=kosmickrisp)"
@@ -613,6 +616,7 @@ repro_log=$work/repro.log
 REPRO_DRIVER=kosmickrisp "$root/host/moltenvk/repro/run.sh" "$staged" > "$repro_log" 2>&1 ||
 	{ cat "$repro_log"; exit 1; }
 grep -v '^	' "$repro_log" | grep -v 'Metal API Validation Enabled'
+fi
 
 # --- install (temp + rename, never rewrite a mapped dylib in place)
 mkdir -p "$out/lib"
@@ -627,7 +631,7 @@ mv -f "$lib.tmp.$$" "$lib"
 	echo "source:          $MESA_REPO"
 	echo "commit:          $MESA_COMMIT (main, 2026-10-05)"
 	echo "patch revision:  $patch_rev (sha256 of host/kosmickrisp/patches/*.patch)"
-	echo "driver:          $(VK_DRIVER_FILES=$icd "$probe" 2> /dev/null | sed -n 's/^driver: *//p')"
+	echo "driver:          $([ "${KK_SKIP_HOST_TESTS:-0}" = 1 ] || VK_DRIVER_FILES=$icd "$probe" 2> /dev/null | sed -n 's/^driver: *//p')"
 	echo "Xcode:           $(xcodebuild -version | tr '\n' ' ')"
 	echo "built:           $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	echo
