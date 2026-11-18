@@ -54,7 +54,10 @@ cd "$build"
 [[ -f Makefile ]] || "$src/configure.sh" --container-engine="$engine" --build-name=steamac-vr --relabel-volumes
 # SELinux hosts (Fedora): the container must read the bind-mounted trees
 grep -q '^DOCKER_OPTS := --security-opt label=disable' Makefile || sed -i '1i DOCKER_OPTS := --security-opt label=disable' Makefile
-make -j"$(nproc)" vrclient
+# Wine without piper: vrclient never uses text to speech (wine's configure only drops protontts), and piper's
+# build downloads piper-phonemize from a moving branch, which downloads onnxruntime from a GitHub release that
+# is gone (404 since 2026-11; CMake's file(DOWNLOAD) keeps the error page and the compile fails later).
+make -j"$(nproc)" vrclient WINE_x86_64_DEPENDS=vkd3d WINE_aarch64_DEPENDS=
 
 for f in x86_64-windows/vrclient_x64.dll x86_64-unix/vrclient_x64.so; do
     install -D -m 0644 "$build/dist/files/lib/wine/$f" "$out/$f"
