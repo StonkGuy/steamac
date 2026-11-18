@@ -11,8 +11,8 @@ ARM64 Steam (SteamOS guest)
 ```
 
 The x86-64 Proton runs under the FEX inside Steam's tool, so replacing that FEX replaces the emulator for the whole chain.
-The guest is Valve's ARM64 SteamOS (Steam Frame image) with its rootfs unmodified; everything the setup adds lives in the
-guest's home directory.
+The guest is Valve's ARM64 SteamOS (Steam Frame image) with its rootfs unmodified. Launcher scripts are in a separate
+read-only layer; the runtime build, Steam configuration and backups live in the guest's home directory.
 
 ## Why the game needs Proton Experimental
 
@@ -31,7 +31,8 @@ session never authenticates.
 
 FEX-2610 with the EAC patches ([StonkGuy/FEX](https://github.com/StonkGuy/FEX/tree/eac-2610) tag `eac-2610.5`, built in the guest with `-DBUILD_STEAM_SUPPORT=ON`) emulates the x86-64 view of a `ptrace`
 tracee, runs guest signal handlers with the Linux signal mask, and keeps registers set on syscall-entered handlers; patch
-0002 stops pages that keep faulting on self-modifying code from being write-protected. All three tests pass. Patch
+0002 stops pages that keep faulting on self-modifying code from being write-protected. Earlier `.2` tests passed all three checks.
+The current `.3` pin still needs those guest checks and a real game test. Patch
 descriptions and reasoning: [patches.md](https://github.com/StonkGuy/eac-arm64-emulation-poc/blob/master/docs/patches.md)
 in the research repo.
 

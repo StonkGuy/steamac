@@ -20,4 +20,18 @@ run; [ $? = 0 ] && is x FEX-patched; ok $? "install swaps the stage in"
 run; [ $? = 0 ] && grep -q "already installed" "$d/out"; ok $? "second install is a no-op"
 run restore; [ $? = 0 ] && is x FEX-valve; ok $? "restore puts Valve's build back"
 rm "$N/usr/bin/FEXpidof"; run; r=$?; [ $r != 0 ] && is x FEX-valve; ok $? "incomplete stage is refused, tool untouched"
+mk "$N" FEX-patched; run; [ $? = 0 ] && is x FEX-patched; ok $? "install again"
+echo '{"new":1}' > "$N/ConfigTemplate.json"; run; [ $? = 0 ] && cmp -s "$N/ConfigTemplate.json" "$V/ConfigTemplate.json"; ok $? "stage differing only in ConfigTemplate.json is installed"
+mkdir -p "$d/bin"; printf '#!/bin/sh\nexit 0\n' > "$d/bin/pgrep"; chmod +x "$d/bin/pgrep"
+PATH="$d/bin:$PATH" run restore; r=$?; [ $r != 0 ] && is x FEX-patched; ok $? "restore while FEXServer runs is refused, tool untouched"
+rm "$d/bin/pgrep"   # sh keeps an assignment made in front of a function call: the fake must not outlive its case
+rm "$d/home/fex-eac-work/valve-backup/FEX-valve/usr/bin/FEXpidof"; run restore; r=$?; [ $r != 0 ] && is x FEX-patched; ok $? "restore from an incomplete backup is refused, tool untouched"
+mk "$d/home/fex-eac-work/valve-backup/FEX-valve" FEX-patched; run restore; r=$?; [ $r != 0 ] && is x FEX-patched; ok $? "restore from a mismatched backup is refused, tool untouched"
+rm -rf "$d/home/fex-eac-work/valve-backup" "$V"; mk "$V" FEX-valve; mk "$N" FEX-patched; rm "$V/ConfigTemplate.json"; run; r=$?
+[ $r != 0 ] && is x FEX-valve && [ ! -e "$d/home/fex-eac-work/valve-backup" ]; ok $? "incomplete tool is refused before any backup or swap"
+# a tool that already holds a manually installed patched build (its describe string is not FEX-...)
+rm -rf "$d/home/fex-eac-work/valve-backup" "$V"; mk "$V" "eac-2610.4 + local (abc, Steam-tool build)"; mk "$N" FEX-patched
+run; [ $? = 0 ] && is x FEX-patched; ok $? "install over a manually installed build"
+run; [ $? = 0 ] && grep -q "already installed" "$d/out" && [ "$(ls "$d/home/fex-eac-work/valve-backup" | wc -l)" -eq 1 ]; ok $? "second install keeps one backup"
+run restore; [ $? = 0 ] && is x "eac-2610.4 + local (abc, Steam-tool build)"; ok $? "restore puts the manually installed build back"
 rm -rf "$d"; [ $fail = 0 ] && echo "install-fex-tool: all PASS" || { echo "install-fex-tool: FAILED"; exit 1; }

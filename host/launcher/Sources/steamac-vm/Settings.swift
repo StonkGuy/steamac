@@ -35,7 +35,7 @@ final class LauncherSettings: ObservableObject {
         case streamingHost
         // Advanced
         case cpus, memMiB, sshEnabled, sshPort, network, lanRemotePlay, diskImage, sharedFolder, sharedMount, sharedLibrary,
-             steamosBranch, steamClient, vulkanDriver, graphicsPath, frameLatency, wmtr, wmtrLibrary
+             steamosBranch, steamClient, vulkanDriver, graphicsPath, frameLatency, wmtr, wmtrLibrary, experimentalGameSupport
         // VR
         case vrEnabled, vrBitrateMbps, vrEyeSize, vrCodec, vrPairOnRequest, vrHeadsetAudio, vrGameAppID
         case vrRenderScale, vrUpscaler, vrSharpness, vrForceSRGB, vrKeyframeInterval, vrTCPOnly, vrVirtualDesktop, vrShowStats
@@ -46,7 +46,7 @@ final class LauncherSettings: ObservableObject {
                  .windowWidth, .windowHeight, .windowSizePreset, .retinaResolution, .metalHUD, .renderScale, .soundEnabled, .cpus,
                  .memMiB, .sshEnabled, .sshPort, .network, .lanRemotePlay,
                  .diskImage, .sharedFolder, .sharedMount, .sharedLibrary, .steamClient, .followMacTime, .vulkanDriver, .graphicsPath,
-                 .wmtr, .wmtrLibrary, .frameLatency, .vrEnabled,
+                 .wmtr, .wmtrLibrary, .frameLatency, .experimentalGameSupport, .vrEnabled,
                  .vrEyeSize, .vrCodec, .vrPairOnRequest, .vrHeadsetAudio, .vrRenderScale, .vrUpscaler, .vrSharpness,
                  .vrForceSRGB, .vrKeyframeInterval, .vrTCPOnly, .vrVirtualDesktop:
                 return true
@@ -552,6 +552,7 @@ final class LauncherSettings: ObservableObject {
     /// Frame latency mode of the next start (Vulkan path; kernel cmdline `steamac.frame_latency=1`).
     /// Off by default: the guest's DXVK config is left unchanged.
     @Published var frameLatency = false { didSet { save(.frameLatency, frameLatency) } }
+    @Published var experimentalGameSupport = false { didSet { save(.experimentalGameSupport, experimentalGameSupport) } }
 
     init() {
         let domain = LauncherSettings.domain
@@ -666,6 +667,7 @@ final class LauncherSettings: ObservableObject {
         bool(.vrTCPOnly, &vrTCPOnly)
         bool(.vrVirtualDesktop, &vrVirtualDesktop)
         bool(.vrShowStats, &vrShowStats)
+        bool(.experimentalGameSupport, &experimentalGameSupport)
         reloadGames()
     }
 
@@ -768,6 +770,7 @@ final class LauncherSettings: ObservableObject {
         case .vrTCPOnly: guard let b else { return false }; vrTCPOnly = b
         case .vrVirtualDesktop: guard let b else { return false }; vrVirtualDesktop = b
         case .vrShowStats: guard let b else { return false }; vrShowStats = b
+        case .experimentalGameSupport: guard let b else { return false }; experimentalGameSupport = b
         }
         return true
     }
@@ -811,6 +814,7 @@ final class LauncherSettings: ObservableObject {
         vrRenderScale = fresh.vrRenderScale; vrUpscaler = fresh.vrUpscaler; vrSharpness = fresh.vrSharpness
         vrForceSRGB = fresh.vrForceSRGB; vrKeyframeInterval = fresh.vrKeyframeInterval
         vrTCPOnly = fresh.vrTCPOnly; vrVirtualDesktop = fresh.vrVirtualDesktop; vrShowStats = fresh.vrShowStats
+        experimentalGameSupport = fresh.experimentalGameSupport
         loading = false
         reloadGames()
         log("settings: reset to defaults")
@@ -846,6 +850,7 @@ final class LauncherSettings: ObservableObject {
             .diskImage: diskImage, .sharedFolder: sharedFolder, .sharedMount: sharedMount, .sharedLibrary: sharedLibrary,
             .steamClient: steamClient.rawValue, .followMacTime: followMacTime,
             .vulkanDriver: vulkanDriver.rawValue, .wmtr: wmtr, .wmtrLibrary: wmtrLibrary, .frameLatency: frameLatency,
+            .experimentalGameSupport: experimentalGameSupport,
             .vrEnabled: vrEnabled, .vrEyeSize: vrEyeSize, .vrCodec: vrCodec.rawValue,
             .vrPairOnRequest: vrPairOnRequest, .vrHeadsetAudio: vrHeadsetAudio, .vrRenderScale: vrRenderScale,
             .vrUpscaler: vrUpscaler.rawValue, .vrSharpness: vrSharpness, .vrForceSRGB: vrForceSRGB,
