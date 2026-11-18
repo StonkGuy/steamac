@@ -197,6 +197,20 @@ class CompatDefaultTests(unittest.TestCase):
         self.run_mode("vulkan")
         self.assertEqual(self.mapped(), {})
 
+    def test_mullion_boot_maps_dxmt_profiles_to_proton10_never_the_native_tool(self):
+        # the Mullion executor runs Mullion's x86-64 dlls (steam-gfx-path puts them into Proton 10.0); the native
+        # tool holds DXMT's ARM64X dlls, which that executor cannot run
+        self.write(CONFIG % "")
+        self.native_tool()
+        self.run_mode("dxmt")
+        self.assertEqual(self.mapped()["894020"]["name"], compat.NATIVE_TOOL)
+        self.run_mode("mullion")
+        self.assertEqual(self.mapped(), {a: compat.OURS for a in ("883710", "894020", "3564860")})
+        self.run_mode("dxmt")
+        self.assertEqual(self.mapped()["894020"]["name"], compat.NATIVE_TOOL)
+        self.run_mode("vulkan")
+        self.assertEqual(self.mapped(), {})
+
     def test_steam_start_snapshot_wins_over_new_host_edit(self):
         self.write(CONFIG % "")
         snapshot = Path(self.env["XDG_RUNTIME_DIR"]) / "steamac/game-profiles.json"

@@ -75,6 +75,22 @@ else
     vr_info=ABSENT
 fi
 
+# Mullion (steam-gfx-path's experimental mullion path: a DXMT fork with Direct3D 12): its PE dlls (Wine builtins:
+# d3d11, dxgi, d3d10core, d3d12, d3d12core, winemetal) and the Mullion flavour of the wmtr guest client winemetal.so,
+# staged in /work/out/mullion by host/mullion/build.sh payload. Optional: without it the layer has no Mullion path.
+MULLION=/work/out/mullion
+if [[ -f $MULLION/x86_64-unix/winemetal.so ]]; then
+    install -d "$ST/usr/lib/steamac/mullion/x86_64-windows" "$ST/usr/lib/steamac/mullion/x86_64-unix"
+    for f in d3d11 dxgi d3d10core d3d12 d3d12core winemetal; do
+        install -m 0644 "$MULLION/x86_64-windows/$f.dll" "$ST/usr/lib/steamac/mullion/x86_64-windows/$f.dll"
+    done
+    install -m 0644 "$MULLION/x86_64-unix/winemetal.so" "$ST/usr/lib/steamac/mullion/x86_64-unix/winemetal.so"
+    mullion_info=$(cd "$MULLION" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
+    echo "[layer] included Mullion from $MULLION ($mullion_info)"
+else
+    mullion_info=ABSENT
+fi
+
 AGENT=/work/cache/progress-agent/fx-progress-agent
 [[ -x $AGENT ]] || { echo "[layer] $AGENT missing: run step 25 (scripts/build-image.sh layer does)" >&2; exit 1; }
 install -m 0755 "$AGENT" "$ST/usr/lib/steamac/fx-progress-agent"
@@ -175,7 +191,7 @@ done
 # layer-release: content hash (excluding itself) so a boot log identifies the layer.
 tree_hash=$(cd "$ST" && find usr -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
 cat > "$ST/usr/lib/steamac/layer-release" <<EOF
-steamac-layer content=$tree_hash rootfs-pin=$STEAMOS_BUILDID venus=$venus_info dxmt=$dxmt_info vr=$vr_info
+steamac-layer content=$tree_hash rootfs-pin=$STEAMOS_BUILDID venus=$venus_info dxmt=$dxmt_info mullion=$mullion_info vr=$vr_info
 EOF
 
 # Directory/file modes come from the repo checkout; normalise and make root-owned.
