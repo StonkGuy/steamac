@@ -11,6 +11,10 @@ read from libraryfolders.vdf. A game installed while Steam runs is mapped at the
 next Steam start. Existing managed Proton 10 mappings migrate to native DXMT
 when it becomes available; a user's explicit tool choice is preserved.
 
+On a steamac.gfx=mullion boot (the executor library is Mullion's, a DXMT fork with Direct3D 12; its dlls are
+x86-64 only) the games whose profiles request DXMT get Proton 10.0, which steam-gfx-path fills with Mullion's
+dlls; the native tool keeps DXMT's, which that executor cannot run.
+
 Never the wildcard ("0"): Steam applies a high-priority wildcard to its tools too, mapped the FEX
 tool (3127680) to Proton, "updated" it to zero depots and emptied it, after which every x86-64 Proton
 failed ("Tool 3127680 "fex" unsupported version 0").
@@ -20,7 +24,7 @@ The games it mapped are remembered in $STATE/compat-default.json; a game whose e
 from then on. Steam is not running when this runs (ExecStartPre of steam.service); it rewrites
 config.vdf only when it exits. Every byte of config.vdf outside the entries is kept (the VDF helpers
 are mac-clock-format's).
-Usage: steam-compat-default dxmt|vulkan
+Usage: steam-compat-default dxmt|mullion|vulkan
 Test overrides: STEAMAC_STEAM_ROOT, STEAMAC_GFX_STATE.
 """
 import json
@@ -261,7 +265,7 @@ def main(mode):
     tool = NATIVE_TOOL if native_check is not None and native_check.returncode == 0 else TOOL
     desired = {**OURS, "name": tool}
     if not config.exists():
-        if mode == "dxmt":
+        if mode != "vulkan":
             log("no " + str(config) + " yet; games are mapped at the next start")
         return
     text = config.read_text()
@@ -272,7 +276,7 @@ def main(mode):
             log("compatibility tool of " + appid + " changed in Steam; leaving it")
             mapped.discard(appid)
 
-    wanted = windows_games(steam) & profile_dxmt() if mode == "dxmt" else set()
+    wanted = windows_games(steam) & profile_dxmt() if mode != "vulkan" else set()
     removed = sorted(mapped - wanted)
     for appid in removed:
         text = set_mapping(text, appid, None)
@@ -298,8 +302,8 @@ def main(mode):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or sys.argv[1] not in ("dxmt", "vulkan"):
-        print("usage: steam-compat-default dxmt|vulkan", file=sys.stderr)
+    if len(sys.argv) != 2 or sys.argv[1] not in ("dxmt", "mullion", "vulkan"):
+        print("usage: steam-compat-default dxmt|mullion|vulkan", file=sys.stderr)
         sys.exit(64)
     try:
         main(sys.argv[1])

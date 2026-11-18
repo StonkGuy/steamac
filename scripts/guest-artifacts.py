@@ -131,6 +131,11 @@ def input_digest(kind):
             hash_tree(digest, dxmt, "work/out/dxmt")
         else:
             add_record(digest, "work/out/dxmt", "ABSENT")
+        # The same for the experimental Mullion payload; only bound when present, so layers built without it keep
+        # their receipts.
+        mullion = OUT / "mullion"
+        if mullion.exists() or mullion.is_symlink():
+            hash_tree(digest, mullion, "work/out/mullion")
     if kind == "mesa":
         for architecture in ("mesa-aarch64", "mesa-x86"):
             check(architecture)
