@@ -1,0 +1,9 @@
+{
+  "driver_svrtest": {
+    "enable": true,
+    "waist_drop_m": 0.7
+  },
+  "trackers": {
+    "/devices/svrtest/svrtest-unlabelled": "TrackerRole_Chest"
+  }
+}

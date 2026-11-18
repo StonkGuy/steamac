@@ -10,11 +10,20 @@
 
 #include "openvr.h"
 #include "steamac_vr_guest.h"
+#include "trackers.h"
 #include "transport.h"
 
 namespace svr {
 // OpenVR tracked device indices this runtime exposes
-enum : vr::TrackedDeviceIndex_t { kHmd = 0, kLeft = 1, kRight = 2, kDeviceCount = 3 };
+// (kDeviceCount built-in devices from the host link, then one index per tracked-device table slot)
+enum : vr::TrackedDeviceIndex_t {
+  kHmd = 0,
+  kLeft = 1,
+  kRight = 2,
+  kDeviceCount = 3,
+  kTrackerBase = kDeviceCount,
+  kMaxDevices = kTrackerBase + SVR_TRK_MAX
+};
 
 int64_t now_ns();  // guest CLOCK_MONOTONIC
 
@@ -46,6 +55,12 @@ class Runtime {
   vr::TrackedDevicePose_t device_pose(vr::TrackedDeviceIndex_t i, float seconds_from_now) const;
   vr::TrackedDevicePose_t device_frame_pose(vr::TrackedDeviceIndex_t i) const;
   bool device_connected(vr::TrackedDeviceIndex_t i) const;
+  // OpenVR pose of any device at guest time t
+  vr::TrackedDevicePose_t device_pose_at(vr::TrackedDeviceIndex_t i, int64_t guest_t) const;
+  // a tracked-device table device behind index i (kTrackerBase..), present (connected or not); false otherwise
+  bool tracker(vr::TrackedDeviceIndex_t i, svr_trk_device *out) const;
+  // no host link: poses come from the scene app's mirror in the tracked-device table (companion apps)
+  bool secondary() const { return secondary_; }
   int64_t last_vsync_guest() const;
   uint32_t frames_presented() const { return frames_presented_; }
 
@@ -53,7 +68,8 @@ class Runtime {
   // whether e.g. the head pose the app reads is valid and moving). Relaxed counters: no cost beyond an increment.
   struct PoseStats {
     std::atomic<uint32_t> wait{0}, wait_fail{0}, last_poses{0}, last_pose_index{0}, abs_pose{0}, abs_seated{0},
-        pose_action{0}, pose_action_inactive{0}, connected_query{0}, connected_false_hmd{0};
+        pose_action{0}, pose_action_inactive{0}, connected_query{0}, connected_false_hmd{0}, tracker_class{0},
+        tracker_props{0};
   };
   PoseStats &pose_stats() { return pose_stats_; }
   void note_render_head(const vr::TrackedDevicePose_t &p);
@@ -81,6 +97,10 @@ class Runtime {
  private:
   Runtime() = default;
   bool fetch(svr_frame_rep *out);
+  bool fetch_mirror(svr_frame_rep *out);
+  bool init_secondary_locked();
+  void update_latest_locked(const svr_frame_rep &rep);
+  void refresh_trackers_locked(int64_t now, const svr_frame_rep *rep);
   void flush_submit_locked();
   int64_t host_to_guest(int64_t host_t) const { return host_t + clock_offset_; }
 
@@ -107,6 +127,12 @@ class Runtime {
   uint32_t logged_head_flags_ = ~0u;
   bool pending_valid_ = false;
   std::deque<vr::VREvent_t> events_;
-  bool connected_[kDeviceCount] = {};
+  bool connected_[kMaxDevices] = {};
+  // tracked-device table: opened (created by a scene app) lazily, retried at most once a second while absent
+  TrackerTable trk_;
+  TrackerView trk_view_;
+  int64_t trk_retry_ = 0;
+  bool secondary_ = false;
+  uint64_t secondary_frame_ = 0;
 };
 }  // namespace svr

@@ -28,10 +28,7 @@ class Compositor : public StubIVRCompositor {
     // "game" poses are predicted one frame further (SteamVR semantics); same snapshot, extrapolated
     if (game) {
       int64_t t = rt.frame_display_guest() + (int64_t)(1e9f / rt.refresh_hz());
-      for (uint32_t i = 0; i < ngame; i++) {
-        int d = i == kHmd ? SVR_DEV_HEAD : i == kLeft ? SVR_DEV_LEFT_GRIP : i == kRight ? SVR_DEV_RIGHT_GRIP : -1;
-        game[i] = d < 0 ? to_openvr(svr_pose{}, false) : to_openvr(rt.pose_at(d, t), rt.device_connected(i));
-      }
+      for (uint32_t i = 0; i < ngame; i++) game[i] = rt.device_pose_at(i, t);
     }
     return VRCompositorError_None;
   }

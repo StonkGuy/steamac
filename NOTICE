@@ -45,7 +45,9 @@ BSD-3-Clause (LICENSES/BSD-3-Clause.txt) - wmtr/, the DXMT remoting layer:
 
 BSD-3-Clause (LICENSES/BSD-3-Clause.txt, guest/vr/third_party/openvr/LICENSE) - Valve's OpenVR API header,
 compiled into the guest OpenVR runtime (guest/vr, Apache-2.0 otherwise):
-  guest/vr/third_party/openvr/openvr.h   Copyright (c) 2015, Valve Corporation
+  guest/vr/third_party/openvr/openvr.h          Copyright (c) 2015, Valve Corporation
+  guest/vr/third_party/openvr/openvr_driver.h   Copyright (c) 2015, Valve Corporation (driver API, compiled into
+                                                svr-driverhost and the test driver; OpenVR v2.15.6, unmodified)
 
 LGPL-2.1-or-later (LICENSES/LGPL-2.1-only.txt) - patches for Proton's vrclient_x64 (Wine code):
   guest/proton-vrclient/patches/

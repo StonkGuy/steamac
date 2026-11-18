@@ -1,0 +1,22 @@
+name: VR runtime tests
+
+# The guest OpenVR runtime's unit, transport, legacy, end-to-end and tracker tests (guest/vr, make check) in the
+# Steam Runtime sniper SDK container, without the rest of the release build.
+
+on:
+  push:
+    branches: [ vr-trackers, 'ci/vr-*' ]
+    paths: [ 'guest/vr/**', '.github/workflows/vr-tests.yml' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vr:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+    - uses: actions/checkout@v4
+    - name: make check in the sniper SDK
+      run: guest/vr/build-sniper.sh build-sniper

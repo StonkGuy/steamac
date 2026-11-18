@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# steamac-vdf: read or change one value in a Steam text VDF file (config.vdf, localconfig.vdf) while Steam is not
+# running. Keys are matched without regard to case, as Steam does; the file is rewritten in Steam's own layout
+# (tabs, quoted keys and values), every other key kept in order.
+#   steamac-vdf get FILE KEY/KEY/...           prints the value; exit 1 if absent
+#   steamac-vdf set FILE KEY/KEY/... VALUE     creates missing sections
+#   steamac-vdf del FILE KEY/KEY/...           removes the key or section (and parents left empty by it: no)
+import os
+import sys
+
+
+def tokens(text):
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in " \t\r\n":
+            i += 1
+        elif c == "/" and text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                i += 1
+        elif c in "{}":
+            yield c
+            i += 1
+        elif c == '"':
+            j, out = i + 1, []
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n:
+                    out.append({"n": "\n", "t": "\t", "\\": "\\", '"': '"'}.get(text[j + 1], text[j + 1]))
+                    j += 2
+                else:
+                    out.append(text[j])
+                    j += 1
+            yield ("s", "".join(out))
+            i = j + 1
+        else:  # unquoted token (conditionals like [$WIN32] are not used in these files)
+            j = i
+            while j < n and text[j] not in ' \t\r\n{}"':
+                j += 1
+            yield ("s", text[i:j])
+            i = j
+
+
+def parse(text):
+    root, stack, key = [], [], None
+    cur = root
+    for t in tokens(text):
+        if t == "{":
+            sub = []
+            cur.append([key, sub])
+            stack.append(cur)
+            cur, key = sub, None
+        elif t == "}":
+            cur = stack.pop()
+        elif key is None:
+            key = t[1]
+        else:
+            cur.append([key, t[1]])
+            key = None
+    return root
+
+
+def esc(s):
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def dump(node, depth=0, out=None):
+    out = [] if out is None else out
+    pad = "\t" * depth
+    for k, v in node:
+        if isinstance(v, list):
+            out.append(f'{pad}"{esc(k)}"\n{pad}{{\n')
+            dump(v, depth + 1, out)
+            out.append(f"{pad}}}\n")
+        else:
+            out.append(f'{pad}"{esc(k)}"\t\t"{esc(v)}"\n')
+    return "".join(out)
+
+
+def find(node, key):
+    for e in node:
+        if e[0].lower() == key.lower():
+            return e
+    return None
+
+
+def main(argv):
+    if len(argv) < 4 or argv[1] not in ("get", "set", "del"):
+        print(__doc__ if __doc__ else "usage: steamac-vdf get|set|del FILE PATH [VALUE]", file=sys.stderr)
+        return 2
+    op, path, keys = argv[1], argv[2], [k for k in argv[3].split("/") if k]
+    try:
+        with open(path, encoding="utf-8") as f:
+            root = parse(f.read())
+    except FileNotFoundError:
+        if op != "set":
+            return 1
+        root = []
+    node = root
+    for k in keys[:-1]:
+        e = find(node, k)
+        if e is None or not isinstance(e[1], list):
+            if op != "set":
+                return 1
+            e = [k, []]
+            node.append(e)
+        node = e[1]
+    e = find(node, keys[-1])
+    if op == "get":
+        if e is None or isinstance(e[1], list):
+            return 1
+        print(e[1])
+        return 0
+    if op == "set":
+        if e is None:
+            node.append([keys[-1], argv[4]])
+        else:
+            e[1] = argv[4]
+    else:
+        if e is None:
+            return 0
+        node.remove(e)
+    tmp = path + ".steamac-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(dump(root))
+    os.replace(tmp, path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

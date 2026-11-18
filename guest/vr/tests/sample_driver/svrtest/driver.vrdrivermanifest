@@ -1,0 +1,7 @@
+{
+  "alwaysActivate": true,
+  "name": "svrtest",
+  "directory": "",
+  "resourceOnly": false,
+  "hmd_presence": []
+}

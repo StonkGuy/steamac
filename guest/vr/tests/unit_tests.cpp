@@ -4,6 +4,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #include <map>
 #include <string>
@@ -12,6 +14,7 @@
 #include "interfaces.h"
 #include "json.h"
 #include "skeleton.h"
+#include "trackers.h"
 #include "vrmath.h"
 
 using namespace svr;
@@ -469,7 +472,89 @@ static void test_overlay() {
   CHECK(ov->CreateOverlay("test.a", "back", &h) == vr::VROverlayError_None && ov->DestroyOverlay(h) == vr::VROverlayError_None);
 }
 
+// the tracked-device table: roles, slot claim/takeover/release, seqlocked reads, the reader's clock-free view
+static void test_trackers() {
+  CHECK(tracker_role_from_name("waist") == SVR_TRK_ROLE_WAIST);
+  CHECK(tracker_role_from_name("TrackerRole_LeftFoot") == SVR_TRK_ROLE_LEFT_FOOT);
+  CHECK(tracker_role_from_name("vive_tracker_right_elbow") == SVR_TRK_ROLE_RIGHT_ELBOW);
+  CHECK(tracker_role_from_name("trackerrole_chest") == SVR_TRK_ROLE_CHEST);
+  CHECK(tracker_role_from_name("vive_tracker") == SVR_TRK_ROLE_NONE && tracker_role_from_name(nullptr) == 0);
+  for (uint32_t r = 1; r < SVR_TRK_ROLE_COUNT; r++) {
+    CHECK(tracker_role_from_name(tracker_role_name(r)) == r);
+    CHECK(tracker_role_from_name(tracker_role_setting(r)) == r);
+  }
+  char path[] = "/tmp/svr-trk-unitXXXXXX";
+  int fd = mkstemp(path);
+  CHECK(fd >= 0);
+  close(fd);  // an empty file: the first opener initialises it
+  TrackerTable w, r;
+  CHECK(w.open(path, true) && r.open(path, false));
+  if (!w.is_open() || !r.is_open()) return;
+  CHECK(w.raw()->magic == SVR_TRK_MAGIC && r.raw()->size == sizeof(svr_trk_table));
+  TrackerView v;
+  int64_t t = 1000000000000LL;
+  CHECK(v.refresh(r, t) == 0);
+
+  svr_trk_device d{};
+  strcpy(d.serial, "unit-a");
+  d.role = SVR_TRK_ROLE_WAIST;
+  int a = w.claim(d);
+  CHECK(a == 0);
+  svr_trk_device got;
+  CHECK(r.read_device(a, &got) && !strcmp(got.serial, "unit-a") && got.device_class == 3 && got.role == SVR_TRK_ROLE_WAIST);
+  // first sight is not a connection (a crashed source's slot never moves); the next write connects it
+  CHECK(v.refresh(r, t) == 0 && v.dev[0].present && !v.dev[0].connected);
+  svr_pose p{};
+  p.orientation[3] = 1, p.position[1] = 1.0f, p.flags = SVR_POSE_VALID;
+  w.update(a, p, 0);
+  CHECK(v.refresh(r, t + 1000) == 1u && v.dev[0].connected && near(v.dev[0].d.pose.position[1], 1.0f));
+  // stays connected while written, goes stale SVR_TRK_STALE_NS after the last change
+  CHECK(v.refresh(r, t + SVR_TRK_STALE_NS / 2) == 0);
+  CHECK(v.refresh(r, t + 1000 + SVR_TRK_STALE_NS) == 1u && !v.dev[0].connected);
+  w.update(a, p, 0);
+  CHECK(v.refresh(r, t + 2 * SVR_TRK_STALE_NS) == 1u && v.dev[0].connected);
+  // a reserved slot is invisible; a takeover by serial keeps the slot and replaces the strings
+  svr_trk_device b{};
+  strcpy(b.serial, "unit-b");
+  int bs = w.claim(b, false);
+  CHECK(bs == 1 && !r.read_device(bs, &got));
+  strcpy(b.controller_type, "vive_tracker_left_foot");
+  CHECK(w.claim(b) == bs && r.read_device(bs, &got) && !strcmp(got.controller_type, "vive_tracker_left_foot"));
+  // full table
+  int n = 2;
+  for (; n < SVR_TRK_MAX; n++) {
+    svr_trk_device x{};
+    snprintf(x.serial, sizeof x.serial, "unit-%d", n);
+    CHECK(w.claim(x) == n);
+  }
+  svr_trk_device extra{};
+  strcpy(extra.serial, "unit-extra");
+  CHECK(w.claim(extra) == -1);
+  svr_trk_device noserial{};
+  CHECK(w.claim(noserial) == -1);
+  // release: gone at once (no stale window)
+  w.release(a);
+  CHECK(!r.read_device(a, &got) && (v.refresh(r, t + 2 * SVR_TRK_STALE_NS + 1) & 1u) && !v.dev[0].present);
+  CHECK(w.claim(extra) == 0);
+  // mirror: written by the scene app, live only while its sequence moves
+  svr_trk_mirror m{}, mo{};
+  m.connected = 1, m.refresh_hz = 72;
+  m.pose[SVR_DEV_HEAD].position[1] = 1.6f;
+  CHECK(r.read_mirror(&mo) == 0);
+  w.write_mirror(m);
+  CHECK(r.read_mirror(&mo) != 0 && near(mo.pose[SVR_DEV_HEAD].position[1], 1.6f) && near(mo.refresh_hz, 72));
+  CHECK(!v.mirror_live(r, t, &mo));  // first sight
+  w.write_mirror(m);
+  CHECK(v.mirror_live(r, t + 10, &mo) && !v.mirror_live(r, t + 10 + SVR_TRK_STALE_NS, &mo));
+  // an incompatible file is refused
+  w.raw()->version = 99;
+  TrackerTable bad;
+  CHECK(!bad.open(path, false));
+  unlink(path);
+}
+
 int main(int argc, char **argv) {
+  test_trackers();
   test_title_bindings(argc > 1 ? argv[1] : "tests/data/vrchat");
   test_skeleton();
   test_overlay();

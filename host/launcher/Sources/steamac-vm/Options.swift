@@ -142,6 +142,8 @@ struct Options {
     var vrHeadsetAudio = true
     /// Settings > VR "Game": Steam app id offered in the headset's app list (0 = none).
     var vrGameAppID = LauncherSettings.vrDefaultGameAppID
+    /// Settings > VR "Tracker app": Steam app id the guest starts with VR games, its SteamVR driver hosted (0 = none).
+    var vrTrackerAppID = 0
     /// Settings > VR quality / codec / stream options (machine-side; see LauncherSettings).
     var vrRenderScale = 1.0
     var vrUpscaler = LauncherSettings.VRUpscaler.metalfx
@@ -665,6 +667,12 @@ struct Options {
         return " \(key)=\(v)"
     }
 
+    /// Settings > VR "Tracker app" -> kernel cmdline key `steamac.vr_companion=<app id>` while VR is on (the guest's
+    /// steam-vr-companion); nothing for none, so the guest puts back what it set.
+    static func vrTrackerArg(vr: Bool, appID: Int) -> (key: String, value: String)? {
+        vr && appID > 0 ? ("steamac.vr_companion", String(appID)) : nil
+    }
+
     var isSelftest: Bool {
         selftestDisplay || selftestOverlay || selftestStall || selftestPill || selftestSettings || selftestProvision || selftestRemotePlay
             || selftestMetalCache || selftestPointer || selftestGameLayers || selftestVR || selftestL10n || selftestStream
@@ -708,6 +716,9 @@ struct Options {
             add("steamac.share_library", o.share != nil && o.shareLibrary ? "1" : nil)
             let fex = Options.experimentalGameSupportArg(o.experimentalGameSupport)
             add(fex.key, fex.value)
+            if let a = Options.vrTrackerArg(vr: o.vr && VRHost.unavailableReason(o) == nil, appID: o.vrTrackerAppID) {
+                add(a.key, a.value)
+            }
             if o.macTime {
                 add("steamac.tz", MacTime.zone)
                 add("steamac.clock24", MacTime.clock24.map { $0 ? "1" : "0" })
@@ -781,6 +792,7 @@ struct Options {
         if given("--no-vr-audio") { ov[.vrHeadsetAudio] = "--no-vr-audio" } else { vrHeadsetAudio = s.vrHeadsetAudio }
         vrGameAppID = s.vrGameAppID
         vrGameName = s.gameName(vrGameAppID)
+        vrTrackerAppID = s.vrTrackerAppID
         vrRenderScale = s.vrRenderScale; vrUpscaler = s.vrUpscaler; vrSharpness = s.vrSharpness; vrForceSRGB = s.vrForceSRGB
         vrKeyframeInterval = s.vrKeyframeInterval; vrTCPOnly = s.vrTCPOnly; vrVirtualDesktop = s.vrVirtualDesktop
         if given("--experimental-game-support") || given("--no-experimental-game-support") {
